@@ -34,13 +34,16 @@ use axum::extract::Path;
 use axum::extract::Query;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Map, Value};
 
 use strike_core::admin_writes::{
-    ban_reason, combined_tx_hash, js_number_string, parse_request_id, plan_payout,
-    respond_supabase_error, sanitize_error_text, verify_withdrawal_intent, wipe_audit_rows,
+    aggregate_withdrawal_stats, ban_reason, combined_tx_hash, danger_zone_json,
+    frequency_review_candidates, frequency_user_json, js_number_string, parse_request_id, plan_payout,
+    respond_supabase_error, sanitize_error_text, scans_json, sort_frequency_users,
+    suspicious_user_json, verify_withdrawal_intent, win_streak_hits, wipe_audit_rows,
+    AUDIT_SCAN_CAP, BET_SCAN_CAP, PENDING_SCAN_CAP, SCAN_PAGE,
 };
 use strike_core::admin_writes_extra::{access_code_count, generate_access_codes};
 use strike_core::address::{canonical, search_variants};
@@ -76,6 +79,7 @@ const SERVICE_ROLE_MISSING: &str = "SUPABASE_SERVICE_KEY is not set on this serv
 pub fn routes() -> Router {
     Router::new()
         .route("/api/admin/access-codes", post(access_codes_generate))
+        .route("/api/admin/danger-zone", get(danger_zone))
         .route("/api/admin/banned-wallets", post(ban_add).delete(ban_remove))
         .route("/api/admin/unban-wallet", post(unban_wallet))
         .route("/api/admin/users/status", post(user_status))
@@ -145,7 +149,10 @@ async fn access_codes_generate(headers: HeaderMap, raw: Bytes) -> Response {
     match generate_codes_run(&raw).await {
         Ok(response) => response,
         // Statement failures land on the same hinted 500 the TS catch emits.
-        Err(err) => hinted_catch_500(&err.to_string(), "Internal server error"),
+        Err(err) => {
+            tracing::error!("[admin/access-codes] {err}");
+            hinted_catch_500(&err.to_string(), "Internal server error")
+        }
     }
 }
 
@@ -160,7 +167,7 @@ async fn generate_codes_run(raw: &Bytes) -> ApiResult<Response> {
 
     let owned: Vec<Value> = codes.iter().map(|c| Value::String(c.clone())).collect();
     let binds = text_binds(&owned);
-    let values: Vec<String> = (1..=codes.len()).map(|i| format!("CAST(${i} AS text)")).collect();
+    let values: Vec<String> = (1..=codes.len()).map(|i| format!("(CAST(${i} AS text))")).collect();
     let rows = sql::fetch(
         &format!(
             "INSERT INTO access_codes (code) VALUES {} RETURNING {ACCESS_CODE_COLUMNS}",
@@ -484,7 +491,9 @@ async fn accept_withdrawal(headers: HeaderMap, Path(id): Path<String>) -> Respon
 
 async fn accept_run(id: i64) -> ApiResult<Response> {
     let id_bind = Value::from(id);
-    let req = sql::fetch_one(
+    // The TS answers a missing request with a returned 404 (not a throw), so
+    // the outer catch's 500 never sees it.
+    let Some(req) = sql::fetch_one(
         &format!(
             "SELECT {ACCEPT_REQUEST_COLUMNS} FROM withdrawal_requests \
              WHERE id = CAST($1 AS int8) LIMIT 1"
@@ -492,7 +501,9 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
         &[("int8", &id_bind)],
     )
     .await?
-    .ok_or_else(|| ApiError::json(StatusCode::NOT_FOUND, "Request not found"))?;
+    else {
+        return Ok(error(StatusCode::NOT_FOUND, "Request not found"));
+    };
 
     if row_field(&req, "status").as_str() != Some("pending") {
         return Ok(error(
@@ -726,7 +737,7 @@ async fn reject_withdrawal(headers: HeaderMap, Path(id): Path<String>) -> Respon
 
 async fn reject_run(id: i64) -> ApiResult<Response> {
     let id_bind = Value::from(id);
-    let req = sql::fetch_one(
+    let Some(req) = sql::fetch_one(
         &format!(
             "SELECT {REJECT_REQUEST_COLUMNS} FROM withdrawal_requests \
              WHERE id = CAST($1 AS int8) LIMIT 1"
@@ -734,7 +745,9 @@ async fn reject_run(id: i64) -> ApiResult<Response> {
         &[("int8", &id_bind)],
     )
     .await?
-    .ok_or_else(|| ApiError::json(StatusCode::NOT_FOUND, "Request not found"))?;
+    else {
+        return Ok(error(StatusCode::NOT_FOUND, "Request not found"));
+    };
 
     if row_field(&req, "status").as_str() != Some("pending") {
         return Ok(error(
@@ -761,4 +774,163 @@ async fn reject_run(id: i64) -> ApiResult<Response> {
     .await?;
 
     Ok(axum::Json(json!({ "success": true })).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/danger-zone — bounded scans + the core detection engine
+// ---------------------------------------------------------------------------
+
+/// `scanPages()`: page a bounded read 1000 rows at a time and report whether
+/// the hard cap was reached, so the dashboard can warn about under-reporting
+/// instead of silently truncating at PostgREST's old 1000-row default.
+async fn scan_pages(
+    columns: &str,
+    table: &str,
+    where_sql: &str,
+    fixed_binds: &[(&str, &Value)],
+    order_col: &str,
+    cap: i64,
+) -> ApiResult<(Vec<Value>, bool)> {
+    let mut rows: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    let mut from = 0i64;
+    loop {
+        let page_bind = Value::from(SCAN_PAGE);
+        let offset_bind = Value::from(from);
+        let mut binds: Vec<(&str, &Value)> = fixed_binds.to_vec();
+        binds.push(("int8", &page_bind));
+        binds.push(("int8", &offset_bind));
+        let statement = format!(
+            "SELECT {columns} FROM {table} {where_sql} \
+             ORDER BY {order_col} DESC LIMIT CAST(${} AS int8) OFFSET CAST(${} AS int8)",
+            fixed_binds.len() + 1,
+            fixed_binds.len() + 2
+        );
+        let chunk = sql::fetch(&statement, &binds).await?;
+        let read = chunk.len() as i64;
+        rows.extend(chunk);
+        if read < SCAN_PAGE {
+            break;
+        }
+        from += SCAN_PAGE;
+        if from >= cap {
+            truncated = rows.len() as i64 >= cap;
+            break;
+        }
+    }
+    Ok((rows, truncated))
+}
+
+fn number_or_zero(value: Option<&Value>) -> f64 {
+    match value {
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(Value::String(s)) => s.trim().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+async fn danger_zone_run() -> ApiResult<Response> {
+    // 1. Win-streak detection over the (non-demo) bet scan.
+    let (bet_rows, bets_truncated) =
+        scan_pages("id, wallet_address, won, created_at", "bet_history", "", &[], "created_at", BET_SCAN_CAP)
+            .await?;
+    let mut suspicious: Vec<Value> = Vec::new();
+    for (address, max_streak, latest) in win_streak_hits(&bet_rows) {
+        let key = Value::String(address);
+        // The TS looks up the *stored* spelling verbatim; a failed lookup logs
+        // and continues, an empty result contributes nothing.
+        match sql::fetch(
+            "SELECT id, user_address, currency, balance, status, user_tier, updated_at, created_at \
+             FROM user_balances WHERE user_address = CAST($1 AS text)",
+            &[("text", &key)],
+        )
+        .await
+        {
+            Ok(rows) => {
+                if let Some(row) = rows.first() {
+                    suspicious.push(suspicious_user_json(row, max_streak, latest));
+                }
+            }
+            Err(err) => tracing::error!("[admin/danger-zone] user_balances lookup failed: {err}"),
+        }
+    }
+
+    // 2. High-frequency withdrawal detection over the audit + pending scans.
+    let withdrawal = Value::String("withdrawal".to_string());
+    let (audit_rows, audit_truncated) = scan_pages(
+        "user_address, currency, amount, created_at",
+        "balance_audit_log",
+        "WHERE operation_type = CAST($1 AS text)",
+        &[("text", &withdrawal)],
+        "created_at",
+        AUDIT_SCAN_CAP,
+    )
+    .await?;
+    let pending = Value::String("pending".to_string());
+    let (pending_rows, pending_truncated) = scan_pages(
+        "user_address, currency, amount, decided_by, requested_at, id, signed_at",
+        "withdrawal_requests",
+        "WHERE status = CAST($1 AS text)",
+        &[("text", &pending)],
+        "requested_at",
+        PENDING_SCAN_CAP,
+    )
+    .await?;
+
+    let candidates =
+        frequency_review_candidates(aggregate_withdrawal_stats(&audit_rows, &pending_rows), &config().withdrawal_frequency_exempt);
+    let mut users: Vec<Value> = Vec::new();
+    for stats in &candidates {
+        let variants: Vec<Value> =
+            search_variants(&stats.user_address).into_iter().map(Value::String).collect();
+        let variant_refs: Vec<(&str, &Value)> = variants.iter().map(|v| ("text", v)).collect();
+        // The TS ignores failures on both enrichment reads (data becomes null
+        // and `?? []` turns that into an empty list).
+        let deposit_op = Value::String("deposit".to_string());
+        let mut deposit_binds: Vec<(&str, &Value)> = vec![("text", &deposit_op)];
+        deposit_binds.extend(variant_refs.iter().copied());
+        let deposits = sql::fetch(
+            &format!(
+                "SELECT amount, currency FROM balance_audit_log \
+                 WHERE operation_type = CAST($1 AS text) AND user_address IN ({})",
+                sql::in_list(2, "text", variant_refs.len())
+            ),
+            &deposit_binds,
+        )
+        .await
+        .unwrap_or_default();
+        let balances = sql::fetch(
+            &format!(
+                "SELECT currency, balance FROM user_balances WHERE user_address IN ({})",
+                sql::in_list(1, "text", variant_refs.len())
+            ),
+            &variant_refs,
+        )
+        .await
+        .unwrap_or_default();
+        let total_deposited = deposits.iter().map(|r| number_or_zero(r.get("amount"))).sum();
+        let total_available = balances.iter().map(|r| number_or_zero(r.get("balance"))).sum();
+        users.push(frequency_user_json(stats, total_deposited, total_available));
+    }
+
+    let scans = scans_json(bets_truncated, audit_truncated, pending_truncated);
+    Ok(axum::Json(danger_zone_json(
+        suspicious,
+        sort_frequency_users(users),
+        scans,
+    ))
+    .into_response())
+}
+
+async fn danger_zone(headers: HeaderMap) -> Response {
+    if let Err(deny) = http::require_admin(&headers) {
+        return deny.into_response();
+    }
+    match danger_zone_run().await {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::error!("[admin/danger-zone] {err}");
+            catch_500(&err, "Failed to load danger zone")
+        }
+    }
 }

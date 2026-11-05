@@ -33,7 +33,7 @@ const AUDIT_FIELDS: &str = "operation_type, amount, currency, transaction_hash, 
      idempotency_key, end_time, settlement_token, created_at";
 
 pub fn routes() -> Router {
-    Router::new().route("/api/bets/:id", get(handle))
+    Router::new().route("/api/bets/{id}", get(handle))
 }
 
 async fn handle(

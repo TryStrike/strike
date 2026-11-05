@@ -6,8 +6,6 @@
 //! writes the matching `CAST($n AS <type>)` in the statement, so the declared
 //! parameter type and the cast can never disagree silently.
 
-use serde_json::Value;
-
 use strike_core::db;
 
 pub use db::{execute, fetch, fetch_one, fetch_scalar};
@@ -36,6 +34,7 @@ pub fn in_list(start: usize, type_name: &str, count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn placeholder_numbering_is_read_from_the_statement() {

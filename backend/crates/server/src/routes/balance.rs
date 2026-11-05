@@ -21,7 +21,7 @@ use crate::sql;
 pub fn routes() -> Router {
     Router::new()
         .route("/api/balance/session", post(mint_session))
-        .route("/api/balance/:address", get(read_balance))
+        .route("/api/balance/{address}", get(read_balance))
 }
 
 /// `POST /api/balance/session` — mints the HttpOnly gate cookie. With no secret

@@ -84,7 +84,15 @@ pub fn rows_to_json(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
 fn decode_column(row: &sqlx::postgres::PgRow, idx: usize, type_name: &str) -> Value {
     match type_name {
         "BOOL" => get::<bool>(row, idx).map(Value::Bool).unwrap_or(Value::Null),
-        "INT2" | "INT4" | "INT8" | "OID" => get::<i64>(row, idx)
+        // sqlx decodes by exact width: INT2 needs i16, INT4 needs i32, INT8
+        // needs i64. One shared i64 attempt would silently null every int4.
+        "INT2" => get::<i16>(row, idx)
+            .map(|v| Value::Number(Number::from(v as i64)))
+            .unwrap_or(Value::Null),
+        "INT4" | "OID" => get::<i32>(row, idx)
+            .map(|v| Value::Number(Number::from(v as i64)))
+            .unwrap_or(Value::Null),
+        "INT8" => get::<i64>(row, idx)
             .map(|v| Value::Number(Number::from(v)))
             .unwrap_or(Value::Null),
         "FLOAT4" | "FLOAT8" => get::<f64>(row, idx)

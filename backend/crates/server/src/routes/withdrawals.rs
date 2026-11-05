@@ -164,18 +164,25 @@ async fn rows_for(
         "SELECT {PLAYER_COLUMNS} FROM withdrawal_requests \
          WHERE {where_clause} \
          ORDER BY requested_at DESC, id DESC \
-         LIMIT CAST(${start} AS int8) OFFSET CAST(${}) AS int8",
+         LIMIT CAST(${start} AS int8) OFFSET CAST(${} AS int8)",
         start + 1
     );
     let mut binds: Vec<(&str, &Value)> = wallet_binds.to_vec();
     binds.push(("int8", &limit_bind));
     binds.push(("int8", &offset_bind));
-    Ok(db::fetch(&statement, &binds).await?)
+    let rows = db::fetch(&statement, &binds).await.map_err(|err| {
+        tracing::error!("[withdrawals] rows sql: {statement} || err: {err}");
+        err
+    })?;
+    Ok(rows)
 }
 
 async fn count_rows(where_clause: &str, wallet_binds: &[(&str, &Value)]) -> ApiResult<i64> {
     let statement = format!("SELECT count(*) AS total FROM withdrawal_requests WHERE {where_clause}");
-    let scalar = db::fetch_scalar(&statement, wallet_binds).await?;
+    let scalar = db::fetch_scalar(&statement, wallet_binds).await.map_err(|err| {
+        tracing::error!("[withdrawals] count sql: {statement} || err: {err}");
+        err
+    })?;
     Ok(scalar.as_i64().unwrap_or(0))
 }
 

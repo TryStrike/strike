@@ -21,7 +21,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use axum::extract::Query;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -29,7 +29,9 @@ use serde_json::{Map, Number, Value};
 
 use strike_core::address::search_variants;
 use strike_core::admin_reads_a::{
-    canonical_of, json_number, load_admin_stats, load_mode_analytics, resolve_house_ledger_currency,
+    canonical_of, json_number, load_admin_stats, load_mode_analytics, load_transactions,
+    parse_list_params, resolve_house_ledger_currency, url_query_pairs, ListOptions,
+    TRANSACTION_STATUS_VALUES,
 };
 use strike_core::bets::value_to_string;
 use strike_core::error::{ApiError, ApiResult};
@@ -152,35 +154,32 @@ async fn run_mode_analytics(headers: &HeaderMap) -> ApiResult<Value> {
 // GET /api/admin/transactions
 // ---------------------------------------------------------------------------
 
-/// The recent deposit/withdrawal feed. The Next route is deliberately simple:
-/// a fixed 50-row read of the audit log, no query parameters, no paging fields.
-/// (`admin_reads_a::load_transactions` targets a richer parameterised variant
-/// that emits `{ transactions, total, limit, offset }` — it would over-report
-/// here, so this route mirrors the TypeScript directly instead.)
-async fn transactions(headers: HeaderMap) -> Response {
-    match run_transactions(&headers).await {
+/// The recent deposit/withdrawal feed: server-side filtering + paging over the
+/// audit log, exactly as `app/api/admin/transactions/route.ts` (`parseListParams`
+/// with `statusValues: ['deposit','withdrawal']`, currency/q/from/to filters,
+/// `created_at DESC, id DESC`, `{transactions,total,limit,offset}` body).
+async fn transactions(headers: HeaderMap, uri: Uri) -> Response {
+    if let Err(err) = require_admin(&headers) {
+        return err.into_response();
+    }
+    let params = url_query_pairs(uri.query().unwrap_or(""));
+    let opts = ListOptions {
+        status_values: Some(&TRANSACTION_STATUS_VALUES[..]),
+        extra_enums: &[],
+    };
+    let parsed = match parse_list_params(&params, &opts) {
+        Ok(parsed) => parsed,
+        Err(message) => return ApiError::bad_request(message).into_response(),
+    };
+    match load_transactions(&parsed).await {
         Ok(body) => axum::Json(body).into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => {
+            tracing::error!("[admin/transactions] {err}");
+            ApiError::internal("Failed to load transactions").into_response()
+        }
     }
 }
 
-async fn run_transactions(headers: &HeaderMap) -> ApiResult<Value> {
-    require_admin(headers)?;
-    // `TRANSACTION_SELECT`, verbatim, from `app/api/admin/transactions/route.ts`.
-    let rows = fetch(
-        "SELECT id, user_address, currency, operation_type, amount, balance_before, \
-         balance_after, transaction_hash, bet_id, created_at \
-         FROM balance_audit_log \
-         WHERE operation_type IN ('deposit', 'withdrawal') \
-         ORDER BY created_at DESC \
-         LIMIT 50",
-        &[],
-    )
-    .await?;
-    let mut body = Map::new();
-    body.insert("transactions".into(), Value::Array(rows));
-    Ok(Value::Object(body))
-}
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/player-ledger

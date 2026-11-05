@@ -903,15 +903,6 @@ async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
     ))
 }
 
-/// `currency` as the TS destructured it (`= 'USDC'`), before `toUpperCase`.
-fn claimed_currency(body: &Value) -> String {
-    match body.get("currency") {
-        None => "USDC".to_string(),
-        Some(Value::String(currency)) => currency.clone(),
-        Some(other) => bets::value_to_string(other),
-    }
-}
-
 /// `withdrawal_requests` rows already carrying this exact signature. A failed
 /// lookup means "no existing row": the TS read `replayRows?.[0]` and moved on.
 async fn withdrawal_by_signature(signature: &str) -> Option<Value> {
