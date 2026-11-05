@@ -1,0 +1,67 @@
+# Production deploys: Vercel Git integration (vercel.json has deploymentEnabled: true).
+# This workflow only enforces who may land commits on main — it does not call the Vercel CLI,
+# so you avoid double-deploying on every push.
+
+name: Main branch commit policy
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check-author:
+    name: Verify authorized committer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check commit author
+        run: |
+          AUTHOR_EMAIL="$(git log -1 --format='%ae')"
+          AUTHOR_NAME="$(git log -1 --format='%an')"
+          PUSHER="${{ github.actor }}"
+
+          echo "Commit by: $AUTHOR_NAME <$AUTHOR_EMAIL>"
+          echo "Pushed by: $PUSHER"
+
+          # ── Authorized committers ─────────────────────────────────────────
+          ALLOWED_EMAILS=(
+            "ayush421301@gmail.com"
+          )
+          ALLOWED_GITHUB_USER="example-user"
+          # ─────────────────────────────────────────────────────────────────
+
+          AUTHORIZED=false
+          for EMAIL in "${ALLOWED_EMAILS[@]}"; do
+            if [ "$AUTHOR_EMAIL" = "$EMAIL" ]; then
+              AUTHORIZED=true
+              break
+            fi
+          done
+
+          # GitHub merge / squash UI commits often use *@users.noreply.github.com
+          if [ "$AUTHORIZED" = "false" ] && [[ "$AUTHOR_EMAIL" == *"@users.noreply.github.com" ]]; then
+            AUTHORIZED=true
+            echo "Author is GitHub noreply (merge/UI commit); ok when pusher matches."
+          fi
+
+          if [ "$PUSHER" != "$ALLOWED_GITHUB_USER" ]; then
+            echo "::error::BLOCKED — push actor '$PUSHER' is not '$ALLOWED_GITHUB_USER'."
+            exit 1
+          fi
+
+          if [ "$AUTHORIZED" = "false" ]; then
+            echo "::error::BLOCKED — commit author '$AUTHOR_EMAIL' is not on the authorized list."
+            exit 1
+          fi
+
+          echo "✅ Authorized committer."

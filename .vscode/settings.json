@@ -1,0 +1,21 @@
+{
+    "kiroAgent.configureMCP": "Disabled",
+    "typescript.autoClosingTags": false,
+
+    "files.watcherExclude": {
+        "**/node_modules/**": true,
+        "**/.next/**": true,
+        "**/supabase/**": true,
+        "**/.turbo/**": true,
+        "**/dist/**": true,
+        "**/build/**": true
+    },
+    "search.exclude": {
+        "**/node_modules/**": true,
+        "**/.next/**": true,
+        "**/supabase/**": true,
+        "**/.turbo/**": true,
+        "**/dist/**": true,
+        "**/build/**": true
+    }
+}
