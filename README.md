@@ -4,13 +4,12 @@
 
 | | |
 |---|---|
-| **Live** | https://ethglobalmumbai.vercel.app/ |
+| **Live (Arc Testnet)** | https://ethglobalmumbai.vercel.app/ |
 | **Trade** | https://ethglobalmumbai.vercel.app/trade |
+| **Arc Studio** | https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd |
+| **Treasury (testnet)** | [`0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A`](https://explorer.testnet.arc.io/address/0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A) |
 | **Deck** | [Google Slides](https://docs.google.com/presentation/d/1gPwWqA6F5mqtdAjCApLNCzE-zLr99AYG1fzq4zLuQyY/edit?usp=sharing) |
 | **GitHub** | https://example.com/strike |
-| **Explorer** | https://explorer.arc.io |
-| **RPC** | https://rpc.mainnet.arc.io |
-| **Treasury** | Configure `NEXT_PUBLIC_TREASURY_ADDRESS` locally or in the deployment environment. |
 
 This repo settles on **Arc only**. Players deposit **USDC**, trade binary rounds against a house balance, and withdraw on-chain. Other networks are not supported.
 
