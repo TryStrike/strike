@@ -1,7 +1,7 @@
 # StrikeTreasury on Arc
 
 House treasury settling in **USDC** (`0x3600…0000`) and **EURC** (`0x89B5…D72a`),
-both 6 decimals on Arc. Built, tested (52 Foundry tests) and deployed in
+both 6 decimals on Arc. Tested with Foundry (`contracts/test`, run `forge test` from the root) and deployed in
 [Arc Studio](https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd).
 
 Arc Testnet: `0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871` (see `deployments/`).
