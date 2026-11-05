@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono, Orbitron } from "next/font/google";
+import { Geist, Geist_Mono, Orbitron, Inter_Tight, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 import { PostHogProvider } from "@/lib/posthog/PostHogProvider";
@@ -14,6 +14,10 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const interTight = Inter_Tight({ variable: "--font-inter-tight", subsets: ["latin"] });
+const instrumentSerif = Instrument_Serif({ variable: "--font-instrument-serif", subsets: ["latin"], weight: "400", style: ["normal", "italic"] });
+const jetbrainsMono = JetBrains_Mono({ variable: "--font-jetbrains-mono", subsets: ["latin"] });
+
 const orbitron = Orbitron({
   variable: "--font-orbitron",
   subsets: ["latin"],
@@ -22,9 +26,9 @@ const orbitron = Orbitron({
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://ethglobalmumbai.vercel.app'),
-  title: "Strike - Trade over 300+ Crypto, Stocks, Metals and Forex with 5s-1m time-charts",
+  title: "Strike — 5-second binary rounds, settled in USDC on Arc",
   description:
-    "The first on-chain binary options trading dapp. Powered by oracle-backed price attestations and minimal-trust settlement.",
+    "Call higher or lower on crypto, forex, stocks and metals in 5-second to 1-minute rounds. Deposit and withdraw USDC on Arc.",
   keywords: [
     "binary options",
     "crypto trading",
@@ -40,15 +44,15 @@ export const metadata: Metadata = {
     apple: "/overflowlogo.ico",
   },
   openGraph: {
-    title: "Strike — Trade over 300+ Crypto, Stocks, Metals and Forex with 5s-1m time-charts",
+    title: "Strike — 5-second binary rounds, settled in USDC on Arc",
     description:
-      "The first on-chain binary options trading dapp with oracle-backed price attestations and minimal-trust settlement.",
+      "Call higher or lower in 5-second to 1-minute rounds. Deposit and withdraw USDC on Arc.",
     images: [{ url: '/overflowlogo.png', width: 512, height: 512, alt: 'Strike' }],
   },
   twitter: {
     card: 'summary_large_image',
-    title: "Strike — Trade over 300+ Crypto, Stocks, Metals and Forex with 5s-1m time-charts",
-    description: "Trade binary options with oracle-bound resolution and minimal trust.",
+    title: "Strike — 5-second binary rounds, settled in USDC on Arc",
+    description: "Call higher or lower in 5-second rounds. USDC on Arc.",
     images: ['/overflowlogo.png'],
   },
 };
@@ -64,7 +68,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body
         suppressHydrationWarning
-        className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} antialiased bg-[#02040a] text-white h-screen overflow-hidden flex flex-col`}
+        className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} ${interTight.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable} antialiased bg-[#02040a] text-white h-screen overflow-hidden flex flex-col`}
       >
         <PostHogProvider>
           <Providers>
