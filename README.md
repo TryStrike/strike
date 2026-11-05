@@ -310,21 +310,12 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 ## Directory structure
 
 ```
-├── app/                        # Next.js App Router
-│   ├── trade/                  # Game UI
-│   ├── dashboard/              # Admin
-│   └── providers.tsx           # wagmi + Privy (Arc only)
-│
-├── components/
-│   ├── game/                   # GameBoard, LiveChart, BetControls
-│   ├── wallet/                 # ConnectKit + Privy
-│   └── balance/                # Deposit / withdraw (USDC)
-│
-├── lib/
-│   ├── arc/               # config, wagmi, client
-│   ├── store/                  # Zustand slices
-│   ├── balance/                # Client balance helpers
-│   └── supabase/               # Query client for the /api/db gateway
+├── .strike/                    # git hooks and check.sh
+├── frontend/                   # Next.js app
+│   ├── app/                    # App Router pages
+│   ├── components/             # game, wallet, balance, history, ui
+│   ├── lib/                    # store, arc config, helpers
+│   └── public/                 # market logos
 │
 ├── backend/                    # Rust API (axum + SQLite), schema.sql, deploy/
 ├── contracts/                  # StrikeTreasury.sol, deploy
@@ -393,19 +384,16 @@ Do not commit secrets. See `docs/ENVIRONMENT.md`.
 ## Local development
 
 ```bash
-npm install
-cp .env.example .env
-# Fill the Arc values and SQLITE_PATH
-npm run api:dev            # the Rust API on 127.0.0.1:8080
-npm run dev                # in another shell
+cp .env.example .env.local        # one env file at the root for everything
+(cd frontend && npm install)      # also wires the git hooks in .strike
+cargo run --manifest-path backend/Cargo.toml -p server   # Rust API on 127.0.0.1:8080
+cd frontend && npm run dev        # in another shell
 ```
 
 App: http://localhost:3000. Next proxies `/api/*` to the Rust service, so both must run. `next dev` assumes port 8080; `next build` requires `BACKEND_URL`.
 
 ```bash
-BACKEND_URL=http://127.0.0.1:8080 npm run build
-npm run api:test
-npm run api:check          # fmt, clippy, build
+.strike/check.sh all      # fmt, clippy, tests, typecheck, next build
 ```
 
 Running it in production: `docs/OPERATIONS.md`.
@@ -417,7 +405,7 @@ Running it in production: `docs/OPERATIONS.md`.
 ## Contracts
 
 ```bash
-ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... node contracts/deploy.mjs
+cd contracts && npm install && ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... npm run deploy
 ```
 
 ---

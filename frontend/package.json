@@ -3,15 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "prepare": "git config core.hooksPath .strike 2>/dev/null || true",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "api:dev": "BIND_ADDR=${BIND_ADDR:-127.0.0.1:8080} cargo run --manifest-path backend/Cargo.toml -p server",
-    "api:build": "cargo build --release --locked --manifest-path backend/Cargo.toml -p server",
-    "api:start": "backend/target/release/strike-backend",
-    "api:test": "cargo test --manifest-path backend/Cargo.toml --workspace",
-    "api:check": "cargo fmt --manifest-path backend/Cargo.toml --all -- --check && cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings && cargo build --locked --manifest-path backend/Cargo.toml --workspace"
+    "lint": "eslint"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
@@ -38,7 +34,6 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.4",
-    "solc": "^0.8.38",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

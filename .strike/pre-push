@@ -1,0 +1,27 @@
+#!/bin/bash
+# pre-push hook: runs .strike/check.sh on what is being pushed.
+# GitHub Actions only deploys, so this is the only gate before prod.
+set -euo pipefail
+
+# Git hooks do not inherit an interactive shell's PATH.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+cd "$(git rev-parse --show-toplevel)"
+
+zero=0000000000000000000000000000000000000000
+changed=""
+while read -r _ local_sha _ remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    changed+=$(git diff --name-only "$(git merge-base "$local_sha" "$1/main")" "$local_sha")$'\n'
+  else
+    changed+=$(git diff --name-only "$remote_sha" "$local_sha")$'\n'
+  fi
+done
+
+if [ -z "${changed//$'\n'/}" ]; then
+  exit 0
+fi
+
+if grep -q '^backend/' <<<"$changed"; then .strike/check.sh backend; fi
+if grep -q '^frontend/' <<<"$changed"; then .strike/check.sh frontend; fi
+if grep -q '^\.strike/\|^\.github/\|^backend/deploy/' <<<"$changed"; then .strike/check.sh deploy; fi

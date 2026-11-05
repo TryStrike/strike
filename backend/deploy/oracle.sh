@@ -85,13 +85,14 @@ if ! swapon --show | grep -q swapfile; then
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
 
-cd ~/strike.new
+cd ~/strike.new/frontend
 npm ci --no-audit --no-fund
 
 # Next bakes rewrites() into .next/routes-manifest.json at build time, so the
 # proxy target must be in the environment for the build, not just at runtime.
 export BACKEND_URL
 npm run build
+cd ~/strike.new
 
 echo "→ building the Rust backend (release)"
 cargo build --release --locked --manifest-path backend/Cargo.toml -p server
@@ -126,7 +127,7 @@ Wants=strike-backend.service
 
 [Service]
 User=$USER
-WorkingDirectory=$HOME/strike
+WorkingDirectory=$HOME/strike/frontend
 Environment=NODE_ENV=production PORT=3000
 Environment=BACKEND_URL=http://127.0.0.1:8080
 # Loopback only: a client reaching Next directly could write its own

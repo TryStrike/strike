@@ -1,11 +1,15 @@
 import type { NextConfig } from "next";
+import { loadEnvConfig } from "@next/env";
 import { PHASE_PRODUCTION_BUILD } from "next/constants";
+
+// One .env.local at the repo root drives the frontend, the Rust backend and contracts/deploy.mjs.
+loadEnvConfig(`${__dirname}/..`);
 
 /**
  * The Rust service owns every `/api/*` path; there is no other backend. Next bakes
  * `rewrites()` into `.next/routes-manifest.json` during `next build`, and
  * `next start` does not re-read this file, so `BACKEND_URL` has to be set for the
- * build. `next dev` falls back to where `npm run api:dev` listens.
+ * build. `next dev` falls back to where `cargo run -p server` listens.
  *
  * The proxy is Next's own http-proxy: request bodies, query strings, cookies,
  * `Set-Cookie` (including multiple values) and streamed response bodies pass

@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+# commit-msg hook — enforces single-line conventional commit format.
+# Installed by `npm install` (prepare script sets core.hooksPath to .strike).
+#
+# Valid format:  type: short description
+# Examples:      fix: refund stake when settlement price is missing
+#                feat: add eurc deposits to the treasury
+#                chore: update npm lockfile
+#
+# Rules:
+#   1. Subject must match  type: description
+#   2. No body lines allowed (multiline commits are rejected)
+#   3. Subject must be 72 characters or fewer
+#   4. type must be one of the allowed conventional commit types
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+# Strip comment lines (lines starting with #) to get the real message
+REAL_MSG=$(grep -v '^#' "$COMMIT_MSG_FILE" | sed '/^$/d')
+
+# --- Rule 1: No multiline messages ---
+LINE_COUNT=$(echo "$REAL_MSG" | wc -l | tr -d ' ')
+if [ "$LINE_COUNT" -gt 1 ]; then
+  echo -e "${RED}[COMMIT REJECTED] Multiline commit messages are not allowed.${NC}"
+  echo ""
+  echo -e "${YELLOW}Use a single line:  type: short description${NC}"
+  echo ""
+  echo "Your message had $LINE_COUNT lines:"
+  echo "$REAL_MSG" | head -5 | sed 's/^/  /'
+  exit 1
+fi
+
+SUBJECT=$(echo "$REAL_MSG" | head -1)
+
+# --- Rule 2: Conventional commit format ---
+ALLOWED_TYPES="feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert"
+if ! echo "$SUBJECT" | grep -qE "^($ALLOWED_TYPES)(\(.+\))?: .+"; then
+  echo -e "${RED}[COMMIT REJECTED] Subject must follow conventional commit format.${NC}"
+  echo ""
+  echo -e "${YELLOW}Format:  type: short description${NC}"
+  echo -e "${YELLOW}Types:   feat fix docs style refactor perf test chore ci build revert${NC}"
+  echo ""
+  echo "Your subject: $SUBJECT"
+  exit 1
+fi
+
+# --- Rule 3: 72 character subject limit ---
+SUBJECT_LEN=${#SUBJECT}
+if [ "$SUBJECT_LEN" -gt 72 ]; then
+  echo -e "${RED}[COMMIT REJECTED] Subject is $SUBJECT_LEN characters (max 72).${NC}"
+  echo ""
+  echo -e "${YELLOW}Shorten your description to fit within 72 characters.${NC}"
+  echo ""
+  echo "Your subject ($SUBJECT_LEN chars): $SUBJECT"
+  exit 1
+fi
+
+echo -e "${GREEN}[OK] Commit message is valid.${NC}"
+exit 0

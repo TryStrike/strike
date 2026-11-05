@@ -30,7 +30,7 @@ unless `--force` is given: redeploying orphans the previous treasury and the
 funds tracked against it.
 
 ```bash
-node contracts/deploy.mjs   # writes deployments/arc-<chainId>.json + ABI
+(cd contracts && npm install && npm run deploy)   # writes deployments/arc-<chainId>.json + ABI
 ```
 
 
