@@ -1267,6 +1267,14 @@ fn script(question: &str) -> Vec<(&'static str, Value)> {
     if question.contains("trend") {
         return vec![("get_market_trend", json!({ "symbol": "BTC" }))];
     }
+    if let Some(bet_id) = question.split_whitespace().find(|w| w.starts_with("bet_")) {
+        return vec![
+            ("get_agent_decisions", json!({})),
+            ("get_session_limits", json!({})),
+            ("get_trade_history", json!({})),
+            ("get_round_proof", json!({ "bet_id": bet_id })),
+        ];
+    }
     if question.contains("screen") {
         return vec![
             ("open_market", json!({ "symbol": "ETH" })),
@@ -1351,17 +1359,20 @@ async fn copilot_server(btc: f64) -> (Server, Feed, Claude) {
 impl Server {
     /// `(status, frames)`: the whole SSE answer, or a JSON error as one frame.
     async fn ask(&self, question: &str) -> (StatusCode, Vec<(String, Value)>) {
-        self.ask_with(question, false).await
+        self.ask_with(question, false, None).await
     }
 
     async fn ask_with(
         &self,
         question: &str,
         ticket_open: bool,
+        cookie: Option<&str>,
     ) -> (StatusCode, Vec<(String, Value)>) {
-        let res = self
-            .http
-            .post(format!("{}/api/copilot", self.url))
+        let mut req = self.http.post(format!("{}/api/copilot", self.url));
+        if let Some(cookie) = cookie {
+            req = req.header("cookie", cookie);
+        }
+        let res = req
             .json(&json!({ "messages": [{ "role": "user", "content": question }], "ticketOpen": ticket_open }))
             .send()
             .await
@@ -1589,6 +1600,10 @@ async fn ui_tools_become_typed_actions_and_none_touches_money() {
         [
             "get_market_movers",
             "get_market_trend",
+            "get_agent_decisions",
+            "get_session_limits",
+            "get_trade_history",
+            "get_round_proof",
             "show_table",
             "show_chart",
             "open_page",
@@ -1603,7 +1618,7 @@ async fn ui_tools_become_typed_actions_and_none_touches_money() {
 async fn an_open_ticket_blocks_navigation() {
     let (s, _feed, claude) = copilot_server(100.0).await;
 
-    let (status, frames) = s.ask_with("put it on my screen", true).await;
+    let (status, frames) = s.ask_with("put it on my screen", true, None).await;
 
     assert_eq!(status, StatusCode::OK);
     let types: Vec<&str> = of(&frames, "action")
@@ -1619,4 +1634,102 @@ async fn an_open_ticket_blocks_navigation() {
             "The trader has a trade ticket open, so the copilot can't navigate away"
         );
     }
+}
+
+/// A trader whose agent session has stopped, with one settled manual bet.
+async fn trader_with_history(s: &Server, feed: &Feed, signer: &SigningKey) -> (String, Value) {
+    let wallet = address_of(signer);
+    s.fund(&wallet, 100);
+    let (_, _, cookie) = s.start_agent(signer, &yolo(signer)).await;
+    let cookie = cookie.unwrap();
+    s.agent_post("/api/agent/stop", Some(&cookie)).await;
+    let mut body = classic("UP", 100.0);
+    body["userAddress"] = json!(wallet);
+    let bet = s.bet(body).await;
+    after_the_next_sample().await;
+    set_price(feed, 110.0);
+    s.wait_settled(&bet).await;
+    (cookie, bet)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn personal_tools_answer_from_the_tokens_own_data() {
+    let (s, feed, claude) = copilot_server(100.0).await;
+    let trader = key(21);
+    let (cookie, bet) = trader_with_history(&s, &feed, &trader).await;
+    let bet_id = bet["betId"].as_str().unwrap();
+
+    let (status, _) = s
+        .ask_with(
+            &format!("why did my agent stop, and proof for {bet_id}"),
+            false,
+            Some(&cookie),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let results = results_of(&claude);
+    let read = |tool: &str| -> Value {
+        let r = &results[tool];
+        assert_eq!(r["is_error"], false, "{tool}: {r}");
+        serde_json::from_str(r["content"].as_str().unwrap()).unwrap()
+    };
+    let decisions = read("get_agent_decisions");
+    assert_eq!(
+        decisions["session"]["stoppedReason"], "You stopped the agent",
+        "{decisions}"
+    );
+    assert!(decisions["decisions"].is_array(), "{decisions}");
+    let limits = read("get_session_limits");
+    assert_eq!(limits["session"]["budget"], json!(5.0), "{limits}");
+    assert_eq!(limits["ceilings"]["maxBudget"], json!(100.0), "{limits}");
+    let history = read("get_trade_history");
+    assert_eq!(history["bets"][0]["id"], bet["betId"], "{history}");
+    let proof = read("get_round_proof");
+    assert_eq!(
+        proof["bet"]["server_settlement"]["outcome"], "win",
+        "{proof}"
+    );
+    assert_eq!(proof["bet"]["strike_price"], json!(100), "{proof}");
+    assert_eq!(proof["bet"]["recorded_end_price"], json!(110), "{proof}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn personal_tools_need_the_token_and_never_read_another_wallet() {
+    let (s, feed, claude) = copilot_server(100.0).await;
+    let (alice, bob) = (key(22), key(23));
+    let (_, alice_bet) = trader_with_history(&s, &feed, &alice).await;
+    let question = format!("proof for {}", alice_bet["betId"].as_str().unwrap());
+
+    let (status, _) = s.ask_with(&question, false, None).await;
+    assert_eq!(status, StatusCode::OK);
+    for (tool, result) in results_of(&claude) {
+        assert_eq!(result["is_error"], true, "{tool}: {result}");
+        assert_eq!(
+            result["content"],
+            "The trader has no agent session. Tell them to start one on the Agent page first."
+        );
+    }
+
+    claude.lock().unwrap().clear();
+    let (_, _, bob_cookie) = s.start_agent(&bob, &yolo(&bob)).await;
+    let (status, _) = s.ask_with(&question, false, bob_cookie.as_deref()).await;
+    assert_eq!(status, StatusCode::OK);
+    let proof = &results_of(&claude)["get_round_proof"];
+    assert_eq!(proof["is_error"], true, "{proof}");
+    assert_eq!(
+        proof["content"],
+        "No settled bet with that id for this wallet"
+    );
+    let history: Value = serde_json::from_str(
+        results_of(&claude)["get_trade_history"]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        history["bets"],
+        json!([]),
+        "bob sees none of alice's bets: {history}"
+    );
 }

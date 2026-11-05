@@ -37,20 +37,32 @@ Your earlier answers were true when you gave them. The tool calls behind them ar
 Only if the trader asks you to place a bet, change a limit or move funds, say you can't.";
 
 /// The request for one turn. Strict schemas, so tool inputs always validate.
-/// The ticket can change between questions, so its state is told fresh each
-/// time instead of left for the model to remember from earlier answers.
-pub fn request(messages: &[Value], ticket_open: bool) -> Value {
-    let ticket = if ticket_open {
+/// What can change between questions. Told fresh each time instead of left for
+/// the model to remember from earlier answers.
+#[derive(Clone, Copy)]
+pub struct Context {
+    pub ticket_open: bool,
+    /// The request carries a valid agent token.
+    pub has_session: bool,
+}
+
+pub fn request(messages: &[Value], context: Context) -> Value {
+    let ticket = if context.ticket_open {
         "Right now the trader has a filled trade ticket open, so open_page and open_market will refuse."
     } else {
         "Right now no trade ticket is open."
+    };
+    let session = if context.has_session {
+        "The trader is signed in with an agent session, so the personal tools read their own data."
+    } else {
+        "The trader has no agent session, so the personal tools will refuse. Suggest starting one on the Agent page."
     };
     json!({
         "model": MODEL,
         "max_tokens": 4_000,
         "stream": true,
         "output_config": { "effort": "low" },
-        "system": format!("{SYSTEM} {ticket}"),
+        "system": format!("{SYSTEM} {ticket} {session}"),
         "tools": tools(),
         "messages": messages,
     })
@@ -68,6 +80,15 @@ pub const PAGES: [&str; 6] = [
 const TICKET_SECONDS: [i64; 5] = [5, 10, 15, 30, 60];
 const MAX_TICKET_AMOUNT: f64 = 1_000.0;
 const CHART_POINTS: usize = 120;
+/// Tools that read the trader's own data. They need the agent token.
+pub const PERSONAL: [&str; 4] = [
+    "get_agent_decisions",
+    "get_session_limits",
+    "get_trade_history",
+    "get_round_proof",
+];
+pub const NO_SESSION: &str =
+    "The trader has no agent session. Tell them to start one on the Agent page first.";
 pub const NAVIGATION_BLOCKED: &str =
     "The trader has a trade ticket open, so the copilot can't navigate away";
 
@@ -111,6 +132,26 @@ fn tools() -> Value {
             "get_market_trend",
             "One asset over the last 15 minutes of live ticks: price now, percent change, high and low.",
             json!({ "symbol": symbol }),
+        ),
+        tool(
+            "get_agent_decisions",
+            "The trader's own agent session and its latest decisions: verdict, reason, stake, result and stop reason.",
+            json!({}),
+        ),
+        tool(
+            "get_session_limits",
+            "The trader's own agent limits, what is spent, P&L, and the house ceilings.",
+            json!({}),
+        ),
+        tool(
+            "get_trade_history",
+            "The trader's own latest settled bets.",
+            json!({}),
+        ),
+        tool(
+            "get_round_proof",
+            "The settlement proof of one of the trader's own bets: frozen strike, end price and result.",
+            json!({ "bet_id": { "type": "string" } }),
         ),
         tool(
             "show_table",
@@ -506,14 +547,14 @@ static CLAUDE: LazyLock<reqwest::Client> = LazyLock::new(|| {
 pub async fn stream_turn(
     key: &str,
     messages: &[Value],
-    ticket_open: bool,
+    context: Context,
     mut on_text: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<Turn, String> {
     let mut res = CLAUDE
         .post(format!("{}/v1/messages", config().anthropic_base_url))
         .header("x-api-key", key)
         .header("anthropic-version", API_VERSION)
-        .json(&request(messages, ticket_open))
+        .json(&request(messages, context))
         .send()
         .await
         .map_err(|err| format!("Claude API unreachable: {err}"))?;

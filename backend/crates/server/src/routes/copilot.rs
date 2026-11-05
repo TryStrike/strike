@@ -13,12 +13,17 @@ use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use strike_core::agent;
 use strike_core::bets::now_ms;
+use strike_core::bets::{canonical_address, HistoryQuery};
 use strike_core::config::config;
 use strike_core::copilot;
-use strike_core::crypto::{self, AGENT_COOKIE};
+use strike_core::copilot::{Ran, ToolUse};
+use strike_core::crypto::{self, AgentClaims, AGENT_COOKIE};
+use strike_core::db;
 use strike_core::error::ApiError;
 use strike_core::ticks;
+use rust_decimal::prelude::ToPrimitive;
 
 use crate::http;
 use crate::routes::stream::sse_headers;
@@ -43,7 +48,8 @@ async fn ask(
         Ok(messages) => messages,
         Err(why) => return ApiError::bad_request(why).into_response(),
     };
-    let asker = match crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref()) {
+    let claims = crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref());
+    let asker = match &claims {
         Some(claims) => format!("wallet:{}", claims.wallet),
         None => format!("ip:{}", http::client_ip(&headers, peer.ip())),
     };
@@ -56,7 +62,7 @@ async fn ask(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(answer(key, messages, ticket_open, tx));
+    tokio::spawn(answer(key, messages, ticket_open, claims, tx));
     let frames = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
@@ -78,8 +84,14 @@ fn send(tx: &Frames, event: &str, data: Value) -> Result<(), String> {
         .map_err(|_| "client disconnected".to_string())
 }
 
-async fn answer(key: String, mut messages: Vec<Value>, ticket_open: bool, tx: Frames) {
-    let (event, data) = match converse(&key, &mut messages, ticket_open, &tx).await {
+async fn answer(
+    key: String,
+    mut messages: Vec<Value>,
+    ticket_open: bool,
+    claims: Option<AgentClaims>,
+    tx: Frames,
+) {
+    let (event, data) = match converse(&key, &mut messages, ticket_open, claims, &tx).await {
         Ok(()) => ("done", json!({})),
         Err(why) => {
             tracing::warn!("[copilot] {why}");
@@ -94,11 +106,16 @@ async fn converse(
     key: &str,
     messages: &mut Vec<Value>,
     ticket_open: bool,
+    claims: Option<AgentClaims>,
     tx: &Frames,
 ) -> Result<(), String> {
     let mut desk = copilot::Desk::new(ticks::buffer(), now_ms(), ticket_open);
+    let context = copilot::Context {
+        ticket_open,
+        has_session: claims.is_some(),
+    };
     for turn_number in 0..=copilot::MAX_TOOL_TURNS {
-        let turn = copilot::stream_turn(key, messages, ticket_open, |text| {
+        let turn = copilot::stream_turn(key, messages, context, |text| {
             send(tx, "text", json!({ "text": text }))
         })
         .await?;
@@ -114,7 +131,11 @@ async fn converse(
         }
         let mut results = Vec::new();
         for tool in turn.tool_uses() {
-            let ran = desk.run(&tool);
+            let ran = if copilot::PERSONAL.contains(&tool.name.as_str()) {
+                personal(&tool, claims.as_ref()).await
+            } else {
+                desk.run(&tool)
+            };
             if let Some(action) = ran.action {
                 send(tx, "action", action)?;
             }
@@ -129,4 +150,98 @@ async fn converse(
         messages.push(json!({ "role": "user", "content": results }));
     }
     Err(copilot::TOO_MANY_TOOL_TURNS.into())
+}
+
+/// Decisions the copilot reads back. Enough to explain a stop, small enough
+/// to keep the turn cheap.
+const DECISIONS_READ: i64 = 20;
+const HISTORY_READ: i64 = 20;
+
+/// A personal tool, scoped to the token's own wallet and session. The model
+/// never names a wallet or a session: both come from the cookie.
+async fn personal(tool: &ToolUse, claims: Option<&AgentClaims>) -> Ran {
+    let Some(claims) = claims else {
+        return refused(copilot::NO_SESSION);
+    };
+    match read_personal(tool, claims).await {
+        Ok(value) => Ran {
+            content: value.to_string(),
+            is_error: false,
+            action: None,
+        },
+        Err(why) => refused(&why),
+    }
+}
+
+fn refused(why: &str) -> Ran {
+    Ran {
+        content: why.to_string(),
+        is_error: true,
+        action: None,
+    }
+}
+
+async fn read_personal(tool: &ToolUse, claims: &AgentClaims) -> Result<Value, String> {
+    let database = db::db()
+        .await
+        .map_err(|err| format!("The ledger is unavailable: {err}"))?;
+    let session = || async {
+        agent::session_for(database, &claims.session_id, &claims.wallet)
+            .await
+            .map_err(|err| format!("The agent session could not be read: {err}"))?
+            .ok_or_else(|| copilot::NO_SESSION.to_string())
+    };
+    match tool.name.as_str() {
+        "get_agent_decisions" => {
+            let session = session().await?;
+            let decisions = agent::recent_decisions(database, &session.id, DECISIONS_READ)
+                .await
+                .map_err(|err| format!("The decisions could not be read: {err}"))?;
+            let decisions: Vec<Value> = decisions.iter().map(agent::Decision::to_json).collect();
+            Ok(json!({ "session": session.to_json(), "decisions": decisions }))
+        }
+        "get_session_limits" => {
+            let cfg = config();
+            Ok(json!({
+                "session": session().await?.to_json(),
+                "ceilings": {
+                    "maxPerTrade": cfg.agent_max_per_trade.to_f64(),
+                    "maxBudget": cfg.agent_max_budget.to_f64(),
+                    "maxMinutes": cfg.agent_max_minutes,
+                    "maxOpenStake": cfg.agent_max_open_stake.to_f64(),
+                },
+            }))
+        }
+        "get_trade_history" => {
+            let query = HistoryQuery {
+                address: canonical_address(&claims.wallet),
+                limit: HISTORY_READ,
+                offset: 0,
+                paged: false,
+                asset: None,
+                outcome: None,
+                direction: None,
+                from: None,
+                to: None,
+            };
+            crate::routes::bets::history::run(query)
+                .await
+                .map_err(|err| format!("The trade history could not be read: {err}"))
+        }
+        "get_round_proof" => {
+            let bet_id = tool
+                .input
+                .get("bet_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if !crate::routes::bets::bet_id::bet_id_ok(bet_id) {
+                return Err("That is not a bet id".into());
+            }
+            crate::routes::bets::bet_id::run(bet_id, &canonical_address(&claims.wallet))
+                .await
+                .map_err(|_| "No settled bet with that id for this wallet".to_string())
+        }
+        other => Err(format!("There is no tool called {other}")),
+    }
 }
