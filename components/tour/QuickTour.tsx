@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { useStore } from '@/lib/store';
+import { Button } from '@/components/ui/kit';
 
 interface TourStep {
     target: string;
@@ -26,71 +27,70 @@ export const QuickTour: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ 
     const steps: TourStep[] = useMemo(() => [
         ...(isConnected ? [] : [{
             target: '[data-tour="connect-button"]',
-            title: '👋 Welcome — Connect First',
-            content: 'Connect your wallet to get started. Arc is supported.',
+            title: 'Connect first',
+            content: 'Connect a wallet on Arc to start.',
             position: 'bottom' as const
         }]),
         {
             target: '[data-tour="asset-selector"]',
-            title: '📈 Pick Your Market',
-            content: 'Every asset trades live with real prices. Choose what you know best.',
+            title: 'Pick a market',
+            content: 'Every asset trades on live prices.',
             howTo: [
-                'Click the asset selector at the top of the chart',
-                'Browse Crypto, Stocks, Metals, or Forex',
-                'Select any asset — the chart updates instantly',
+                'Open the selector above the chart',
+                'Browse crypto, stocks, metals or forex',
+                'Pick one; the chart updates instantly',
             ],
             position: 'bottom' as const
         },
         {
             target: '[data-tour="classic-mode"]',
-            title: '⚡ Classic Mode — Up or Down?',
-            content: 'The fastest mode. Set a timer, pick a direction, win if you\'re right when time runs out.',
+            title: 'Classic: higher or lower',
+            content: 'Set a timer, pick a direction, win if you\'re right at expiry.',
             howTo: [
-                'Enter your bet amount (or tap a quick-amount button)',
-                'Choose an expiry: 5 s, 10 s, 30 s, or 1 min',
-                'Tap ▲ Higher if you think price rises, ▼ Lower if it falls',
-                'Wait — if price moved your way you win × the multiplier shown',
+                'Enter an amount',
+                'Choose an expiry: 5s, 10s, 30s or 1m',
+                'Tap Higher or Lower',
+                'If price moves your way, you win the shown multiplier',
             ],
-            win: 'Price ends above (Higher) or below (Lower) the price when you placed the bet.',
+            win: 'Price ends above (Higher) or below (Lower) your entry.',
             position: 'bottom' as const
         },
         {
             target: '[data-tour="box-mode"]',
-            title: '🎯 Box Mode — Click a Cell',
-            content: 'The chart turns into a grid of price boxes. Click one to bet on that exact price zone.',
+            title: 'Box: pick a cell',
+            content: 'The chart becomes a grid. Click a cell to bet on that price zone.',
             howTo: [
-                'Enter your bet amount',
-                'Choose a time column on the chart (5 s … 60 s)',
-                'Click any cell on the price grid that appears',
-                'Cells far from the current price pay more — higher risk, higher reward',
+                'Enter an amount',
+                'Choose a time column (5s to 60s)',
+                'Click a cell on the grid',
+                'Cells further from price pay more',
             ],
-            win: 'Price lands inside the cell you clicked when that column\'s timer expires.',
+            win: 'Price is inside your cell when its column expires.',
             position: 'bottom' as const
         },
         {
             target: '[data-tour="draw-mode"]',
-            title: '✏️ Draw Mode — Draw Your Range',
-            content: 'You define both the price range AND the time window by drawing a rectangle on the chart.',
+            title: 'Draw: your own range',
+            content: 'Draw a rectangle to set both the price range and the time window.',
             howTo: [
-                'Enter your bet amount (duration is auto-locked at 5 s)',
-                'Click and drag on the chart to draw a rectangle',
-                'The box sets your price range (height) and time window (width)',
-                'Release to see the preview, then tap Confirm to place the bet',
+                'Enter an amount (duration is fixed at 5s)',
+                'Drag on the chart to draw a box',
+                'Height is the price range, width the time',
+                'Release, then Confirm',
             ],
-            win: 'Price stays inside your drawn rectangle for the full 5-second window.',
+            win: 'Price stays inside your box for the full 5 seconds.',
             position: 'bottom' as const
         },
         {
             target: '[data-tour="deposit-section"]',
-            title: '💰 Fund Your Account',
+            title: 'Add funds',
             content: isConnected
-                ? 'Send USDC on Arc. Credits arrive instantly after confirmation.'
-                : 'After connecting, deposit USDC on Arc to get your house balance. No credits = no bets.',
+                ? 'Deposit USDC on Arc. Your balance updates after confirmation.'
+                : 'After connecting, deposit USDC on Arc to start trading.',
             howTo: [
-                'Tap the Wallet tab above',
-                'Choose USDC and copy the deposit address',
-                'Send funds from your external wallet',
-                'Balance appears within seconds — then you\'re ready to trade',
+                'Open the Wallet tab',
+                'Tap Deposit and enter an amount',
+                'Confirm in your wallet',
             ],
             position: 'bottom' as const
         },
@@ -237,8 +237,8 @@ export const QuickTour: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ 
     };
 
     return (
-        <div className="fixed inset-0 z-[120] pointer-events-none">
-            {/* Dimmed Background with Hole */}
+        <div className="fixed inset-0 z-[120] pointer-events-none font-tight">
+            {/* Dimmed background with a hole over the target */}
             <svg className="absolute inset-0 w-full h-full pointer-events-auto">
                 <defs>
                     <mask id="tour-mask">
@@ -248,7 +248,7 @@ export const QuickTour: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ 
                             y={targetRect.top - 8}
                             width={targetRect.width + 16}
                             height={targetRect.height + 16}
-                            rx="12"
+                            rx="16"
                             fill="black"
                         />
                     </mask>
@@ -256,13 +256,13 @@ export const QuickTour: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ 
                 <rect
                     width="100%"
                     height="100%"
-                    fill="rgba(0, 0, 0, 0.75)"
+                    fill="rgba(10, 12, 16, 0.28)"
                     mask="url(#tour-mask)"
                     onClick={onClose}
                 />
             </svg>
 
-            {/* Spotlight Border */}
+            {/* Spotlight ring */}
             <motion.div
                 initial={false}
                 animate={{
@@ -271,99 +271,72 @@ export const QuickTour: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ 
                     width: targetRect.width + 16,
                     height: targetRect.height + 16,
                 }}
-                className="absolute border-2 border-purple-500 rounded-xl shadow-[0_0_30px_rgba(168,85,247,0.6)] pointer-events-none"
+                className="absolute rounded-2xl ring-2 ring-up pointer-events-none"
             />
 
-            {/* Tooltip */}
+            {/* Popover */}
             <motion.div
-                initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                role="dialog"
+                aria-label={currentStepData.title}
+                initial={{ opacity: 0, y: 8 }}
                 animate={{
                     opacity: 1,
-                    scale: 1,
                     y: 0,
                     left: pos.left,
                     top: pos.top,
                 }}
-                transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                className="absolute bg-[#0d0d0d] border border-white/10 rounded-2xl p-4 sm:p-5 shadow-2xl pointer-events-auto backdrop-blur-2xl flex flex-col max-h-[min(420px,calc(100vh-2rem))]"
+                transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+                className="absolute flex max-h-[min(420px,calc(100vh-2rem))] flex-col rounded-3xl bg-white p-6 text-ink ring-1 ring-line shadow-[0_40px_80px_-40px_rgba(10,12,16,0.35)] pointer-events-auto"
                 style={{ width: tooltipWidth }}
             >
-                {/* Header */}
-                <div className="flex justify-between items-start mb-2 shrink-0">
-                    <h3 className="text-purple-400 font-bold text-[11px] sm:text-[13px] leading-snug pr-2">
+                <div className="mb-2 flex shrink-0 items-start justify-between gap-3">
+                    <h3 className="text-[17px] font-semibold leading-snug tracking-tight">
                         {currentStepData.title}
                     </h3>
-                    <span className="text-[9px] sm:text-[10px] text-gray-500 font-mono shrink-0 mt-0.5">
-                        {currentStep + 1} / {steps.length}
+                    <span className="mt-1 shrink-0 font-jet text-xs text-faint">
+                        {currentStep + 1}/{steps.length}
                     </span>
                 </div>
 
-                {/* Scrollable body */}
-                <div className="min-h-0 overflow-y-auto overscroll-contain space-y-3 mb-3 pr-0.5">
-                    {/* Summary sentence */}
-                    <p className="text-gray-300 text-[11px] sm:text-[12px] leading-relaxed">
+                <div className="mb-5 min-h-0 space-y-3 overflow-y-auto overscroll-contain">
+                    <p className="text-sm leading-relaxed text-muted">
                         {currentStepData.content}
                     </p>
 
-                    {/* How-to steps */}
                     {currentStepData.howTo && currentStepData.howTo.length > 0 && (
                         <ol className="space-y-1.5">
                             {currentStepData.howTo.map((step, i) => (
-                                <li key={i} className="flex items-start gap-2 text-[10px] sm:text-[11px] text-gray-400 leading-snug">
-                                    <span className="shrink-0 mt-0.5 w-4 h-4 flex items-center justify-center rounded-full bg-purple-600/25 text-purple-400 font-black text-[9px]">
-                                        {i + 1}
-                                    </span>
+                                <li key={i} className="flex items-start gap-2.5 text-[13px] leading-snug text-muted">
+                                    <span className="w-3 shrink-0 font-jet text-xs leading-[18px] text-faint">{i + 1}</span>
                                     <span>{step}</span>
                                 </li>
                             ))}
                         </ol>
                     )}
 
-                    {/* Win condition */}
                     {currentStepData.win && (
-                        <div className="flex items-start gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-2">
-                            <span className="shrink-0 text-emerald-400 text-[11px]">✓</span>
-                            <p className="text-emerald-300 text-[10px] sm:text-[11px] leading-snug font-medium">
-                                {currentStepData.win}
-                            </p>
-                        </div>
+                        <p className="rounded-xl bg-up-soft px-3 py-2 text-[13px] leading-snug text-ink">
+                            <span className="font-semibold text-up">You win when </span>
+                            {currentStepData.win.charAt(0).toLowerCase() + currentStepData.win.slice(1)}
+                        </p>
                     )}
                 </div>
 
-                <div className="flex justify-between items-center mt-auto shrink-0 pt-1">
-                    <button
-                        onClick={onClose}
-                        className="text-gray-500 hover:text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-widest transition-colors"
-                    >
+                <div className="mt-auto flex shrink-0 items-center justify-between">
+                    <Button variant="ghost" size="sm" onClick={onClose} className="-ml-3">
                         Skip
-                    </button>
-
+                    </Button>
                     <div className="flex gap-2">
                         {currentStep > 0 && (
-                            <button
-                                onClick={handleBack}
-                                className="px-3 sm:px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-widest border border-white/10 transition-all"
-                            >
+                            <Button variant="secondary" size="sm" onClick={handleBack}>
                                 Back
-                            </button>
+                            </Button>
                         )}
-                        <button
-                            onClick={handleNext}
-                            className="px-3 sm:px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-purple-500/20 transition-all"
-                        >
+                        <Button size="sm" onClick={handleNext}>
                             {currentStep === steps.length - 1 ? 'Finish' : 'Next'}
-                        </button>
+                        </Button>
                     </div>
                 </div>
-
-                {/* Arrow - Only show on desktop */}
-                {!isMobile && (
-                    <div
-                        className={`absolute w-3 h-3 bg-[#0d0d0d] border-white/10 transform rotate-45 left-1/2 -translate-x-1/2
-                ${pos.tooltipBelowTarget ? '-top-1.5 border-t border-l' : '-bottom-1.5 border-b border-r'}
-              `}
-                    />
-                )}
             </motion.div>
         </div>
     );

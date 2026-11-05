@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { HeaderMenu } from './game/HeaderMenu';
 import { WalletConnect } from './wallet';
 import { useStore } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
 import { motion } from 'framer-motion';
 import { BRAND } from '@/lib/brand';
 
@@ -20,7 +21,7 @@ export function Header() {
         toggleAccountType,
         accountType,
         accessCode,
-    } = useStore();
+    } = useStore(useShallow((s) => ({ setAddress: s.setAddress, setBalance: s.setBalance, setIsConnected: s.setIsConnected, toggleAccountType: s.toggleAccountType, accountType: s.accountType, accessCode: s.accessCode })));
 
     const activateDemoMode = () => {
         if (accountType === 'demo') {
@@ -40,8 +41,8 @@ export function Header() {
     };
 
 
-    // The landing page brings its own light nav.
-    if (pathname === '/') return null;
+    // The landing page and the trade screen bring their own light nav.
+    if (pathname === '/' || pathname === '/trade') return null;
 
     return (
         <header className="z-[100] px-4 sm:px-8 py-3 flex justify-between items-center bg-black/40 backdrop-blur-3xl border-b border-white/5">

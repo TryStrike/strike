@@ -5,6 +5,8 @@ import { useEffect, useState } from 'react';
 import { BlurFade, CountdownRing, Marquee, SlidingNumber, WordRotate } from '@/components/landing/primitives';
 import { explorerAddressUrl, getArcConfig } from '@/lib/arc/config';
 import { BRAND } from '@/lib/brand';
+import { SiteNav } from '@/components/SiteNav';
+import { ArrowDown, ArrowUp, ArrowUpRight } from '@phosphor-icons/react';
 
 const HERO_ASSETS = [
   { symbol: 'BTC', name: 'Bitcoin', pair: 'BTC / USD' },
@@ -67,22 +69,14 @@ export default function Landing() {
 
   return (
     <div className="min-h-full shrink-0 bg-white text-[#0A0C10] font-[family-name:var(--font-inter-tight)] selection:bg-[#2151F5] selection:text-white">
-      {/* Nav */}
-      <nav className="sticky top-0 z-20 border-b border-[#0A0C10]/[0.06] bg-white/80 backdrop-blur-md">
-        <div className="mx-auto grid h-16 max-w-[1200px] grid-cols-[1fr_auto_1fr] items-center px-5 sm:px-8">
-          <Link href="/" className="justify-self-start text-[17px] font-bold tracking-tight">
-            {BRAND.wordmark}<span className="text-[#2151F5]">.</span>
-          </Link>
-          <div className="hidden items-center gap-8 text-sm font-medium text-[#4A505C] md:flex">
-            <Link href="/trade" className="hover:text-[#0A0C10]">Trade</Link>
-            <a href="#how" className="hover:text-[#0A0C10]">How it works</a>
-            <Link href="/leaderboard" className="hover:text-[#0A0C10]">Leaderboard</Link>
-          </div>
-          <Link href="/trade" className="col-start-3 justify-self-end rounded-full bg-[#0A0C10] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2151F5]">
+      <SiteNav
+        sticky
+        right={
+          <Link href="/trade" className="rounded-full bg-[#0A0C10] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2151F5]">
             Launch app
           </Link>
-        </div>
-      </nav>
+        }
+      />
 
       {/* Hero */}
       <section className="relative overflow-hidden">
@@ -141,7 +135,7 @@ export default function Landing() {
                 {frac && <span className="text-[#B7BDC7]">.<SlidingNumber value={frac} /></span>}
               </div>
               <div className={`mt-3 font-[family-name:var(--font-jetbrains-mono)] text-sm ${dir < 0 ? 'text-[#C2410C]' : 'text-[#2151F5]'}`}>
-                {dir < 0 ? '▼' : '▲'} moving {dir < 0 ? 'down' : 'up'}
+                <span className="inline-flex items-center gap-1.5">{dir < 0 ? <ArrowDown size={14} weight="bold" /> : <ArrowUp size={14} weight="bold" />} moving {dir < 0 ? 'down' : 'up'}</span>
               </div>
 
               <div className="mt-7 grid grid-cols-2 gap-3">
@@ -165,7 +159,7 @@ export default function Landing() {
               return (
                 <span key={s} className="whitespace-nowrap text-[#4A505C]">
                   <span className="text-[#9AA1AD]">{s}</span> {v ? fmt(v) : '—'}{' '}
-                  <span className={d < 0 ? 'text-[#C2410C]' : 'text-[#2151F5]'}>{d < 0 ? '↓' : '↑'}</span>
+                  <span className={`inline-block align-[-2px] ${d < 0 ? 'text-[#C2410C]' : 'text-[#2151F5]'}`}>{d < 0 ? <ArrowDown size={13} weight="bold" /> : <ArrowUp size={13} weight="bold" />}</span>
                 </span>
               );
             })}
@@ -199,8 +193,8 @@ export default function Landing() {
             <BlurFade delay={0.06} className="rounded-3xl p-2 ring-1 ring-[#0A0C10]/[0.08]">
               <div className="grid h-36 place-items-center rounded-[18px] bg-[#F6F7F9]">
                 <div className="flex gap-2">
-                  <span className="rounded-xl bg-[#2151F5] px-4 py-2.5 text-sm font-semibold text-white">↑ Higher</span>
-                  <span className="rounded-xl bg-white px-4 py-2.5 text-sm font-semibold ring-1 ring-[#0A0C10]/[0.12]">↓ Lower</span>
+                  <span className="inline-flex items-center gap-1.5 rounded-xl bg-[#2151F5] px-4 py-2.5 text-sm font-semibold text-white"><ArrowUp size={14} weight="bold" /> Higher</span>
+                  <span className="inline-flex items-center gap-1.5 rounded-xl bg-white px-4 py-2.5 text-sm font-semibold ring-1 ring-[#0A0C10]/[0.12]"><ArrowDown size={14} weight="bold" /> Lower</span>
                 </div>
               </div>
               <div className="px-4 pb-4 pt-5">
@@ -257,7 +251,7 @@ export default function Landing() {
         <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-4 px-5 py-6 text-[13px] text-[#6B7280] sm:px-8">
           <span>© {BRAND.name} · Prices via Yahoo Finance &amp; Binance · Not financial advice</span>
           <div className="flex gap-6">
-            <a href={explorerAddressUrl(getArcConfig().treasuryAddress)} target="_blank" rel="noopener noreferrer" className="hover:text-[#0A0C10]">Treasury contract ↗</a>
+            <a href={explorerAddressUrl(getArcConfig().treasuryAddress)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:text-[#0A0C10]">Treasury contract <ArrowUpRight size={13} /></a>
             {BRAND.social.x && <a href={BRAND.social.x} target="_blank" rel="noopener noreferrer" className="hover:text-[#0A0C10]">X</a>}
             {BRAND.social.telegram && <a href={BRAND.social.telegram} target="_blank" rel="noopener noreferrer" className="hover:text-[#0A0C10]">Telegram</a>}
           </div>

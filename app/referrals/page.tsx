@@ -4,10 +4,11 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { useStore } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
 import GridScan from '@/components/ui/GridScan';
 import { useToast } from '@/lib/hooks/useToast';
 import { openReferralShareOnX, referralLandingUrl } from '@/lib/referral/shareOnX';
-import { Share2, Trophy, Zap, Shield, ChevronRight } from 'lucide-react';
+import { ShareNetwork as Share2, Trophy, Lightning as Zap, Shield, CaretRight as ChevronRight } from '@phosphor-icons/react';
 
 export default function ReferralPage() {
     const {
@@ -18,7 +19,7 @@ export default function ReferralPage() {
         referralLeaderboard,
         fetchReferralLeaderboard,
         fetchReferralInfo
-    } = useStore();
+    } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, referralCode: s.referralCode, referralCount: s.referralCount, referralLeaderboard: s.referralLeaderboard, fetchReferralLeaderboard: s.fetchReferralLeaderboard, fetchReferralInfo: s.fetchReferralInfo })));
 
     const toast = useToast();
     const [referralLink, setReferralLink] = useState('');

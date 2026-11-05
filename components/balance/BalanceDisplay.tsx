@@ -2,12 +2,13 @@
 
 import React, { useEffect, useState } from 'react';
 import { useStore } from '@/lib/store';
-import { Button } from '@/components/ui/Button';
+import { ArrowClockwise } from '@phosphor-icons/react';
+import { Button } from '@/components/ui/kit';
 import { DepositModal } from './DepositModal';
 import { WithdrawModal } from './WithdrawModal';
 import { ReceiptDrawer, type ReceiptData } from './ReceiptDrawer';
 import { useToast } from '@/lib/hooks/useToast';
-import { ARC_ASSETS, getAssetConfig } from '@/lib/arc/config';
+import { ARC_ASSETS } from '@/lib/arc/config';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 
 /**
@@ -159,151 +160,88 @@ export const BalanceDisplay: React.FC = () => {
 
   return (
     <>
-      <div className="bg-black/30 rounded-xl border border-white/5 overflow-hidden">
-        {/* Secret Demo Header - Only visible when activated via STRIKE logo click */}
-        {accountType === 'demo' && (
-          <div className="flex bg-yellow-500/10 p-1 border-b border-yellow-500/20 items-center justify-between px-3">
-            <span className="text-[9px] font-black text-yellow-500 uppercase tracking-widest">
-              Demo Mode Active
+      <div className="font-tight text-ink">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-subtle">
+            {accountType === 'demo' ? 'Practice Balance' : 'House Balance'}
+          </span>
+
+          {accountType === 'real' && (
+            <div className="flex items-center gap-1">
+              {ARC_ASSETS.length > 1 && ARC_ASSETS.map((asset) => (
+                <button
+                  key={asset}
+                  type="button"
+                  onClick={() => {
+                    setSelectedCurrency(asset);
+                    setTimeout(() => fetchBalance(address!), 100);
+                  }}
+                  className={`rounded-full px-2 py-0.5 font-jet text-[11px] transition-colors ${currentSymbol === asset ? 'bg-surface text-ink' : 'text-faint hover:text-ink'}`}
+                >
+                  {asset}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={handleRefresh}
+                disabled={!address || isLoading || isRefreshing}
+                title="Refresh balance"
+                aria-label="Refresh balance"
+                className="flex h-8 w-8 items-center justify-center rounded-full text-faint transition-colors hover:bg-surface hover:text-ink disabled:pointer-events-none disabled:opacity-40"
+              >
+                <ArrowClockwise size={16} className={isRefreshing ? 'animate-spin' : ''} />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {isLoading && accountType === 'real' ? (
+          <div className="mt-1 h-10 w-40 animate-pulse rounded-lg bg-surface" />
+        ) : (
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="font-jet text-[32px] font-semibold leading-10 tracking-[-0.04em] tabular-nums">
+              {formattedBalance}
             </span>
-            <button
-              onClick={handleExitDemo}
-              className="text-[9px] bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-500 px-2 py-0.5 rounded border border-yellow-500/30 transition-colors font-bold uppercase"
-            >
-              Exit Demo
-            </button>
+            <span className="font-jet text-sm text-faint">{currentSymbol}</span>
           </div>
         )}
 
-        <div className="p-3 space-y-2">
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <h3 className={`text-xs font-bold font-mono uppercase tracking-wider ${accountType === 'demo' ? 'text-yellow-400' : 'text-purple-400'
-              }`}>
-              {accountType === 'demo' ? 'Practice Balance' : 'House Balance'}
-            </h3>
-
-            <div className="flex items-center gap-2">
-              {/* The two assets the platform settles in. */}
-              {accountType === 'real' && (
-                <div className="flex bg-white/5 rounded-lg p-0.5 border border-white/10">
-                  {ARC_ASSETS.map((asset) => (
-                    <button
-                      key={asset}
-                      onClick={() => {
-                        setSelectedCurrency(asset);
-                        setTimeout(() => fetchBalance(address!), 100);
-                      }}
-                      className={`px-2 py-0.5 rounded text-[8px] font-black uppercase transition-all ${currentSymbol === asset
-                        ? 'bg-purple-500 text-white shadow-lg'
-                        : 'text-white/40 hover:text-white/60'
-                        }`}
-                    >
-                      {asset}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Refresh Button */}
-              {accountType === 'real' && (
-                <button
-                  onClick={handleRefresh}
-                  disabled={!address || isLoading || isRefreshing}
-                  className="text-purple-400 hover:text-purple-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  title="Refresh balance"
-                >
-                  <svg
-                    className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`}
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Available house credits + deposit / withdraw */}
-          <div className={`bg-gradient-to-br rounded-lg p-2.5 border ${accountType === 'demo'
-            ? 'from-yellow-500/10 to-transparent border-yellow-500/30'
-            : 'from-purple-600/10 to-transparent border-purple-600/30'
-            }`}>
-            <p className="text-gray-400 text-[10px] uppercase tracking-wider mb-0.5 font-mono">
-              Available Credits
-            </p>
-
-            {isLoading && accountType === 'real' ? (
-              <div className="flex items-center gap-1.5">
-                <div className="animate-pulse bg-white/20 h-6 w-24 rounded" />
-                <span className="text-gray-500 text-xs font-mono">Loading...</span>
-              </div>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <div className="flex items-center gap-1">
-                  <img
-                    src={getAssetConfig(currentSymbol).logo}
-                    alt={currentSymbol}
-                    className="w-4 h-4 object-contain"
-                  />
-                  <p className={`text-xl font-bold font-mono ${accountType === 'demo' ? 'text-yellow-400' : 'text-purple-400'}`}>
-                    {formattedBalance}
-                  </p>
-                </div>
-                <span className={`text-sm font-mono ${accountType === 'demo' ? 'text-yellow-400/70' : 'text-purple-400/70'}`}>
-                  {currentSymbol}
-                </span>
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {accountType === 'demo' ? (
-              <button
-                onClick={() => updateBalance(10000 - demoBalance, 'add')}
-                className="col-span-2 py-2.5 bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 rounded-xl text-xs font-semibold hover:bg-yellow-500/20 transition-all duration-200"
-              >
-                Reset Practice Balance
+        {accountType === 'demo' ? (
+          <>
+            <p className="mt-2 text-[13px] text-subtle">
+              Practice funds, no real USDC.{' '}
+              <button type="button" onClick={handleExitDemo} className="font-medium text-ink underline-offset-2 hover:underline">
+                Exit practice
               </button>
-            ) : (
-              <>
-                <Button
-                  onClick={handleDeposit}
-                  disabled={!address || isLoading}
-                  variant="primary"
-                  size="sm"
-                  className="w-full !px-2 !py-1.5 !text-xs"
-                >
-                  Deposit
-                </Button>
-
-                <Button
-                  onClick={handleWithdraw}
-                  disabled={!address || isLoading || houseBalance <= 0}
-                  variant="secondary"
-                  size="sm"
-                  className="w-full !px-2 !py-1.5 !text-xs"
-                >
-                  Withdraw
-                </Button>
-              </>
-            )}
-          </div>
-
-          {/* Info Message */}
-          {!address && (
-            <p className="text-gray-500 text-[10px] text-center font-mono">
-              Connect wallet to view balance
             </p>
-          )}
-        </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => updateBalance(10000 - demoBalance, 'add')}
+              className="mt-4 w-full"
+            >
+              Reset Practice Balance
+            </Button>
+          </>
+        ) : (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <Button onClick={handleDeposit} disabled={!address || isLoading} variant="primary" size="sm">
+              Deposit
+            </Button>
+            <Button
+              onClick={handleWithdraw}
+              disabled={!address || isLoading || houseBalance <= 0}
+              variant="secondary"
+              size="sm"
+            >
+              Withdraw
+            </Button>
+          </div>
+        )}
+
+        {!address && (
+          <p className="mt-3 text-[13px] text-subtle">Connect a wallet to see your balance.</p>
+        )}
       </div>
 
       {/* Deposit Modal */}

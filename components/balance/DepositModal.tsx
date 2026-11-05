@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { Modal } from '@/components/ui/Modal';
-import { Button } from '@/components/ui/Button';
+import { Button, Segmented } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
@@ -206,6 +206,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     }
   };
 
+  const chip = (on: boolean) =>
+    `h-9 rounded-full font-jet text-[13px] transition-colors disabled:opacity-40 ${
+      on ? 'bg-ink text-white' : 'bg-surface text-muted hover:text-ink'
+    }`;
+
   return (
     <Modal
       isOpen={isOpen}
@@ -213,116 +218,87 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       title={`Deposit ${asset}`}
       showCloseButton={!isLoading}
     >
-      <div className="space-y-4">
-        {/* Arc asset selector. */}
-        <div className="flex gap-2">
-          {ARC_ASSETS.map(token => (
-            <button
-              key={token}
-              onClick={() => handleAssetChange(token)}
-              disabled={isLoading}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg border text-xs font-black uppercase tracking-widest transition-colors disabled:opacity-50 ${
-                asset === token
-                  ? 'border-[#00f5ff]/60 bg-[#00f5ff]/10 text-[#00f5ff]'
-                  : 'border-white/10 bg-white/[0.03] text-white/30 hover:text-white/60'
-              }`}
-            >
-              <img
-                src="/logos/usdc.png"
-                alt={token}
-                className="w-4 h-4 rounded-full"
-              />
-              {token}
-            </button>
-          ))}
-        </div>
+      <p className="-mt-4 mb-6 text-[15px] text-muted">
+        Move USDC from your wallet to your trading balance.
+      </p>
 
-        <div className="bg-gradient-to-br from-[#00f5ff]/10 to-purple-500/10 border border-[#00f5ff]/30 rounded-lg p-3 relative overflow-hidden">
-          <div className="absolute top-0 right-0 px-2 py-0.5 bg-[#00f5ff]/20 text-[#00f5ff] text-[8px] font-bold uppercase tracking-tighter rounded-bl-lg">
-            {config.name}
-          </div>
-          <p className="text-gray-400 text-[10px] uppercase tracking-wider mb-1 font-mono">
-            Wallet Balance
-          </p>
-          <p className="text-[#00f5ff] text-xl font-bold font-mono flex items-center gap-2">
-            <img
-              src="/logos/usdc.png"
-              alt={asset}
-              className="w-5 h-5 rounded-full"
-            />
-            {walletBalance.toFixed(4)} {asset}
-          </p>
-        </div>
+      {ARC_ASSETS.length > 1 && (
+        <Segmented
+          className="mb-4"
+          options={ARC_ASSETS.map(token => ({ value: token, label: token }))}
+          value={asset}
+          onChange={handleAssetChange}
+          disabled={isLoading}
+        />
+      )}
 
-        <div className="space-y-2">
-          <label
-            htmlFor="deposit-amount"
-            className="text-gray-400 text-xs font-mono uppercase"
-          >
-            Amount to Deposit
-          </label>
-          <div className="relative">
-            <input
-              id="deposit-amount"
-              type="text"
-              value={amount}
-              onChange={handleAmountChange}
-              placeholder="0.00"
-              disabled={isLoading}
-              className={`
-                w-full px-4 py-3 bg-black/50 border rounded-lg text-lg
-                text-white font-mono
-                focus:outline-none focus:ring-1 focus:ring-[#00f5ff]
-                disabled:opacity-50 disabled:cursor-not-allowed
-                ${error ? 'border-red-500' : 'border-[#00f5ff]/30'}
-              `}
-            />
-            <button
-              onClick={handleMaxClick}
-              disabled={isLoading || walletBalance <= 0}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[#00f5ff] hover:text-cyan-400 font-mono disabled:opacity-50 transition-colors uppercase tracking-wider"
-            >
-              Use Max
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-4 gap-2">
-          {quickAmounts.map(quickAmount => (
-            <button
-              key={quickAmount}
-              onClick={() => handleQuickSelect(quickAmount)}
-              disabled={isLoading}
-              className={`
-                py-2 rounded-lg border text-xs font-mono transition-all
-                disabled:opacity-50 disabled:cursor-not-allowed
-                ${
-                  amount === quickAmount.toString()
-                    ? 'bg-[#00f5ff]/20 border-[#00f5ff] text-[#00f5ff] shadow-[0_0_10px_rgba(0,245,255,0.3)]'
-                    : 'bg-white/[0.03] border-white/10 text-white/60 hover:text-white'
-                }
-              `}
-            >
-              {quickAmount}
-            </button>
-          ))}
-        </div>
-
-        {error && (
-          <div className="bg-red-900/20 border border-red-500 rounded-lg px-3 py-2">
-            <p className="text-red-400 text-xs font-mono">{error}</p>
-          </div>
-        )}
-
-        <div className="flex gap-3 pt-2">
-          <Button variant="secondary" onClick={onClose} disabled={isLoading} className="flex-1">
-            Cancel
-          </Button>
-          <Button onClick={handleDeposit} disabled={isLoading || !amount} className="flex-1">
-            {isLoading ? 'Depositing…' : `Deposit ${asset}`}
-          </Button>
-        </div>
+      <label htmlFor="deposit-amount" className="sr-only">Amount to deposit</label>
+      <div
+        className={`flex h-16 items-center rounded-2xl bg-white px-5 ring-1 ring-inset transition-shadow focus-within:ring-ink ${
+          error ? 'ring-down' : 'ring-line'
+        }`}
+      >
+        <input
+          id="deposit-amount"
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          value={amount}
+          onChange={handleAmountChange}
+          placeholder="0.00"
+          disabled={isLoading}
+          className="min-w-0 flex-1 bg-transparent font-jet text-[28px] font-semibold tracking-[-0.03em] outline-none placeholder:text-faint disabled:opacity-50"
+        />
+        <span className="ml-2 font-jet text-sm text-faint">{asset}</span>
       </div>
+
+      <div className="mt-3 grid grid-cols-5 gap-2">
+        {quickAmounts.map(quickAmount => (
+          <button
+            key={quickAmount}
+            type="button"
+            onClick={() => handleQuickSelect(quickAmount)}
+            disabled={isLoading}
+            className={chip(amount === quickAmount.toString())}
+          >
+            {quickAmount}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={handleMaxClick}
+          disabled={isLoading || walletBalance <= 0}
+          className={chip(false)}
+        >
+          Max
+        </button>
+      </div>
+
+      <dl className="mt-6 space-y-2 font-jet text-[13px]">
+        <div className="flex justify-between">
+          <dt className="text-subtle">Wallet</dt>
+          <dd>{walletBalance.toFixed(4)} {asset}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-subtle">Network</dt>
+          <dd>{config.name}</dd>
+        </div>
+      </dl>
+
+      {error && (
+        <p role="alert" className="mt-4 rounded-xl bg-down-soft px-3.5 py-2.5 text-[13px] text-down">
+          {error}
+        </p>
+      )}
+
+      <Button
+        size="lg"
+        onClick={handleDeposit}
+        disabled={isLoading || !amount}
+        className="mt-6 w-full"
+      >
+        {isLoading ? 'Depositing…' : `Deposit ${asset}`}
+      </Button>
     </Modal>
   );
 };

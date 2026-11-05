@@ -1,26 +1,34 @@
 'use client';
 
 import { GameBoard } from '@/components/game';
-import { MiniHistory } from '@/components/history';
 import { QuickTour } from '@/components/tour/QuickTour';
-import { PriceTicker } from '@/components/ui/PriceTicker';
+import { SiteNav } from '@/components/SiteNav';
+import { WalletConnect } from '@/components/wallet';
 import { useStore } from '@/lib/store';
 
-export default function Home() {
+export default function Trade() {
   const isTourOpen = useStore((state) => state.isTourOpen);
   const setIsTourOpen = useStore((state) => state.setIsTourOpen);
   return (
-    <div className="h-full w-full bg-[#02040A] overflow-hidden relative flex flex-col">
-      {/* Live price ticker strip */}
-      <PriceTicker />
-
-      {/* Game board fills remaining height */}
-      <div className="flex-1 relative overflow-hidden min-h-0">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-white font-tight text-ink">
+      <SiteNav
+        wide
+        right={
+          <>
+            <button
+              type="button"
+              onClick={() => setIsTourOpen(true)}
+              className="hidden h-9 rounded-full px-3.5 text-sm font-medium text-muted transition-colors hover:bg-surface hover:text-ink sm:block"
+            >
+              How to play
+            </button>
+            <WalletConnect />
+          </>
+        }
+      />
+      <div className="min-h-0 flex-1">
         <GameBoard />
-        <MiniHistory />
       </div>
-
-      {/* Tour Component */}
       <QuickTour isOpen={isTourOpen} onClose={() => setIsTourOpen(false)} />
     </div>
   );

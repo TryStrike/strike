@@ -186,12 +186,8 @@ class PythPriceFeed {
         typeof window === 'undefined'
           ? `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}${PRICES_ENDPOINT}`
           : PRICES_ENDPOINT;
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assets: symbols }),
-        signal: AbortSignal.timeout(6_000),
-      });
+      // GET (all assets) so the response is CDN-cacheable across visitors.
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(6_000) });
       if (response.ok) {
         const payload = await response.json();
         const prices = payload?.prices || {};

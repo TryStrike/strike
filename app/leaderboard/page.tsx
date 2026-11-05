@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Trophy, Activity, Search } from 'lucide-react';
+import { Trophy, Pulse as Activity, MagnifyingGlass as Search } from '@phosphor-icons/react';
 import GridScan from '@/components/ui/GridScan';
 import { useStore } from '@/lib/store';
 import { getAssetConfig, isArcAsset, type ArcAsset } from '@/lib/arc/config';
@@ -180,7 +180,7 @@ export default function LeaderboardPage() {
                                             <td className="px-10 py-8">
                                                 <div className="flex items-center gap-4">
                                                     <span className={`text-xl font-black ${index < 3 ? 'text-white' : 'text-white/20'}`}>
-                                                        {index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`}
+                                                        {`#${index + 1}`}
                                                     </span>
                                                 </div>
                                             </td>

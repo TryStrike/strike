@@ -18,6 +18,21 @@
   --color-neon-green: var(--neon-green);
   --color-neon-purple: var(--neon-purple);
   --breakpoint-xs: 380px;
+
+  /* Minimal light system (landing + trade) */
+  --color-ink: #0A0C10;
+  --color-muted: #4A505C;
+  --color-subtle: #6B7280;
+  --color-faint: #9AA1AD;
+  --color-line: #E7E9ED;
+  --color-surface: #F6F7F9;
+  --color-up: #2151F5;
+  --color-up-soft: #EEF2FF;
+  --color-down: #C2410C;
+  --color-down-soft: #FFF3EC;
+  --font-tight: var(--font-inter-tight), system-ui, sans-serif;
+  --font-serif: var(--font-instrument-serif), Georgia, serif;
+  --font-jet: var(--font-jetbrains-mono), ui-monospace, monospace;
 }
 
 body {

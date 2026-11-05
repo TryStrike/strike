@@ -3,6 +3,8 @@
 import React from 'react';
 import { usePrivy } from '@privy-io/react-auth';
 import { useStore } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
+import { SignOut, Wallet } from '@phosphor-icons/react';
 import { useDisconnect as useWagmiDisconnect } from 'wagmi';
 import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
 
@@ -14,7 +16,7 @@ function WalletConnectButton({
   logoutPrivy?: () => void;
 }) {
   const { disconnect: wagmiDisconnect } = useWagmiDisconnect();
-  const { address, setConnectModalOpen, disconnect: disconnectStore } = useStore();
+  const { address, setConnectModalOpen, disconnect: disconnectStore } = useStore(useShallow((s) => ({ address: s.address, setConnectModalOpen: s.setConnectModalOpen, disconnect: s.disconnect })));
 
   const handleDisconnect = () => {
     logoutPrivy?.();
@@ -25,54 +27,38 @@ function WalletConnectButton({
   const isConnected = !!address;
 
   if (!ready) {
+    return <div className="h-9 w-32 animate-pulse rounded-full bg-surface" />;
+  }
+
+  if (!isConnected) {
     return (
-      <div className="w-20 h-8 bg-white/5 animate-pulse rounded-lg" />
+      <button
+        type="button"
+        onClick={() => setConnectModalOpen(true)}
+        data-tour="connect-button"
+        className="inline-flex h-9 items-center gap-2 rounded-full bg-ink px-4 font-tight text-sm font-semibold text-white transition-colors hover:bg-up"
+      >
+        <Wallet size={16} />
+        Connect wallet
+      </button>
     );
   }
 
   return (
-    <div className="flex items-center gap-3">
-      {!isConnected ? (
-        <button
-          type="button"
-          onClick={() => setConnectModalOpen(true)}
-          data-tour="connect-button"
-          className="px-4 py-1.5 bg-white/5 hover:bg-white/10 text-white rounded-lg text-[10px] font-bold uppercase tracking-widest border border-white/10 transition-all active:scale-95"
-        >
-          Connect
-        </button>
-      ) : (
-        <div className="flex items-center gap-1.5 sm:gap-2">
-          <div className="bg-white/5 border border-white/10 rounded-xl px-2 sm:px-3 py-1.5 flex items-center gap-2 sm:gap-2.5">
-            <div className="w-4 h-4 shrink-0">
-              <img
-                src="/logos/usdc.png"
-                alt="Arc USDC"
-                className="w-full h-full object-contain"
-              />
-            </div>
-            <div className="flex flex-col items-center sm:items-end">
-              <span className="text-[8px] text-gray-500 font-bold uppercase tracking-tighter">
-                Arc
-              </span>
-              <span className="text-white text-[10px] sm:text-[11px] font-mono leading-none">
-                {address ? `${address.slice(0, 4)}...${address.slice(-3)}` : '...'}
-              </span>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleDisconnect}
-            className="w-8 h-8 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-500 hover:bg-red-500/20 transition-all"
-            title="Disconnect"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
-          </button>
-        </div>
-      )}
+    <div className="flex items-center gap-1 font-tight">
+      <span className="inline-flex h-9 items-center gap-2 rounded-full bg-surface px-3.5 font-jet text-[13px] text-ink">
+        <span className="h-1.5 w-1.5 rounded-full bg-up" aria-hidden="true" />
+        {address ? `${address.slice(0, 6)}…${address.slice(-4)}` : '…'}
+      </span>
+      <button
+        type="button"
+        onClick={handleDisconnect}
+        aria-label="Disconnect wallet"
+        title="Disconnect"
+        className="grid h-9 w-9 place-items-center rounded-full text-subtle transition-colors hover:bg-surface hover:text-down"
+      >
+        <SignOut size={16} />
+      </button>
     </div>
   );
 }

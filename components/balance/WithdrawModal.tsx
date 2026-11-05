@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
-import { Button } from '@/components/ui/Button';
+import { Button, Segmented } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount } from 'wagmi';
@@ -162,6 +162,9 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
     }
   };
 
+  const parsedAmount = parseFloat(amount);
+  const hasAmount = Number.isFinite(parsedAmount) && parsedAmount > 0;
+
   return (
     <Modal
       isOpen={isOpen}
@@ -169,113 +172,79 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
       title={`Withdraw ${asset}`}
       showCloseButton={!isLoading}
     >
-      <div className="space-y-4">
-        {/* Arc asset selector. */}
-        <div className="flex gap-2">
-          {ARC_ASSETS.map(token => (
-            <button
-              key={token}
-              onClick={() => handleAssetChange(token)}
-              disabled={isLoading}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg border text-xs font-black uppercase tracking-widest transition-colors disabled:opacity-50 ${
-                asset === token
-                  ? 'border-[#00f5ff]/60 bg-[#00f5ff]/10 text-[#00f5ff]'
-                  : 'border-white/10 bg-white/[0.03] text-white/30 hover:text-white/60'
-              }`}
-            >
-              <img
-                src="/logos/usdc.png"
-                alt={token}
-                className="w-4 h-4 rounded-full"
-              />
-              {token}
-            </button>
-          ))}
-        </div>
+      <p className="-mt-4 mb-6 text-[15px] text-muted">
+        Withdrawals are reviewed before payout to your wallet.
+      </p>
 
-        <div className="bg-gradient-to-br from-[#00f5ff]/10 to-purple-500/10 border border-[#00f5ff]/30 rounded-lg p-3 relative overflow-hidden">
-          <div className="absolute top-0 right-0 px-2 py-0.5 bg-[#00f5ff]/20 text-[#00f5ff] text-[8px] font-bold uppercase tracking-tighter rounded-bl-lg">
-            Arc
-          </div>
-          <p className="text-gray-400 text-[10px] uppercase tracking-wider mb-1 font-mono">
-            House Balance
-          </p>
-          <p className="text-[#00f5ff] text-xl font-bold font-mono flex items-center gap-2">
-            <img
-              src="/logos/usdc.png"
-              alt={asset}
-              className="w-5 h-5 rounded-full"
-            />
-            {houseBalance.toFixed(4)} {asset}
-          </p>
-        </div>
+      {ARC_ASSETS.length > 1 && (
+        <Segmented
+          className="mb-4"
+          options={ARC_ASSETS.map(token => ({ value: token, label: token }))}
+          value={asset}
+          onChange={handleAssetChange}
+          disabled={isLoading}
+        />
+      )}
 
-        <div className="space-y-2">
-          <label
-            htmlFor="withdraw-amount"
-            className="text-gray-400 text-xs font-mono uppercase"
-          >
-            Amount to Withdraw
-          </label>
-          <div className="relative">
-            <input
-              id="withdraw-amount"
-              type="text"
-              value={amount}
-              onChange={handleAmountChange}
-              placeholder="0.00"
-              disabled={isLoading}
-              className={`
-                w-full px-4 py-3 bg-black/50 border rounded-lg text-lg
-                text-white font-mono
-                focus:outline-none focus:ring-1 focus:ring-[#00f5ff]
-                disabled:opacity-50 disabled:cursor-not-allowed
-                ${error ? 'border-red-500' : 'border-[#00f5ff]/30'}
-              `}
-            />
-            <button
-              onClick={handleMaxClick}
-              disabled={isLoading || houseBalance <= 0}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[#00f5ff] hover:text-cyan-400 font-mono disabled:opacity-50 transition-colors uppercase tracking-wider"
-            >
-              Use Max
-            </button>
-          </div>
-        </div>
-
-        {amount && !error && (
-          <div className="bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 space-y-1">
-            <p className="text-gray-400 text-[10px] font-mono uppercase tracking-wider">
-              Protocol Fee: {feeLabel}
-            </p>
-            <p className="text-xs font-mono text-gray-300">
-              You Receive:{' '}
-              <span className="text-green-400">
-                {(parseFloat(amount) * (1 - feePercent)).toFixed(4)} {asset}
-              </span>
-            </p>
-          </div>
-        )}
-
-        {error && (
-          <div className="bg-red-900/20 border border-red-500 rounded-lg px-3 py-2">
-            <p className="text-red-400 text-xs font-mono">{error}</p>
-          </div>
-        )}
-
-        <div className="flex gap-3 pt-2">
-          <Button variant="secondary" onClick={onClose} disabled={isLoading} className="flex-1">
-            Cancel
-          </Button>
-          <Button
-            onClick={handleWithdraw}
-            disabled={isLoading || !amount || houseBalance <= 0}
-            className="flex-1"
-          >
-            {isLoading ? 'Withdrawing…' : `Withdraw ${asset}`}
-          </Button>
-        </div>
+      <label htmlFor="withdraw-amount" className="sr-only">Amount to withdraw</label>
+      <div
+        className={`flex h-16 items-center rounded-2xl bg-white px-5 ring-1 ring-inset transition-shadow focus-within:ring-ink ${
+          error ? 'ring-down' : 'ring-line'
+        }`}
+      >
+        <input
+          id="withdraw-amount"
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          value={amount}
+          onChange={handleAmountChange}
+          placeholder="0.00"
+          disabled={isLoading}
+          className="min-w-0 flex-1 bg-transparent font-jet text-[28px] font-semibold tracking-[-0.03em] outline-none placeholder:text-faint disabled:opacity-50"
+        />
+        <button
+          type="button"
+          onClick={handleMaxClick}
+          disabled={isLoading || houseBalance <= 0}
+          className="ml-2 rounded-full bg-surface px-3 py-1 font-jet text-xs text-muted transition-colors hover:text-ink disabled:opacity-40"
+        >
+          Max
+        </button>
+        <span className="ml-2 font-jet text-sm text-faint">{asset}</span>
       </div>
+
+      <dl className="mt-6 space-y-2 font-jet text-[13px]">
+        <div className="flex justify-between">
+          <dt className="text-subtle">Available</dt>
+          <dd>{houseBalance.toFixed(4)} {asset}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-subtle">Fee</dt>
+          <dd>{feeLabel}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-subtle">You receive</dt>
+          <dd className="font-semibold">
+            {hasAmount && !error ? (parsedAmount * (1 - feePercent)).toFixed(4) : '0.0000'} {asset}
+          </dd>
+        </div>
+      </dl>
+
+      {error && (
+        <p role="alert" className="mt-4 rounded-xl bg-down-soft px-3.5 py-2.5 text-[13px] text-down">
+          {error}
+        </p>
+      )}
+
+      <Button
+        size="lg"
+        onClick={handleWithdraw}
+        disabled={isLoading || !amount || houseBalance <= 0}
+        className="mt-6 w-full"
+      >
+        {isLoading ? 'Withdrawing…' : `Withdraw ${asset}`}
+      </Button>
     </Modal>
   );
 };

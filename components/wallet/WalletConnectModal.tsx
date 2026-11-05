@@ -5,34 +5,48 @@ import { useStore } from '@/lib/store';
 import { usePrivy } from '@privy-io/react-auth';
 import { useModal } from 'connectkit';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Globe, ShieldCheck, Mail } from 'lucide-react';
+import { CaretRight, EnvelopeSimple, Wallet, X } from '@phosphor-icons/react';
 import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
+
+type IconType = typeof Wallet;
+
+function OptionRow({ icon: Icon, title, description, onClick }: {
+    icon: IconType;
+    title: string;
+    description: string;
+    onClick: () => void;
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="group flex w-full items-center gap-4 rounded-2xl bg-white p-4 text-left ring-1 ring-inset ring-line transition-shadow hover:ring-ink"
+        >
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-surface text-ink">
+                <Icon size={20} />
+            </span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[15px] font-semibold">{title}</span>
+                <span className="mt-0.5 block text-[13px] text-subtle">{description}</span>
+            </span>
+            <CaretRight size={16} className="shrink-0 text-faint transition-colors group-hover:text-ink" />
+        </button>
+    );
+}
 
 function PrivySocialLoginButton({ onConnected }: { onConnected: () => void }) {
     const { login } = usePrivy();
 
     return (
-        <button
-            type="button"
+        <OptionRow
+            icon={EnvelopeSimple}
+            title="Email or social"
+            description="Sign in with Google, X or email."
             onClick={() => {
                 login();
                 onConnected();
             }}
-            className="w-full flex items-center gap-3 sm:gap-4 p-3 sm:p-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-all group relative overflow-hidden"
-        >
-            <div className="absolute inset-0 bg-gradient-to-r from-purple-500/0 via-purple-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity" />
-            <div className="w-10 h-10 sm:w-12 sm:h-12 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
-                <Mail className="w-7 h-7 sm:w-8 sm:h-8 text-purple-300" />
-            </div>
-            <div className="flex-1 text-left">
-                <div className="flex items-center gap-2">
-                    <span className="font-bold text-white text-sm sm:text-base">Social Login</span>
-                    <span className="px-1.5 py-0.5 rounded text-[8px] sm:text-[10px] bg-purple-500/20 text-purple-400 font-bold uppercase tracking-wider">Email</span>
-                </div>
-                <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">Google, Twitter, Email, etc.</p>
-            </div>
-            <Globe className="w-4 h-4 sm:w-5 sm:h-5 text-gray-600 group-hover:text-purple-400 transition-colors" />
-        </button>
+        />
     );
 }
 
@@ -57,66 +71,43 @@ export const WalletConnectModal: React.FC = () => {
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
                     onClick={() => setOpen(false)}
-                    className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+                    className="absolute inset-0 bg-ink/20 backdrop-blur-sm"
                 />
 
                 <motion.div
-                    initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Connect"
+                    initial={{ opacity: 0, scale: 0.97, y: 12 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                    className="relative w-full max-w-md max-h-[90vh] bg-[#0f0f0f] border border-white/10 rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col"
+                    exit={{ opacity: 0, scale: 0.97, y: 12 }}
+                    className="relative max-h-[90vh] w-full max-w-[420px] overflow-y-auto rounded-[28px] bg-white p-7 font-tight text-ink ring-1 ring-line shadow-[0_40px_80px_-40px_rgba(10,12,16,0.35)]"
                 >
-                    <div className="p-5 sm:p-6 border-b border-white/5 flex items-center justify-between bg-gradient-to-r from-purple-500/10 to-transparent shrink-0">
+                    <div className="flex items-start justify-between gap-4">
                         <div>
-                            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-                                Connect Wallet
-                            </h2>
-                            <p className="text-[11px] sm:text-sm text-gray-400 mt-1">
-                                Arc
-                            </p>
+                            <h2 className="text-[22px] font-semibold tracking-tight">Connect</h2>
+                            <p className="mt-1 text-[15px] text-muted">Trade with USDC on Arc.</p>
                         </div>
-                        <div className="flex items-center gap-2">
-                            <button
-                                type="button"
-                                onClick={() => setOpen(false)}
-                                className="p-2 hover:bg-white/5 rounded-full transition-colors group"
-                            >
-                                <X className="w-5 h-5 text-gray-500 group-hover:text-white" />
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="p-4 sm:p-6 space-y-2 sm:space-y-3 overflow-y-auto no-scrollbar">
                         <button
                             type="button"
-                            onClick={handleArcConnect}
-                            className="w-full flex items-center gap-3 sm:gap-4 p-3 sm:p-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-all group relative overflow-hidden"
+                            onClick={() => setOpen(false)}
+                            aria-label="Close"
+                            className="-mr-2 -mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-subtle transition-colors hover:bg-surface hover:text-ink"
                         >
-                            <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/0 via-emerald-500/5 to-emerald-500/0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            <img
-                                src="/logos/usdc.png"
-                                alt="Arc USDC"
-                                className="w-10 h-10 sm:w-12 sm:h-12 object-contain shrink-0 group-hover:scale-110 transition-transform"
-                            />
-                            <div className="flex-1 text-left">
-                                <div className="flex items-center gap-2">
-                                    <span className="font-bold text-white text-sm sm:text-base">Arc</span>
-                                    <span className="px-1.5 py-0.5 rounded text-[8px] sm:text-[10px] bg-emerald-500/20 text-emerald-400 font-bold uppercase tracking-wider">USDC</span>
-                                </div>
-                                <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">MetaMask, WalletConnect, etc.</p>
-                            </div>
-                            <ShieldCheck className="w-4 h-4 sm:w-5 sm:h-5 text-gray-600 group-hover:text-emerald-500 transition-colors" />
+                            <X size={18} />
                         </button>
+                    </div>
 
+                    <div className="mt-7 space-y-3">
+                        <OptionRow
+                            icon={Wallet}
+                            title="Browser wallet"
+                            description="MetaMask, WalletConnect and others."
+                            onClick={handleArcConnect}
+                        />
                         {privyEnabled ? (
                             <PrivySocialLoginButton onConnected={() => setOpen(false)} />
                         ) : null}
-                    </div>
-
-                    <div className="p-4 bg-white/5 text-center shrink-0">
-                        <p className="text-[8px] sm:text-[10px] text-gray-500 uppercase tracking-widest font-bold">
-                            STRIKE Protocol
-                        </p>
                     </div>
                 </motion.div>
             </div>

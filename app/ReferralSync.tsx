@@ -3,10 +3,11 @@
 import { useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useStore } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
 
 function ReferralSyncInner() {
     const searchParams = useSearchParams();
-    const { setReferredBy, fetchReferralInfo, address, isConnected } = useStore();
+    const { setReferredBy, fetchReferralInfo, address, isConnected } = useStore(useShallow((s) => ({ setReferredBy: s.setReferredBy, fetchReferralInfo: s.fetchReferralInfo, address: s.address, isConnected: s.isConnected })));
 
     useEffect(() => {
         const ref = searchParams.get('ref');

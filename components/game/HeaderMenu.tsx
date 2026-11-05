@@ -3,7 +3,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
 import Link from 'next/link';
+import { CaretRight } from '@phosphor-icons/react';
 
 export function HeaderMenu() {
     const [isOpen, setIsOpen] = useState(false);
@@ -12,7 +14,7 @@ export function HeaderMenu() {
     const {
         setIsTourOpen,
         username
-    } = useStore();
+    } = useStore(useShallow((s) => ({ setIsTourOpen: s.setIsTourOpen, username: s.username })));
 
     const [isTradePage, setIsTradePage] = useState(false);
 
@@ -103,9 +105,7 @@ export function HeaderMenu() {
                                         </div>
 
                                         <div className="opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0">
-                                            <svg className="w-3 h-3 text-white/40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M9 5l7 7-7 7" />
-                                            </svg>
+                                            <CaretRight className="w-3 h-3 text-white/40" weight="bold" />
                                         </div>
                                     </div>
                                 );

@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
-import { CheckCircle2, Clock3, Copy, ExternalLink, X } from 'lucide-react';
+import React, { useState } from 'react';
+import { ArrowUpRight, Check, CheckCircle, Clock, Copy, X } from '@phosphor-icons/react';
+import { Button } from '@/components/ui/kit';
 import { explorerTxUrl } from '@/lib/arc/config';
 
 export interface ReceiptData {
@@ -40,107 +41,75 @@ export const ReceiptDrawer: React.FC<{
   onClose: () => void;
   receipt: ReceiptData | null;
 }> = ({ open, onClose, receipt }) => {
+  // Hooks run before the early return so their order never changes between renders.
+  const [copied, setCopied] = useState(false);
+  const tx = receipt?.txHash ? receipt.txHash.split('|')[0] : null;
+
   if (!open || !receipt) return null;
 
   const link = explorerUrl(receipt.chain, receipt.txHash);
   const isPending = receipt.status === 'pending';
-  const [copied, setCopied] = useState(false);
-
   const title = receipt.kind === 'deposit' ? 'Deposit' : 'Withdrawal';
-  const StatusIcon = isPending ? Clock3 : CheckCircle2;
+  const StatusIcon = isPending ? Clock : CheckCircle;
 
-  const tx = useMemo(() => {
-    if (!receipt.txHash) return null;
-    return receipt.txHash.split('|')[0];
-  }, [receipt.txHash]);
+  const rows = [
+    { label: 'Fee', value: `${formatAmount(receipt.fee)} ${receipt.currency}` },
+    { label: 'Net', value: `${formatAmount(receipt.net)} ${receipt.currency}` },
+    { label: 'Network', value: receipt.chain },
+  ];
 
   return (
-    /* Full-screen backdrop */
     <div className="fixed inset-0 z-[12000] flex items-center justify-center p-4">
-      {/* Dim backdrop — click to close */}
+      <div className="absolute inset-0 bg-ink/20 backdrop-blur-sm" onClick={onClose} />
+
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
-      {/* Card — centered, fixed max-width, no overflow issues */}
-      <div className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-[#0c0c14] shadow-[0_32px_80px_rgba(0,0,0,0.8)] overflow-hidden">
-
-        {/* ── Header ────────────────────────────────────────────── */}
-        <div className="flex items-center gap-3 px-4 py-3.5 border-b border-white/10">
-          <div className={[
-            'h-9 w-9 rounded-xl flex items-center justify-center shrink-0',
-            isPending ? 'bg-amber-500/15 text-amber-300' : 'bg-emerald-500/15 text-emerald-300',
-          ].join(' ')}>
-            <StatusIcon className="h-5 w-5" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-black text-white leading-none">
-              {title}
-              <span className={[
-                'ml-2 text-[10px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md',
-                isPending ? 'bg-amber-500/15 text-amber-300' : 'bg-emerald-500/15 text-emerald-300',
-              ].join(' ')}>
-                {isPending ? 'Pending' : 'Confirmed'}
-              </span>
-            </p>
-            <p className="mt-0.5 text-[10px] text-white/35 font-mono truncate">
-              {receipt.chain} · {new Date(receipt.createdAt).toLocaleString()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${title} receipt`}
+        className="relative z-10 w-full max-w-[400px] rounded-[28px] bg-white p-7 font-tight text-ink ring-1 ring-line shadow-[0_40px_80px_-40px_rgba(10,12,16,0.35)]"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-[22px] font-semibold tracking-tight">
+              <StatusIcon size={20} className={isPending ? 'text-subtle' : 'text-up'} />
+              {title} {isPending ? 'pending' : 'confirmed'}
+            </h2>
+            <p className="mt-1 text-[13px] text-subtle">
+              {new Date(receipt.createdAt).toLocaleString()}
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="h-8 w-8 rounded-lg text-white/40 hover:text-white hover:bg-white/10 flex items-center justify-center transition-colors shrink-0"
+            aria-label="Close"
+            className="-mr-2 -mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-subtle transition-colors hover:bg-surface hover:text-ink"
           >
-            <X className="h-4 w-4" />
+            <X size={18} />
           </button>
         </div>
 
-        {/* ── Amount ────────────────────────────────────────────── */}
-        <div className="px-4 pt-4">
-          <p className="text-[10px] uppercase tracking-widest text-white/35">Amount</p>
-          <div className="mt-1 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-white tabular-nums tracking-tight">
-              {formatAmount(receipt.amount)}
-            </span>
-            <span className="text-sm font-bold text-purple-300">{receipt.currency}</span>
-          </div>
+        <div className="mt-7 flex items-baseline gap-2">
+          <span className="font-jet text-[36px] font-semibold leading-none tracking-[-0.04em] tabular-nums">
+            {formatAmount(receipt.amount)}
+          </span>
+          <span className="font-jet text-sm text-faint">{receipt.currency}</span>
         </div>
 
-        {/* ── Fee / Net / Chain ──────────────────────────────────── */}
-        <div className="px-4 pt-3 grid grid-cols-3 gap-2">
-          {[
-            { label: 'Fee',   value: formatAmount(receipt.fee),  color: 'text-rose-300'    },
-            { label: 'Net',   value: formatAmount(receipt.net),  color: 'text-emerald-300' },
-            { label: 'Chain', value: receipt.chain,              color: 'text-white/80'    },
-          ].map(({ label, value, color }) => (
-            <div key={label} className="rounded-xl bg-white/[0.04] border border-white/10 px-2.5 py-2.5">
-              <p className="text-[9px] uppercase tracking-widest text-white/30">{label}</p>
-              <p className={`mt-1 text-xs font-mono font-semibold tabular-nums ${color}`}>{value}</p>
+        <dl className="mt-6 space-y-2 font-jet text-[13px]">
+          {rows.map(({ label, value }) => (
+            <div key={label} className="flex justify-between">
+              <dt className="text-subtle">{label}</dt>
+              <dd>{value}</dd>
             </div>
           ))}
-        </div>
-
-        {/* ── Pending note ──────────────────────────────────────── */}
-        {isPending && (
-          <div className="mx-4 mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2.5">
-            <p className="text-[10px] font-black uppercase tracking-widest text-amber-300">Manual approval required</p>
-            <p className="mt-0.5 text-[11px] text-amber-200/70 leading-relaxed">
-              Your withdrawal will be processed once approved by the admin.
-            </p>
-          </div>
-        )}
-
-        {/* ── Transaction ───────────────────────────────────────── */}
-        {tx && (
-          <div className="mx-4 mt-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
+          {tx && (
             <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-[9px] uppercase tracking-widest text-white/30">Transaction</p>
-                <p className="mt-0.5 text-[11px] font-mono text-white/70">{maskHash(tx)}</p>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
+              <dt className="text-subtle">Transaction</dt>
+              <dd className="flex items-center gap-1">
+                <span>{maskHash(tx)}</span>
                 <button
+                  type="button"
+                  aria-label={copied ? 'Copied' : 'Copy transaction hash'}
                   onClick={async () => {
                     try {
                       await navigator.clipboard.writeText(tx);
@@ -148,37 +117,35 @@ export const ReceiptDrawer: React.FC<{
                       window.setTimeout(() => setCopied(false), 1500);
                     } catch { /* ignore */ }
                   }}
-                  className="h-7 px-2.5 rounded-lg border border-white/10 bg-white/[0.04] hover:bg-white/10 text-white/70 text-[11px] font-bold flex items-center gap-1.5 transition-colors"
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-faint transition-colors hover:bg-surface hover:text-ink"
                 >
-                  <Copy className="h-3.5 w-3.5" />
-                  {copied ? 'Copied!' : 'Copy'}
+                  {copied ? <Check size={14} weight="bold" className="text-up" /> : <Copy size={16} />}
                 </button>
                 {link && (
                   <a
                     href={link}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="h-7 px-2.5 rounded-lg border border-white/10 bg-white/[0.04] hover:bg-white/10 text-white/70 text-[11px] font-bold flex items-center gap-1.5 transition-colors"
+                    aria-label="View on explorer"
+                    className="flex h-7 w-7 items-center justify-center rounded-full text-faint transition-colors hover:bg-surface hover:text-ink"
                   >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    View
+                    <ArrowUpRight size={16} />
                   </a>
                 )}
-              </div>
+              </dd>
             </div>
-          </div>
+          )}
+        </dl>
+
+        {isPending && (
+          <p className="mt-5 text-[13px] leading-relaxed text-muted">
+            Paid out to your wallet once reviewed.
+          </p>
         )}
 
-        {/* ── Close CTA ─────────────────────────────────────────── */}
-        <div className="px-4 py-4">
-          <button
-            onClick={onClose}
-            className="w-full py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/10 border border-white/10 text-white/70 hover:text-white text-xs font-bold uppercase tracking-widest transition-colors"
-          >
-            Close
-          </button>
-        </div>
-
+        <Button variant="secondary" size="lg" onClick={onClose} className="mt-7 w-full">
+          Done
+        </Button>
       </div>
     </div>
   );

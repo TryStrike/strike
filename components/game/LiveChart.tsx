@@ -2,13 +2,16 @@
 
 import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { line, curveCatmullRom, curveMonotoneX } from 'd3-shape';
+import { line, curveMonotoneX } from 'd3-shape';
 import { useStore } from '@/lib/store';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { AssetType } from '@/lib/utils/priceFeed';
 import { motion, AnimatePresence } from 'framer-motion';
 import { playWinSound, playLoseSound } from '@/lib/utils/sounds';
 import { useToast } from '@/lib/hooks/useToast';
+import { CaretDown, X, MagnifyingGlass, Star, TrendUp, Waveform, ArrowsDownUp, Pulse } from '@phosphor-icons/react';
+
+const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-[0_20px_50px_-20px_rgba(10,12,16,0.25)] font-tight';
 
 interface LiveChartProps {
   betAmount: string;
@@ -254,7 +257,7 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
   if (showFallback || allSources.length === 0) {
     return (
       <div className={`relative flex items-center justify-center w-full h-full ${className}`}>
-        <span className="font-black text-sm">{asset[0]}</span>
+        <span className="font-semibold text-sm text-ink">{asset[0]}</span>
       </div>
     );
   }
@@ -268,8 +271,8 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
   if (isCommodity) {
     const text = asset === 'WTI' || asset === 'BRENT' ? 'OIL' : asset;
     return (
-      <div className={`relative flex items-center justify-center overflow-hidden w-full h-full rounded-full bg-gradient-to-br from-orange-500/20 to-black border border-orange-500/30 ${className}`}>
-        <span className="font-black text-[10px] text-orange-400 tracking-tighter">{text}</span>
+      <div className={`relative flex items-center justify-center overflow-hidden w-full h-full rounded-full bg-surface ring-1 ring-line ${className}`}>
+        <span className="font-jet font-semibold text-[9px] text-muted">{text}</span>
       </div>
     );
   }
@@ -278,20 +281,8 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
     ? className.replace('object-contain', '').trim() + ' scale-[1.5] object-cover'
     : `${className} object-contain`;
 
-  const bgColor = isMetal 
-    ? 'bg-gradient-to-br from-yellow-400/20 to-black' 
-    : isForex 
-    ? 'bg-black/40' 
-    : 'bg-white/5';
-
-  const borderColor = isMetal 
-    ? 'border-yellow-400/50' 
-    : isForex 
-    ? 'border-white/20' 
-    : 'border-white/10';
-
   return (
-    <div className={`relative flex items-center justify-center overflow-hidden w-full h-full rounded-full ${bgColor} ${borderColor} border ${isNear ? 'bg-white rounded-full scale-90' : ''}`}>
+    <div className={`relative flex items-center justify-center overflow-hidden w-full h-full rounded-full bg-white ring-1 ring-line ${isNear ? 'scale-90' : ''}`}>
       <img
         key={`${asset}-${attemptIndex}`}
         src={currentSrc}
@@ -303,7 +294,8 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
   );
 };
 
-export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
+// Memoised: it animates on its own clock, so parent re-renders shouldn't redraw it.
+export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartProps) {
   const priceHistory = useStore((state) => state.priceHistory);
   const currentPrice = useStore((state) => state.currentPrice);
   const selectedAsset = useStore((state) => state.selectedAsset);
@@ -328,6 +320,9 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [now, setNow] = useState(Date.now());
+  // Display-only price for the chart tip: eases toward the live price each frame so
+  // ticks flow instead of snapping. Settlement always uses the real store price.
+  const [tipPrice, setTipPrice] = useState(0);
   const [isAssetDropdownOpen, setIsAssetDropdownOpen] = useState(false);
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
@@ -513,9 +508,11 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
         });
       }
     };
-    window.addEventListener('resize', updateDimensions);
     updateDimensions();
-    return () => window.removeEventListener('resize', updateDimensions);
+    // The chart sits beside the trade panel, so its size changes without a window resize.
+    const observer = new ResizeObserver(updateDimensions);
+    if (containerRef.current) observer.observe(containerRef.current);
+    return () => observer.disconnect();
   }, []);
 
   // Reset Y-axis domain when asset changes to avoid getting stuck at old price levels
@@ -533,6 +530,8 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
       // Throttle to ~15fps (64ms) for significantly better performance
       if (currentTime - lastTime > 64) {
         setNow(currentTime);
+        const target = currentPriceRef.current;
+        setTipPrice((prev) => (prev <= 0 || target <= 0 || Math.abs(target - prev) / target > 0.01 ? target : prev + (target - prev) * 0.25));
         lastTime = currentTime;
       }
 
@@ -642,11 +641,21 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
+  /**
+   * Box geometry for a drag. Boxes live in the future, so a drag over the history side
+   * keeps its width and height but is projected to start just past the price tip.
+   */
+  const drawBoxGeometry = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const tip = (scales?.tipX ?? 0) + 2;
+    const width = Math.min(Math.abs(b.x - a.x), pixelsPerSecond * 20);
+    const height = Math.min(Math.abs(b.y - a.y), dimensions.height * 0.2);
+    const top = b.y >= a.y ? a.y : a.y - height;
+    return { x: Math.max(Math.min(a.x, b.x), tip), y: top, width, height };
+  };
+
   const handleDrawMouseDown = (e: React.MouseEvent) => {
     if (gameMode !== 'draw' || !scales || e.button !== 0) return;
     const pos = getRelativePos(e);
-    // Require drawing to start on/after the current price tip.
-    if (pos.x <= scales.tipX) return;
 
     setPendingBox(null);
     setDrawStart(pos);
@@ -659,14 +668,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
     if (gameMode !== 'draw' || !scales) return;
     if (!isDrawing || !drawStart) return;
 
-    const pos = getRelativePos(e);
-
-    const maxW = pixelsPerSecond * 20;
-    const maxH = dimensions.height * 0.20;
-
-    const clampedX = Math.max(scales.tipX + 2, Math.min(pos.x, drawStart.x + maxW));
-    const clampedY = Math.max(drawStart.y - maxH, Math.min(pos.y, drawStart.y + maxH));
-    setDrawCurrent({ x: clampedX, y: clampedY });
+    setDrawCurrent(getRelativePos(e));
   };
 
   const finalizeDrawBox = () => {
@@ -679,10 +681,11 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
 
     setIsDrawing(false);
 
-    const minX = Math.min(drawStart.x, drawCurrent.x);
-    const maxX = Math.max(drawStart.x, drawCurrent.x);
-    const minY = Math.min(drawStart.y, drawCurrent.y);
-    const maxY = Math.max(drawStart.y, drawCurrent.y);
+    const box = drawBoxGeometry(drawStart, drawCurrent);
+    const minX = box.x;
+    const maxX = box.x + box.width;
+    const minY = box.y;
+    const maxY = box.y + box.height;
 
     const minBoxHeightPx = 2;
     const maxBoxHeightPx = dimensions.height * 0.20;
@@ -834,11 +837,13 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
 
 
     // Ensure we have at least history or current point
-    const pointsToRender = [...visiblePoints];
-    
-    // Always include current live point
+    // Upstream feeds repeat the last price between real updates; keeping only the points
+    // where the price actually changed lets the curve flow instead of stepping.
+    const pointsToRender = visiblePoints.filter((p, i) => i === 0 || p.price !== visiblePoints[i - 1].price);
+
+    // Always include current live point (eased for display)
     if (currentPrice > 0) {
-      pointsToRender.push({ timestamp: now, price: currentPrice });
+      pointsToRender.push({ timestamp: now, price: tipPrice || currentPrice });
     }
 
     // Need at least 2 points for a line
@@ -848,14 +853,14 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
       const lineGenerator = line<{ timestamp: number, price: number }>()
         .x((d) => scales.xScale(d.timestamp))
         .y((d) => scales.yScale(d.price))
-        .curve(curveCatmullRom.alpha(0.5));
+        .curve(curveMonotoneX);
 
       return lineGenerator(pointsToRender) || '';
     } catch (err) {
       console.error("Chart line generation error:", err);
       return '';
     }
-  }, [scales, priceHistory, currentPrice, now]);
+  }, [scales, priceHistory, currentPrice, now, tipPrice]);
 
 
   // TECHNICAL INDICATORS CALCULATION
@@ -1107,8 +1112,9 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
           id: `cell-${colTimestamp}-${priceLevelIndex}`,
           x: colX,
           y,
-          width: colWidth - 3,
-          height: Math.max(rowHeight - 3, 5),
+          // Flush cells: neighbours share a hairline instead of leaving a gutter.
+          width: colWidth,
+          height: Math.max(rowHeight, 5),
           multiplier,
           isUp,
           status,
@@ -1226,33 +1232,19 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
   }, [scales, gameMode, activeBets, selectedAsset, now, currentPrice, resolveBet, playWinSound, playLoseSound]);
 
   return (
-    <div ref={containerRef} className="absolute inset-0 z-0 bg-[#02040A] overflow-hidden select-none">
+    <div ref={containerRef} className="absolute inset-0 z-0 bg-white font-tight text-ink overflow-hidden select-none">
       {/* Loading State */}
       {isLoadingPrice && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#02040A]/80 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-4">
-            {/* Spinner */}
-            <div className="relative w-16 h-16">
-              <div className="absolute inset-0 border-4 border-purple-500/20 rounded-full"></div>
-              <div className="absolute inset-0 border-4 border-transparent border-t-purple-500 rounded-full animate-spin"></div>
-            </div>
-            {/* Text */}
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/80">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-6 h-6 rounded-full border-2 border-line border-t-up animate-spin" />
             <div className="text-center">
-              <p className="text-white text-sm font-medium mb-1">Loading {currentAssetConfig.name} Price</p>
-              <p className="text-gray-500 text-xs">Connecting to price feed...</p>
+              <p className="text-ink text-sm font-medium">Loading {currentAssetConfig.name}</p>
+              <p className="text-subtle text-xs mt-0.5">Connecting to price feed…</p>
             </div>
           </div>
         </div>
       )}
-
-      {/* Background Grid */}
-      <div
-        className="absolute inset-0 opacity-5 pointer-events-none"
-        style={{
-          backgroundImage: 'linear-gradient(#334155 1px, transparent 1px), linear-gradient(90deg, #334155 1px, transparent 1px)',
-          backgroundSize: '50px 50px'
-        }}
-      />
 
       {/* Box Mode: Grid Cells layer */}
       {gameMode === 'box' && (
@@ -1260,52 +1252,35 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
           {betCells.map((cell: any) => {
             // Visual styling based on status
             let opacity = 0.9;
-            let bg = cell.color;
-            let borderStyle = `1px solid ${cell.borderColor}`;
             let canBet = cell.status === 'future';
-            let extraClass = '';
+            let tone = cell.isBlitzBoosted
+              ? 'bg-down-soft border-down/30 text-down'
+              : 'bg-white border-line text-faint hover:bg-up-soft hover:text-up';
 
             if (cell.status === 'won') {
-              // Won cell - purple with explosion ring effect (higher opacity)
               return (
-                <div key={cell.id} className="pointer-events-none">
-                  <div
-                    className="absolute rounded-sm animate-ping"
-                    style={{
-                      left: cell.x - 5,
-                      top: cell.y - 5,
-                      width: cell.width + 10,
-                      height: cell.height + 10,
-                      backgroundColor: '#a855f7',
-                      opacity: 0.5
-                    }}
-                  />
-                  <div
-                    className="absolute rounded-sm flex items-center justify-center"
-                    style={{
-                      left: cell.x,
-                      top: cell.y,
-                      width: cell.width,
-                      height: cell.height,
-                      backgroundColor: 'rgba(168, 85, 247, 0.9)',
-                      border: '2px solid #ffffff',
-                      boxShadow: '0 0 20px #a855f7'
-                    }}
-                  >
-                    <div className="flex flex-col items-center">
-                      <span className="text-[10px] font-mono font-bold text-white">
-                        x{cell.multiplier}
-                      </span>
-                    </div>
-                  </div>
+                <div
+                  key={cell.id}
+                  className="absolute flex items-center justify-center bg-up pointer-events-none"
+                  style={{ left: cell.x, top: cell.y, width: cell.width, height: cell.height }}
+                >
+                  <span className="font-jet text-[10px] font-medium text-white">
+                    {cell.multiplier}x
+                  </span>
                 </div>
               );
             } else if (cell.status === 'lost') {
-              return null;
+              // Keep the slot so the grid never gets holes.
+              return (
+                <div
+                  key={cell.id}
+                  className="absolute border-b border-r border-line bg-white pointer-events-none"
+                  style={{ left: cell.x, top: cell.y, width: cell.width, height: cell.height }}
+                />
+              );
             } else if (cell.status === 'active') {
               opacity = 1;
-              borderStyle = `2px solid rgba(255,255,255,0.5)`;
-              extraClass = 'ring-1 ring-white/30';
+              tone = 'bg-surface border-ink/15 text-subtle';
             }
 
             const handleClick = async () => {
@@ -1343,54 +1318,37 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
 
             const hasBet = cellBets.has(cell.id);
             if (hasBet) {
-              bg = 'rgba(0, 255, 255, 0.4)';
-              borderStyle = '2px solid #00FFFF';
-              extraClass = 'ring-2 ring-cyan-400/50 animate-pulse';
+              tone = 'bg-up-soft border-up/40 text-up';
             }
 
             return (
               <div
                 key={cell.id}
                 onClick={handleClick}
-                className={`absolute rounded-sm flex items-center justify-center transition-opacity duration-300 ${canBet ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'} ${extraClass}`}
+                className={`absolute border-b border-r flex items-center justify-center transition-colors duration-150 ${tone} ${canBet ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
                 style={{
                   left: cell.x,
                   top: cell.y,
                   width: cell.width,
                   height: cell.height,
-                  backgroundColor: bg,
-                  border: borderStyle,
                   opacity
                 }}
               >
                 <div className="flex flex-col items-center justify-center h-full w-full pointer-events-none">
                   {hasBet ? (
-                    <div className="flex flex-col items-center gap-1">
-                      <div className="flex flex-col items-center">
-                        <span className="text-[14px] font-black text-white tracking-tighter leading-none drop-shadow-[0_0_10px_rgba(0,255,255,0.5)]">
-                          {(parseFloat(cellBets.get(cell.id)?.amount as any || '0') * parseFloat(cellBets.get(cell.id)?.multiplier as any || '1')).toFixed(2)}
-                        </span>
-                        <span className="text-[7px] font-black uppercase text-cyan-400/80 tracking-[0.2em] mt-0.5">
-                          {currencySymbol}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/10 backdrop-blur-md border border-white/10">
-                        <span className="text-[9px] font-bold text-white/50 tracking-tighter">
-                          {cellBets.get(cell.id)?.multiplier}x
-                        </span>
-                      </div>
+                    <div className="flex flex-col items-center leading-none">
+                      <span className="font-jet text-[13px] font-medium text-up">
+                        {(parseFloat(cellBets.get(cell.id)?.amount as any || '0') * parseFloat(cellBets.get(cell.id)?.multiplier as any || '1')).toFixed(2)}
+                        <span className="ml-1 text-[9px] text-up/70">{currencySymbol}</span>
+                      </span>
+                      <span className="font-jet text-[9px] text-up/70 mt-1">
+                        {cellBets.get(cell.id)?.multiplier}x
+                      </span>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center">
-                      <span className={`text-[10px] font-black transition-colors ${cell.isBlitzBoosted ? 'text-orange-100 drop-shadow-[0_0_5px_rgba(255,165,0,0.8)]' : 'text-white/40'}`}>
-                        {cell.multiplier}x
-                      </span>
-                      {cell.isBlitzBoosted && (
-                        <span className="text-[6px] font-black text-orange-400 uppercase tracking-widest mt-0.5">
-                          BLITZ
-                        </span>
-                      )}
-                    </div>
+                    <span className="font-jet text-[10px]">
+                      {cell.multiplier}x
+                    </span>
                   )}
                 </div>
               </div>
@@ -1418,13 +1376,13 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
             <div
               className="absolute z-25 pointer-events-none"
               style={{
-                left: Math.min(drawStart.x, drawCurrent.x),
-                top: Math.min(drawStart.y, drawCurrent.y),
-                width: Math.abs(drawCurrent.x - drawStart.x),
-                height: Math.abs(drawCurrent.y - drawStart.y),
-                border: '2px dashed rgba(168,85,247,0.9)',
-                backgroundColor: 'rgba(168,85,247,0.08)',
-                borderRadius: 4,
+                left: drawBoxGeometry(drawStart, drawCurrent).x,
+                top: drawBoxGeometry(drawStart, drawCurrent).y,
+                width: drawBoxGeometry(drawStart, drawCurrent).width,
+                height: drawBoxGeometry(drawStart, drawCurrent).height,
+                border: '1px dashed #2151F5',
+                backgroundColor: 'rgba(33,81,245,0.06)',
+                borderRadius: 6,
               }}
             />
           )}
@@ -1439,9 +1397,9 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                   top: pendingBox.y,
                   width: pendingBox.width,
                   height: pendingBox.height,
-                  border: '2px dashed rgba(168,85,247,0.95)',
-                  backgroundColor: 'rgba(168,85,247,0.12)',
-                  borderRadius: 4,
+                  border: '1px dashed #2151F5',
+                  backgroundColor: '#EEF2FF',
+                  borderRadius: 6,
                 }}
               />
 
@@ -1453,25 +1411,25 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                   width: 200,
                 }}
               >
-                <div className="bg-black/80 backdrop-blur-xl border border-purple-500/30 rounded-2xl p-3 shadow-2xl">
-                  <div className="flex items-center justify-between gap-3 mb-2">
+                <div className={`${OVERLAY} p-3`}>
+                  <div className="flex items-start justify-between gap-3 mb-2">
                     <div>
-                      <div className="text-white text-xs font-bold uppercase tracking-wider text-purple-300">Draw Bet</div>
-                      <div className="text-white text-sm font-mono">
+                      <div className="text-subtle text-[11px]">Multiplier</div>
+                      <div className="font-jet text-ink text-sm">
                         {pendingBox.multiplier.toFixed(2)}x
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="text-gray-400 text-[10px] font-bold uppercase tracking-wider">Range</div>
-                      <div className="text-white text-[11px] font-mono">
-                        {pendingBox.priceBottom.toFixed(4)} - {pendingBox.priceTop.toFixed(4)}
+                      <div className="text-subtle text-[11px]">Range</div>
+                      <div className="font-jet text-ink text-[11px]">
+                        {pendingBox.priceBottom.toFixed(4)} – {pendingBox.priceTop.toFixed(4)}
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between gap-2 mb-3">
-                    <div className="text-gray-400 text-[10px] font-bold uppercase tracking-wider">Payout</div>
-                    <div className="text-white text-[13px] font-mono">
+                  <div className="flex items-center justify-between gap-2 mb-3 pt-2 border-t border-line">
+                    <div className="text-subtle text-[11px]">Payout</div>
+                    <div className="font-jet text-up text-[13px]">
                       {(parseFloat(betAmount) * pendingBox.multiplier).toFixed(2)} {currencySymbol}
                     </div>
                   </div>
@@ -1480,14 +1438,14 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                     <button
                       onClick={handlePlaceDrawBet}
                       disabled={isPlacingBet || !userAddress}
-                      className="flex-1 py-2 rounded-xl bg-purple-600/90 hover:bg-purple-600 text-white text-xs font-black disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex-1 py-2 rounded-full bg-up hover:bg-up/90 text-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {isPlacingBet ? 'Placing...' : `Bet ${betAmount} ${currencySymbol}`}
+                      {isPlacingBet ? 'Placing…' : `Bet ${betAmount} ${currencySymbol}`}
                     </button>
                     <button
                       onClick={() => setPendingBox(null)}
                       disabled={isPlacingBet}
-                      className="py-2 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 text-xs font-black disabled:opacity-50"
+                      className="py-2 px-3 rounded-full bg-white ring-1 ring-line hover:bg-surface text-muted text-xs font-medium disabled:opacity-50"
                     >
                       Cancel
                     </button>
@@ -1524,8 +1482,8 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                 if (height <= 0) return null;
 
                 const isWinning = currentPrice <= bet.priceTop && currentPrice >= bet.priceBottom;
-                const fill = isWinning ? 'rgba(34,197,94,0.18)' : 'rgba(168,85,247,0.14)';
-                const stroke = isWinning ? 'rgba(34,197,94,0.7)' : 'rgba(168,85,247,0.65)';
+                const fill = isWinning ? '#EEF2FF' : 'rgba(10,12,16,0.03)';
+                const stroke = isWinning ? '#2151F5' : '#9AA1AD';
 
                 return (
                   <g key={bet.id}>
@@ -1534,18 +1492,17 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                       y={tY}
                       width={width}
                       height={height}
-                      rx={4}
+                      rx={6}
                       fill={fill}
                       stroke={stroke}
-                      strokeWidth={2}
+                      strokeWidth={1}
                     />
                     <text
                       x={clampedStartX + 6}
                       y={tY + 16}
-                      fill="rgba(255,255,255,0.85)"
+                      fill={isWinning ? '#2151F5' : '#4A505C'}
                       fontSize={10}
-                      fontFamily="monospace"
-                      fontWeight={800}
+                      className="font-jet"
                     >
                       x{Number(bet.multiplier).toFixed(2)}
                     </text>
@@ -1569,7 +1526,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
           if (expirationX < 0) return null;
 
           const isUp = bet.direction === 'UP';
-          const color = isUp ? '#22c55e' : '#ef4444';
+          const color = isUp ? '#2151F5' : '#C2410C';
 
           return (
             <g key={bet.id}>
@@ -1580,9 +1537,8 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                 x2={Math.max(nowX, expirationX)}
                 y2={strikeY}
                 stroke={color}
-                strokeWidth="2"
+                strokeWidth="1.5"
                 strokeDasharray="4 4"
-                className="opacity-70"
               />
 
               {/* Expiration Line (Vertical) */}
@@ -1592,14 +1548,14 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                   y1={0}
                   x2={expirationX}
                   y2={dimensions.height}
-                  stroke="#ffffff"
+                  stroke="#0A0C10"
                   strokeWidth="1"
-                  strokeOpacity="0.3"
-                  strokeDasharray="8 4"
+                  strokeOpacity="0.2"
+                  strokeDasharray="4 4"
                 />
               )}
 
-              {/* Price Filling Area (Optional but looks cool) */}
+              {/* Price Filling Area */}
               {expirationX > nowX && (
                 <rect
                   x={nowX}
@@ -1617,8 +1573,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                 y={strikeY - 5}
                 fill={color}
                 fontSize="10"
-                fontFamily="monospace"
-                className="font-bold opacity-80"
+                className="font-jet"
               >
                 {bet.direction} {bet.amount} {currencySymbol} {bet.strikePrice && `@ $${bet.strikePrice.toFixed(2)}`}
               </text>
@@ -1641,15 +1596,14 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                 const y = scales.yScale(price);
                 return (
                   <g key={`y-tick-${tick}`}>
-                    <line x1={0} y1={y} x2={dimensions.width} y2={y} stroke="#ffffff" strokeOpacity="0.05" strokeWidth="1" />
+                    <line x1={0} y1={y} x2={dimensions.width} y2={y} stroke="#0A0C10" strokeOpacity="0.05" strokeWidth="1" />
                     <text
-                      x={dimensions.width - 5}
+                      x={dimensions.width - 8}
                       y={y - 5}
-                      fill="#94a3b8"
+                      fill="#9AA1AD"
                       fontSize="10"
-                      fontFamily="monospace"
                       textAnchor="end"
-                      className="opacity-50"
+                      className="font-jet"
                     >
                       {price.toLocaleString('en-US', { minimumFractionDigits: currentAssetConfig.decimals })}
                     </text>
@@ -1690,14 +1644,13 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                   if (x < 0 || x > dimensions.width) return null;
                   return (
                     <g key={`x-tick-${sec}`}>
-                      <line x1={x} y1={0} x2={x} y2={dimensions.height} stroke="#ffffff" strokeOpacity="0.05" strokeWidth="1" />
+                      <line x1={x} y1={0} x2={x} y2={dimensions.height} stroke="#0A0C10" strokeOpacity="0.05" strokeWidth="1" />
                       <text
                         x={x + 5}
                         y={dimensions.height - 10}
-                        fill="#94a3b8"
-                        fontSize="9"
-                        fontFamily="monospace"
-                        className="opacity-40"
+                        fill="#9AA1AD"
+                        fontSize="10"
+                        className="font-jet"
                       >
                         {new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       </text>
@@ -1709,44 +1662,41 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
 
             {chartPath && currentPrice > 0 && (
               <>
-                {/* Glow effect */}
-                <path
-                  d={chartPath}
-                  fill="none"
-                  stroke="#00FF9D"
-                  strokeWidth="12"
-                  strokeOpacity="0.2"
-                  strokeLinecap="round"
-                />
                 {/* Main line */}
                 <path
                   d={chartPath}
                   fill="none"
-                  stroke="#00FF9D"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                />
-
-                {/* Tip indicator */}
-                <circle
-                  cx={scales.tipX}
-                  cy={scales.yScale(currentPrice)}
-                  r="5"
-                  fill="#00FF9D"
-                  stroke="#ffffff"
+                  stroke="#2151F5"
                   strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 />
 
-                {/* Horizontal price line */}
-                <line
-                  x1={0}
-                  y1={scales.yScale(currentPrice)}
-                  x2={scales.tipX - 10}
-                  y2={scales.yScale(currentPrice)}
-                  stroke="#00F0FF"
-                  strokeOpacity="0.3"
-                  strokeDasharray="4 4"
-                />
+                {/* Current price: dashed guide, tip dot, right-axis tag */}
+                <g transform={`translate(0, ${scales.yScale(tipPrice || currentPrice)})`}>
+                  <line
+                    x1={0}
+                    y1={0}
+                    x2={dimensions.width - 84}
+                    y2={0}
+                    stroke="#2151F5"
+                    strokeOpacity="0.4"
+                    strokeWidth="1"
+                    strokeDasharray="3 4"
+                  />
+                  <circle
+                    cx={scales.tipX}
+                    cy={0}
+                    r="4"
+                    fill="#2151F5"
+                    stroke="#ffffff"
+                    strokeWidth="2"
+                  />
+                  <rect x={dimensions.width - 84} y={-11} width={80} height={22} rx={11} fill="#2151F5" />
+                  <text x={dimensions.width - 44} y={4} fill="#ffffff" fontSize="11" textAnchor="middle" className="font-jet">
+                    {currentPrice.toLocaleString('en-US', { minimumFractionDigits: currentAssetConfig.decimals, maximumFractionDigits: currentAssetConfig.decimals })}
+                  </text>
+                </g>
 
                 {/* TECHNICAL INDICATORS RENDER */}
                 {indicatorPaths && (
@@ -1756,10 +1706,10 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                       <path
                         d={indicatorPaths.ma as string}
                         fill="none"
-                        stroke="#f59e0b"
-                        strokeWidth="2"
+                        stroke="#C2410C"
+                        strokeWidth="1.5"
                         strokeDasharray="4 2"
-                        opacity="0.8"
+                        opacity="0.7"
                       />
                     )}
 
@@ -1769,21 +1719,21 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                         <path
                           d={(indicatorPaths.bollinger as string[])[0]}
                           fill="none"
-                          stroke="#3b82f6"
+                          stroke="#6B7280"
                           strokeWidth="1.5"
                           opacity="0.5"
                         />
                         <path
                           d={(indicatorPaths.bollinger as string[])[1]}
                           fill="none"
-                          stroke="#3b82f6"
+                          stroke="#6B7280"
                           strokeWidth="1.5"
                           opacity="0.5"
                         />
                         <path
                           d={(indicatorPaths.bollinger as string[])[2]}
                           fill="none"
-                          stroke="#3b82f6"
+                          stroke="#6B7280"
                           strokeWidth="1"
                           strokeDasharray="2 2"
                           opacity="0.3"
@@ -1794,9 +1744,9 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                     {/* Alligator */}
                     {activeIndicators['alligator'] && indicatorPaths.alligator && (
                       <g>
-                        <path d={(indicatorPaths.alligator as string[])[0]} fill="none" stroke="#2563eb" strokeWidth="2" opacity="0.6" />
-                        <path d={(indicatorPaths.alligator as string[])[1]} fill="none" stroke="#dc2626" strokeWidth="2" opacity="0.6" />
-                        <path d={(indicatorPaths.alligator as string[])[2]} fill="none" stroke="#16a34a" strokeWidth="2" opacity="0.6" />
+                        <path d={(indicatorPaths.alligator as string[])[0]} fill="none" stroke="#0A0C10" strokeWidth="1.5" opacity="0.5" />
+                        <path d={(indicatorPaths.alligator as string[])[1]} fill="none" stroke="#6B7280" strokeWidth="1.5" opacity="0.5" />
+                        <path d={(indicatorPaths.alligator as string[])[2]} fill="none" stroke="#9AA1AD" strokeWidth="1.5" opacity="0.6" />
                       </g>
                     )}
 
@@ -1812,16 +1762,16 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                         return (
                           <g transform={`translate(0, ${panelY})`}>
                             {/* Panel Background */}
-                            <rect x={0} y={0} width={dimensions.width} height={panelHeight} fill="rgba(0,0,0,0.4)" backdrop-blur="md" />
-                            <line x1={0} y1={0} x2={dimensions.width} y2={0} stroke="rgba(168,85,247,0.3)" strokeWidth="1" />
+                            <rect x={0} y={0} width={dimensions.width} height={panelHeight} fill="#ffffff" fillOpacity="0.92" />
+                            <line x1={0} y1={0} x2={dimensions.width} y2={0} stroke="#E7E9ED" strokeWidth="1" />
 
                             {/* Zones (70-30) */}
-                            <line x1={0} y1={30} x2={dimensions.width} y2={30} stroke="rgba(239, 68, 68, 0.3)" strokeWidth="1" strokeDasharray="4 4" />
-                            <line x1={0} y1={70} x2={dimensions.width} y2={70} stroke="rgba(34, 197, 94, 0.3)" strokeWidth="1" strokeDasharray="4 4" />
+                            <line x1={0} y1={30} x2={dimensions.width} y2={30} stroke="#E7E9ED" strokeWidth="1" strokeDasharray="4 4" />
+                            <line x1={0} y1={70} x2={dimensions.width} y2={70} stroke="#E7E9ED" strokeWidth="1" strokeDasharray="4 4" />
 
                             {/* Labels */}
-                            <text x={10} y={25} fill="rgba(239, 68, 68, 0.5)" fontSize="8" fontWeight="bold">70 OVERBOUGHT</text>
-                            <text x={10} y={65} fill="rgba(34, 197, 94, 0.5)" fontSize="8" fontWeight="bold">30 OVERSOLD</text>
+                            <text x={10} y={26} fill="#9AA1AD" fontSize="10" className="font-jet">70</text>
+                            <text x={10} y={66} fill="#9AA1AD" fontSize="10" className="font-jet">30</text>
 
                             {/* RSI Line */}
                             <path
@@ -1830,12 +1780,12 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                                 .y(d => panelHeight - (d.rsi / 100) * panelHeight)
                                 .curve(curveMonotoneX)(rsiPoints) || ''}
                               fill="none"
-                              stroke="#a855f7"
-                              strokeWidth="2"
-                              filter="drop-shadow(0 0 4px rgba(168,85,247,0.5))"
+                              stroke="#0A0C10"
+                              strokeOpacity="0.7"
+                              strokeWidth="1.5"
                             />
 
-                            <text x={dimensions.width - 15} y={15} fill="#a855f7" fontSize="10" fontWeight="black" textAnchor="end" opacity="0.8">RSI PRO (14)</text>
+                            <text x={dimensions.width - 12} y={16} fill="#6B7280" fontSize="10" textAnchor="end" className="font-jet">RSI 14</text>
                           </g>
                         );
                       } catch (e) { return null; }
@@ -1849,10 +1799,9 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
         )}
       </svg>
 
-      {/* Price Header with Asset Selector - Dropdown Version */}
-      <div className="absolute top-4 sm:top-6 left-3 sm:left-6 pointer-events-auto z-40">
-        <div className="relative mb-4">
-          {/* Trigger Button */}
+      {/* Price Header with Asset Selector */}
+      <div className="absolute top-4 left-4 pointer-events-auto z-40">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             ref={assetSelectorRef}
             onClick={() => {
@@ -1863,137 +1812,96 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
               setIsAssetDropdownOpen(!isAssetDropdownOpen);
             }}
             data-tour="asset-selector"
-            className="flex items-center gap-3 px-4 py-2 bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl hover:border-purple-500/50 transition-all duration-300 group"
+            className="flex items-center gap-2 pl-1.5 pr-3 py-1.5 bg-white ring-1 ring-line rounded-full hover:bg-surface transition-colors"
           >
-            <div className={`w-8 h-8 rounded-lg flex items-center justify-center overflow-hidden ${isAssetDropdownOpen ? 'bg-purple-500 text-white' : 'bg-white/5 text-purple-400'}`}>
+            <div className="w-6 h-6 rounded-full flex items-center justify-center overflow-hidden">
               <AssetIcon
                 src={currentAssetConfig.logo}
                 asset={selectedAsset}
                 className="w-6 h-6 object-contain"
               />
             </div>
-            <div className="text-left">
-              <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest leading-none mb-1">Asset</p>
-              <div className="flex items-center gap-2">
-                <span className="text-white text-sm font-black tracking-tight">{selectedAsset}</span>
-                <svg
-                  className={`w-3 h-3 text-gray-500 transition-transform duration-300 ${isAssetDropdownOpen ? 'rotate-180 text-purple-400' : ''}`}
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
-                </svg>
-              </div>
-            </div>
+            <span className="text-ink text-sm font-medium">{currentAssetConfig.name}</span>
+            <span className="font-jet text-faint text-[11px]">{currentAssetConfig.pair}</span>
+            <CaretDown
+              size={12}
+              weight="bold"
+              className={`text-subtle transition-transform duration-200 ${isAssetDropdownOpen ? 'rotate-180' : ''}`}
+            />
           </button>
+
+          {/* Price Display */}
+          <div className="pointer-events-none flex items-baseline gap-2" data-tour="price-display">
+            <p className="font-jet text-ink text-[28px] leading-none tracking-tight">
+              {currentPrice > 0 ? currentPrice.toLocaleString('en-US', {
+                minimumFractionDigits: currentAssetConfig.decimals,
+                maximumFractionDigits: currentAssetConfig.decimals
+              }) : '---'}
+            </p>
+            {(() => {
+              const first = priceHistory[0]?.price;
+              if (!first || currentPrice <= 0) return null;
+              // Round first so a tiny negative move doesn't render as "-0.00%".
+              const pct = Number((((currentPrice - first) / first) * 100).toFixed(2)) || 0;
+              return (
+                <span className={`font-jet text-[13px] ${pct > 0 ? 'text-up' : pct < 0 ? 'text-down' : 'text-faint'}`}>
+                  {pct > 0 ? '+' : ''}{pct.toFixed(2)}%
+                </span>
+              );
+            })()}
+          </div>
         </div>
 
         {watchlist.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-1.5 max-w-[280px]">
+          <div className="mt-3 flex flex-wrap gap-1 max-w-[320px]">
             {watchlist.slice(0, 8).map((asset) => (
               <button
                 key={asset}
                 onClick={() => setSelectedAsset(asset)}
-                className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border ${selectedAsset === asset ? 'bg-purple-500/30 border-purple-500/40 text-white' : 'bg-black/50 border-white/15 text-white/70 hover:text-white'}`}
+                className={`px-2 py-0.5 rounded-full font-jet text-[10px] ring-1 transition-colors ${selectedAsset === asset ? 'bg-up-soft ring-up/30 text-up' : 'bg-white ring-line text-subtle hover:text-ink'}`}
               >
                 {asset}
               </button>
             ))}
           </div>
         )}
-
-        {/* Price Display */}
-        <div className="pointer-events-none" data-tour="price-display">
-          <h2 className="text-gray-500 text-[10px] sm:text-xs tracking-widest font-mono mb-0.5 sm:mb-1 uppercase font-black opacity-60">
-            {currentAssetConfig.pair} Live Price
-          </h2>
-          <div className="flex flex-col">
-            <p className="text-white text-3xl sm:text-5xl font-black font-mono tracking-tighter">
-              ${currentPrice > 0 ? currentPrice.toLocaleString('en-US', {
-                minimumFractionDigits: currentAssetConfig.decimals,
-                maximumFractionDigits: currentAssetConfig.decimals
-              }) : '---'}
-            </p>
-            <div className="flex items-center gap-1.5 mt-1 opacity-50">
-              <motion.div
-                animate={{ opacity: [0.4, 1, 0.4] }}
-                transition={{ duration: 2, repeat: Infinity }}
-                className="w-1.5 h-1.5 rounded-full bg-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.8)]"
-              />
-            </div>
-          </div>
-        </div>
       </div>
 
-      {/* Indicator Selection UI - Positioned absolute to follow the new trigger */}
-      <div className="fixed bottom-20 right-4 sm:right-6 z-50 pointer-events-none">
+      {/* Indicator Selection UI */}
+      <div className="absolute top-16 right-4 z-50 pointer-events-none">
         <AnimatePresence>
           {isIndicatorsOpen && (
             <motion.div
-              initial={{ opacity: 0, y: 20, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 20, scale: 0.95 }}
-              className="w-[calc(100vw-32px)] sm:w-56 max-w-xs bg-[#0d0d0d]/95 backdrop-blur-2xl border border-white/10 rounded-[2rem] p-3 shadow-2xl overflow-hidden pointer-events-auto"
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.15 }}
+              className={`${OVERLAY} w-56 p-1.5 overflow-hidden pointer-events-auto`}
             >
-              <div className="flex justify-between items-center px-3 py-2 mb-2 border-b border-white/5">
-                <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest">Indicators</p>
+              <div className="flex justify-between items-center px-2.5 py-2">
+                <p className="text-[12px] text-subtle">Indicators</p>
                 <button
                   onClick={() => setIsIndicatorsOpen(false)}
-                  className="text-gray-500 hover:text-white transition-colors"
+                  aria-label="Close indicators"
+                  className="text-faint hover:text-ink transition-colors"
                 >
-                  ✕
+                  <X size={14} weight="bold" />
                 </button>
               </div>
               {[
-
-                {
-                  id: 'ma', name: 'Moving Average', icon: (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-                    </svg>
-                  )
-                },
-                {
-                  id: 'alligator', name: 'Alligator', icon: (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" />
-                    </svg>
-                  )
-                },
-                {
-                  id: 'bollinger', name: 'Bollinger Bands', icon: (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                    </svg>
-                  )
-                },
-                {
-                  id: 'rsi', name: 'RSI', icon: (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M3 4v16M3 20h18" />
-                    </svg>
-                  )
-                },
+                { id: 'ma', name: 'Moving Average', icon: <TrendUp size={16} /> },
+                { id: 'alligator', name: 'Alligator', icon: <Waveform size={16} /> },
+                { id: 'bollinger', name: 'Bollinger Bands', icon: <ArrowsDownUp size={16} /> },
+                { id: 'rsi', name: 'RSI', icon: <Pulse size={16} /> },
               ].map(indicator => (
                 <button
                   key={indicator.id}
                   onClick={() => toggleIndicator(indicator.id)}
-                  className={`
-                    w-full flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 mb-1 last:mb-0 group
-                    ${activeIndicators[indicator.id]
-                      ? 'bg-purple-600/20 border border-purple-500/30'
-                      : 'hover:bg-white/5 border border-transparent'
-                    }
-                  `}
+                  className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-[13px] transition-colors ${activeIndicators[indicator.id] ? 'bg-up-soft text-up' : 'text-muted hover:bg-surface hover:text-ink'}`}
                 >
-                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-300 ${activeIndicators[indicator.id] ? 'bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]' : 'bg-white/5 text-gray-500 group-hover:text-gray-300'}`}>
-                    {indicator.icon}
-                  </div>
-                  <span className={`flex-1 text-left text-[11px] font-black uppercase tracking-wider transition-colors ${activeIndicators[indicator.id] ? 'text-white' : 'text-gray-400 group-hover:text-gray-200'}`}>
-                    {indicator.name}
-                  </span>
-                  <div className={`w-2 h-2 rounded-full transition-all duration-500 ${activeIndicators[indicator.id] ? 'bg-purple-500 scale-100 shadow-[0_0_8px_rgba(168,85,247,0.8)]' : 'bg-white/10 scale-50'}`} />
+                  {indicator.icon}
+                  <span className="flex-1 text-left">{indicator.name}</span>
+                  <span className={`w-3.5 h-3.5 rounded-full ring-1 ${activeIndicators[indicator.id] ? 'bg-up ring-up' : 'ring-line'}`} />
                 </button>
               ))}
             </motion.div>
@@ -2002,18 +1910,18 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
       </div>
 
 
-      {/* Insufficient Funds Warning - Minimalist Toast */}
+      {/* Insufficient Funds Notice */}
       {showInsufficientFunds && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50">
-          <div className="px-4 py-2 bg-orange-500/20 backdrop-blur-md border border-orange-400/40 rounded-xl">
-            <p className="text-orange-300 text-sm font-medium text-center max-w-[240px]">
+          <div className={`${OVERLAY} px-4 py-2.5`}>
+            <p className="text-down text-sm text-center max-w-[260px]">
               Not enough house credits — deposit in the Wallet tab first
             </p>
           </div>
         </div>
       )}
 
-      {/* Bet Result Notifications - Modern floating feedback */}
+      {/* Bet Result Notifications */}
       <div className="absolute inset-0 z-50 pointer-events-none overflow-hidden">
         {betResults.map((result) => {
           const age = Date.now() - result.timestamp;
@@ -2031,51 +1939,20 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                 transform: `translateY(${translateY}px)`,
               }}
             >
-              {/* Modern Glassmorphism Card */}
-              <div className={`
-                relative px-5 py-3 rounded-2xl backdrop-blur-xl
-                ${result.won
-                  ? 'bg-gradient-to-br from-green-500/30 via-emerald-500/20 to-green-600/30 border border-green-400/60 shadow-[0_0_30px_rgba(34,197,94,0.4)]'
-                  : 'bg-gradient-to-br from-red-500/30 via-rose-500/20 to-red-600/30 border border-red-400/60 shadow-[0_0_30px_rgba(239,68,68,0.4)]'
-                }
-              `}>
-                {/* Animated glow ring */}
-                <div className={`absolute -inset-1 rounded-2xl blur-sm ${result.won ? 'bg-green-400/20' : 'bg-red-400/20'} animate-pulse`} />
-
-                {/* Content */}
-                <div className="relative flex items-center gap-3">
-                  {/* Icon */}
-                  <div className={`
-                    w-10 h-10 rounded-xl flex items-center justify-center text-xl
-                    ${result.won
-                      ? 'bg-green-400/30 text-green-300'
-                      : 'bg-red-400/30 text-red-300'
-                    }
-                  `}>
-                    {result.won ? '✓' : '✕'}
-                  </div>
-
-                  {/* Text */}
-                  <div>
-                    <p className={`text-sm font-black tracking-wide ${result.won ? 'text-green-300' : 'text-red-300'}`}>
-                      {result.won ? 'WIN!' : 'LOST'}
-                    </p>
-                    <p className={`text-lg font-bold ${result.won ? 'text-green-100' : 'text-red-100'}`}>
-                      {result.won
-                        ? `+${result.payout.toFixed(4)}`
-                        : `-${result.amount.toFixed(4)}`
-                      }
-                      <span className="text-xs ml-1 opacity-70">{currencySymbol}</span>
-                    </p>
-                  </div>
-
-                  {/* Multiplier badge (for wins) */}
+              <div className={`${OVERLAY} px-4 py-3`}>
+                <div className="flex items-baseline justify-between gap-4">
+                  <p className="text-[12px] text-subtle">{result.won ? 'Won' : 'Lost'}</p>
                   {result.won && (
-                    <div className="px-2 py-0.5 rounded-lg bg-green-400/20 text-green-200 text-xs font-bold">
-                      x{result.multiplier}
-                    </div>
+                    <span className="font-jet text-[11px] text-faint">{result.multiplier}x</span>
                   )}
                 </div>
+                <p className={`font-jet text-lg leading-tight ${result.won ? 'text-up' : 'text-down'}`}>
+                  {result.won
+                    ? `+${result.payout.toFixed(4)}`
+                    : `-${result.amount.toFixed(4)}`
+                  }
+                  <span className="text-xs ml-1 text-faint">{currencySymbol}</span>
+                </p>
               </div>
             </div>
           );
@@ -2093,35 +1970,32 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
 
           {/* Dropdown Panel */}
           <motion.div
-            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.95 }}
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
             style={{ position: 'fixed', top: dropdownPos.top, left: dropdownPos.left }}
-            className="w-80 bg-black/95 backdrop-blur-2xl border border-white/10 rounded-3xl shadow-2xl overflow-hidden z-[9999] p-3"
+            className={`${OVERLAY} w-80 overflow-hidden z-[9999] p-2 text-ink`}
           >
             {/* Search Input */}
-            <div className="relative mb-3">
-              <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                <svg className="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-              </div>
+            <div className="relative mb-2">
+              <MagnifyingGlass size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-faint pointer-events-none" />
               <input
                 type="text"
-                placeholder="Search assets..."
+                placeholder="Search assets"
                 value={assetSearchQuery}
                 onChange={(e) => setAssetSearchQuery(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500/50 transition-all font-medium"
+                className="w-full bg-surface ring-1 ring-line rounded-xl py-2 pl-9 pr-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-up/40 transition-shadow"
               />
             </div>
 
             {/* Category Tabs */}
-            <div className="flex gap-1 mb-3 bg-white/5 p-1 rounded-xl">
+            <div className="flex gap-0.5 mb-2 bg-surface p-0.5 rounded-full ring-1 ring-line">
               {(['All', 'Crypto', 'Metals', 'Forex', 'Stocks', 'Commodities'] as const).map((cat) => (
                 <button
                   key={cat}
                   onClick={() => setActiveAssetCategory(cat)}
-                  className={`flex-1 py-1.5 px-1 rounded-lg text-[9px] font-black tracking-tighter transition-all ${activeAssetCategory === cat ? 'bg-purple-500 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`flex-1 py-1 px-1 rounded-full text-[10px] transition-colors ${activeAssetCategory === cat ? 'bg-white text-ink ring-1 ring-line' : 'text-subtle hover:text-ink'}`}
                 >
                   {cat}
                 </button>
@@ -2129,7 +2003,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
             </div>
 
             {/* Asset List */}
-            <div className="max-h-[320px] overflow-y-auto scrollbar-none no-scrollbar grid grid-cols-1 gap-1">
+            <div className="max-h-[320px] overflow-y-auto scrollbar-none no-scrollbar grid grid-cols-1 gap-0.5">
               {filteredAssets.length > 0 ? (
                 filteredAssets.map((asset) => (
                   <button
@@ -2139,15 +2013,9 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                       setIsAssetDropdownOpen(false);
                       setAssetSearchQuery('');
                     }}
-                    className={`
-                      flex items-center gap-3 px-3 py-2.5 rounded-2xl transition-all duration-200 group
-                      ${selectedAsset === asset
-                        ? 'bg-purple-500/20 border border-purple-500/30'
-                        : 'hover:bg-white/5 border border-transparent'
-                      }
-                    `}
+                    className={`flex items-center gap-3 px-2.5 py-2 rounded-xl transition-colors ${selectedAsset === asset ? 'bg-up-soft' : 'hover:bg-surface'}`}
                   >
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden ${selectedAsset === asset ? 'bg-purple-500 text-white' : 'bg-white/5 text-gray-400'}`}>
+                    <div className="w-7 h-7 rounded-full flex items-center justify-center overflow-hidden">
                       <AssetIcon
                         src={ASSET_CONFIG[asset].logo}
                         asset={asset}
@@ -2155,13 +2023,8 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                       />
                     </div>
                     <div className="flex-1 text-left">
-                      <div className="flex items-center gap-2">
-                        <p className="text-white text-sm font-black tracking-tight">{ASSET_CONFIG[asset].name}</p>
-                        {ASSET_CONFIG[asset].category === 'Crypto' && (
-                          <span className="text-[8px] px-1 bg-blue-500/20 text-blue-400 rounded-sm font-bold uppercase">Crypto</span>
-                        )}
-                      </div>
-                      <p className="text-[10px] text-gray-500 font-bold font-mono">{ASSET_CONFIG[asset].pair}</p>
+                      <p className={`text-sm font-medium ${selectedAsset === asset ? 'text-up' : 'text-ink'}`}>{ASSET_CONFIG[asset].name}</p>
+                      <p className="font-jet text-[10px] text-faint">{ASSET_CONFIG[asset].pair}</p>
                     </div>
 
                     <span
@@ -2169,19 +2032,16 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
                         e.stopPropagation();
                         toggleWatchlist(asset);
                       }}
-                      className={`px-1.5 py-1 rounded-lg text-xs font-black cursor-pointer ${watchlist.includes(asset) ? 'text-yellow-300 bg-yellow-500/10' : 'text-gray-500 hover:text-yellow-300'}`}
+                      className={`p-1 rounded-full cursor-pointer transition-colors ${watchlist.includes(asset) ? 'text-up' : 'text-faint hover:text-ink'}`}
                       title={watchlist.includes(asset) ? 'Remove from watchlist' : 'Add to watchlist'}
                     >
-                      {watchlist.includes(asset) ? '★' : '☆'}
+                      <Star size={14} weight={watchlist.includes(asset) ? 'fill' : 'regular'} />
                     </span>
-                    {selectedAsset === asset && (
-                      <div className="w-1.5 h-1.5 rounded-full bg-purple-500 shadow-[0_0_10px_rgba(168,85,247,1)]" />
-                    )}
                   </button>
                 ))
               ) : (
                 <div className="py-8 text-center">
-                  <p className="text-gray-500 text-xs font-bold">No assets found</p>
+                  <p className="text-subtle text-xs">No assets found</p>
                 </div>
               )}
             </div>
@@ -2191,4 +2051,4 @@ export const LiveChart: React.FC<LiveChartProps> = ({ betAmount }) => {
       )}
     </div>
   );
-};
+});

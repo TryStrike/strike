@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useStore } from '@/lib/store';
 import { explorerTxUrl } from '@/lib/arc/config';
-import { CheckCircle2, Clock3, ExternalLink, Search, XCircle } from 'lucide-react';
+import { CheckCircle as CheckCircle2, Clock as Clock3, ArrowSquareOut as ExternalLink, MagnifyingGlass as Search, XCircle } from '@phosphor-icons/react';
 
 type WithdrawalRow = {
   id: number;

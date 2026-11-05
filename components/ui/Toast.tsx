@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect } from 'react';
+import { X } from '@phosphor-icons/react';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
@@ -11,6 +12,13 @@ interface ToastProps {
   duration?: number;
   links?: Array<{ label: string; href: string }>;
 }
+
+const DOT: Record<ToastType, string> = {
+  success: 'bg-up',
+  error: 'bg-down',
+  warning: 'bg-down',
+  info: 'bg-faint',
+};
 
 const Toast: React.FC<ToastProps> = ({
   message,
@@ -26,39 +34,23 @@ const Toast: React.FC<ToastProps> = ({
     }
   }, [duration, onClose]);
 
-  const typeStyles = {
-    success: 'bg-green-900/90 border-green-500 text-green-100',
-    error: 'bg-red-900/90 border-red-500 text-red-100',
-    warning: 'bg-yellow-900/90 border-yellow-500 text-yellow-100',
-    info: 'bg-blue-900/90 border-blue-500 text-blue-100'
-  };
-
-  const icons = {
-    success: '✓',
-    error: '✗',
-    warning: '⚠',
-    info: 'ℹ'
-  };
-
   return (
-    <div className={`
-      ${typeStyles[type]}
-      border-2 rounded-lg p-4 shadow-lg
-      flex items-center gap-3
-      animate-slide-in
-    `}>
-      <span className="text-2xl">{icons[type]}</span>
-      <div className="flex-1 min-w-0">
-        <p className="font-medium">{message}</p>
+    <div
+      role={type === 'error' ? 'alert' : 'status'}
+      className="flex items-start gap-3 rounded-2xl bg-white px-4 py-3 font-tight text-ink ring-1 ring-line shadow-[0_20px_40px_-24px_rgba(10,12,16,0.3)] animate-slide-in"
+    >
+      <span className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full ${DOT[type]}`} aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm leading-snug">{message}</p>
         {links && links.length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-2">
+          <div className="mt-1.5 flex flex-wrap gap-3">
             {links.map((link) => (
               <a
                 key={`${link.href}-${link.label}`}
                 href={link.href}
                 target="_blank"
                 rel="noreferrer"
-                className="text-xs underline underline-offset-2 hover:opacity-80"
+                className="text-xs font-medium text-up hover:underline underline-offset-2"
               >
                 {link.label}
               </a>
@@ -67,10 +59,12 @@ const Toast: React.FC<ToastProps> = ({
         )}
       </div>
       <button
+        type="button"
         onClick={onClose}
-        className="text-xl hover:opacity-70 transition-opacity"
+        aria-label="Dismiss"
+        className="-mr-1 shrink-0 rounded-full p-0.5 text-faint transition-colors hover:text-ink"
       >
-        ×
+        <X size={14} weight="bold" />
       </button>
     </div>
   );
@@ -84,7 +78,7 @@ interface ToastContainerProps {
 
 export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onRemove }) => {
   return (
-    <div className="fixed top-4 right-4 z-[200] space-y-2 max-w-md">
+    <div className="fixed top-4 right-4 z-[200] w-[min(360px,calc(100vw-2rem))] space-y-2">
       {toasts.map((toast) => (
         <Toast
           key={toast.id}

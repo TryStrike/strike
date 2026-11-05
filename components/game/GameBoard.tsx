@@ -2,15 +2,16 @@
 
 import React, { useState, useEffect } from 'react';
 import { useStore } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
 import { LiveChart } from './LiveChart';
 import { BalanceDisplay } from '@/components/balance';
 import { getArcConfig, getAssetConfig } from '@/lib/arc/config';
-import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { ethers } from 'ethers';
 import { useToast } from '@/lib/hooks/useToast';
-import { motion } from 'framer-motion';
-import { Key, Wallet } from 'lucide-react';
-import { useAccount, useDisconnect as useWagmiDisconnect } from 'wagmi';
+import { useAccount } from 'wagmi';
+import { ArrowDown, ArrowUp, Check, X } from '@phosphor-icons/react';
+import { Button, Field, Label, Segmented } from '@/components/ui/kit';
+import { IndicatorsToggle, MiniHistory } from '@/components/history/MiniHistory';
 import posthog from 'posthog-js';
 
 
@@ -20,8 +21,6 @@ export const GameBoard: React.FC = () => {
     isConnected,
     network,
     walletBalance,
-    houseBalance,
-    bets,
     gameMode,
     setGameMode,
     setTimeframeSeconds,
@@ -37,38 +36,26 @@ export const GameBoard: React.FC = () => {
     error,
     clearError,
     isLoading: isLoadingBalance,
-    activeTab,
-    setActiveTab,
     userTier,
     refreshWalletBalance,
-    accessCode,
-    fetchProfile,
-    accountType,
     selectedCurrency,
-    setSelectedCurrency,
+    accessCode,
     setConnectModalOpen,
-  } = useStore();
+  } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, network: s.network, walletBalance: s.walletBalance, gameMode: s.gameMode, setGameMode: s.setGameMode, setTimeframeSeconds: s.setTimeframeSeconds, selectedAsset: s.selectedAsset, placeBetFromHouseBalance: s.placeBetFromHouseBalance, isPlacingBet: s.isPlacingBet, isBlitzActive: s.isBlitzActive, blitzEndTime: s.blitzEndTime, nextBlitzTime: s.nextBlitzTime, hasBlitzAccess: s.hasBlitzAccess, updateBlitzTimer: s.updateBlitzTimer, enableBlitzAccess: s.enableBlitzAccess, error: s.error, clearError: s.clearError, isLoading: s.isLoading, userTier: s.userTier, refreshWalletBalance: s.refreshWalletBalance, selectedCurrency: s.selectedCurrency, accessCode: s.accessCode, setConnectModalOpen: s.setConnectModalOpen })));
 
   const { connector } = useAccount();
-  const { disconnect: wagmiDisconnect } = useWagmiDisconnect();
 
   const [betAmount, setBetAmount] = useState<string>('0.1');
   // Default box-mode settings (when user lands on /trade):
   // - Quick Amount: 0.1
   // - Expiration Time: 5s
   const [selectedDuration, setSelectedDuration] = useState<number>(5);
-  const [isPanelOpen, setIsPanelOpen] = useState(true);
 
   const [blitzCountdown, setBlitzCountdown] = useState<string>('');
   const [blitzTimeRemaining, setBlitzTimeRemaining] = useState<string>('');
   const [isActivatingBlitz, setIsActivatingBlitz] = useState(false);
 
   const toast = useToast();
-  const [accessInput, setAccessInput] = useState('');
-  const [isValidating, setIsValidating] = useState(false);
-  const [accessError, setAccessError] = useState<string | null>(null);
-  const [addressCopied, setAddressCopied] = useState(false);
-  const [walletPanelBalance, setWalletPanelBalance] = useState<number | null>(null);
 
   // Refresh the wallet figure whenever the ledger asset changes.
   useEffect(() => {
@@ -76,9 +63,6 @@ export const GameBoard: React.FC = () => {
     void refreshWalletBalance();
   }, [selectedCurrency, isConnected, address, refreshWalletBalance]);
 
-  useEffect(() => {
-    setWalletPanelBalance(isConnected && address ? walletBalance : null);
-  }, [isConnected, address, walletBalance, selectedCurrency]);
   const currencySymbol = 'USDC';
 
   // Blitz entry is paid to the platform fee collector, not the treasury.
@@ -86,7 +70,6 @@ export const GameBoard: React.FC = () => {
   const blitzEntryCurrencySymbol = currencySymbol;
   // Connection status
   const isWalletConnected = !!address;
-  const isUnauthorized = false; // Access codes disabled
 
   const handleEnterBlitz = async () => {
     if (!isWalletConnected || !address) {
@@ -146,11 +129,11 @@ export const GameBoard: React.FC = () => {
         entryFee: blitzEntryFee
         // address removed to protect user privacy
       })
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (process.env.NODE_ENV === 'development') {
-        console.error("Blitz entry failed:", err.message || err);
+        console.error("Blitz entry failed:", err);
       }
-      const errorMessage = err.message || "";
+      const errorMessage = err instanceof Error ? err.message : String(err ?? "");
       
       // Track Blitz entry failure (sanitized - no wallet address)
       posthog.capture('blitz_entry_failed', {
@@ -166,36 +149,6 @@ export const GameBoard: React.FC = () => {
       }
     } finally {
       setIsActivatingBlitz(false);
-    }
-  };
-
-  const handleValidateAccess = async () => {
-    if (!accessInput || isValidating || !address) return;
-    setIsValidating(true);
-    setAccessError(null);
-
-    try {
-      const res = await fetch('/api/validate-access-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          code: accessInput.trim().toUpperCase(),
-          walletAddress: address
-        })
-      });
-
-      const data = await res.json();
-
-      if (res.ok && data.success) {
-        await fetchProfile(address);
-        toast.success("Access authorized!");
-      } else {
-        setAccessError(data.error || 'Invalid code');
-      }
-    } catch (err) {
-      setAccessError('Neural connection failed');
-    } finally {
-      setIsValidating(false);
     }
   };
 
@@ -272,7 +225,7 @@ export const GameBoard: React.FC = () => {
   };
 
   const handleStrikeBet = async (direction: 'UP' | 'DOWN') => {
-    if (!address || !isWalletConnected || gameMode !== 'binomo' || isUnauthorized) return;
+    if (!address || !isWalletConnected || gameMode !== 'binomo') return;
 
     try {
       const multiplier = getMultiplier(selectedDuration);
@@ -311,599 +264,173 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  const activeWalletBalance = walletPanelBalance ?? walletBalance;
-
-  const formatAddress = (addr: string) => {
-    if (!addr || addr.length <= 10) return addr || '---';
-    return `${addr.slice(0, 5)}...${addr.slice(-4)}`;
-  };
-
-  const formatBalance = (bal: number) => {
-    return isNaN(bal) ? '0.0000' : bal.toFixed(4);
-  };
+  const activeWalletBalance = walletBalance;
+  const formatBalance = (bal: number) => (isNaN(bal) ? '0.0000' : bal.toFixed(4));
+  const amountNum = Number(betAmount);
+  const multiplier = getMultiplier(selectedDuration);
+  const isBalanceError =
+    !!error &&
+    (error.includes('User not found') ||
+      error.includes('No house balance') ||
+      error.includes('Insufficient house') ||
+      error.includes('balance'));
 
   return (
-    <div className="relative w-full h-full flex overflow-hidden">
-      {/* Main Interactive Chart */}
-      <div className="absolute inset-0">
-        <LiveChart
-          betAmount={betAmount}
-        />
-      </div>
-
-      {/* Blitz Round Indicator - Top Right */}
-      <div className="absolute top-4 sm:top-6 right-3 sm:right-6 z-30 pointer-events-auto">
-        <div className={`rounded-xl backdrop-blur-xl border shadow-lg overflow-hidden transition-all duration-500 ${isBlitzActive ? 'bg-gradient-to-br from-orange-500/20 via-red-500/20 to-yellow-500/20 border-orange-500/50 shadow-orange-500/30 animate-pulse' : 'bg-black/80 border-gray-700/50'}`}>
-          <div className="px-3 py-2">
-            {isBlitzActive ? (
-              <div className="flex items-center gap-2">
-                <span className="text-xl">🔥</span>
-                <div>
-                  <p className="text-orange-400 text-[9px] font-bold uppercase tracking-wider">BLITZ ACTIVE</p>
-                  <p className="text-white text-sm font-bold font-mono">{blitzTimeRemaining} left</p>
-                </div>
-                {hasBlitzAccess && (
-                  <div className="ml-2 px-1.5 py-0.5 bg-green-500/20 border border-green-500/50 rounded text-[8px] text-green-400 font-bold">2x</div>
-                )}
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-lg opacity-50">⏰</span>
-                <div>
-                  <p className="text-gray-500 text-[9px] font-medium uppercase tracking-wider">Next Blitz</p>
-                  <p className="text-gray-300 text-sm font-mono">{blitzCountdown}</p>
-                </div>
-              </div>
-            )}
-          </div>
+    <div className="flex h-full min-h-0 w-full flex-col lg:flex-row">
+      {/* Chart */}
+      <div className="relative min-h-[420px] flex-1 lg:min-h-0">
+        <LiveChart betAmount={betAmount} />
+        <div className="absolute right-4 top-4 z-30">
+          <IndicatorsToggle />
         </div>
       </div>
 
-      {/* Floating Toggle Button - Fixed to bottom (Mobile only) */}
-      {!isPanelOpen && (
-        <div className="sm:hidden fixed bottom-24 left-4 z-40 animate-in slide-in-from-left duration-300">
-          <div className="flex flex-col items-start gap-1">
-            {/* Small win indicator if available */}
-            {bets.length > 0 && bets[0].won && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="ml-8 text-[11px] font-black text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)] flex items-center gap-1"
-              >
-                <span>+{parseFloat(bets[0].payout).toFixed(2)} {currencySymbol}</span>
-              </motion.div>
-            )}
-            <button
-              onClick={() => setIsPanelOpen(true)}
-              className="bg-black/80 backdrop-blur-xl border border-white/10 rounded-2xl p-2 px-4 flex items-center gap-3 shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-all active:scale-95 border-emerald-500/20"
-            >
-              <div className="w-9 h-9 rounded-xl bg-purple-500/20 flex items-center justify-center text-purple-400 shadow-inner">
-                <Wallet className="w-5 h-5" />
-              </div>
-              <div className="flex flex-col items-start">
-                <span className="text-[10px] font-black text-white/40 uppercase tracking-[0.2em] leading-none mb-1">House Balance</span>
-                <span className="text-base font-black text-white leading-none font-mono">
-                  {houseBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {currencySymbol}
-                </span>
-              </div>
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Trade sidebar */}
+      <aside className="w-full shrink-0 overflow-y-auto border-t border-line bg-gradient-to-b from-white to-surface/60 lg:w-[380px] lg:border-l lg:border-t-0">
+        <div className="flex flex-col gap-7 p-6">
+          <Segmented
+            className="[&>button]:py-1.5"
+            value={gameMode}
+            onChange={setGameMode}
+            options={[
+              { value: 'binomo', label: 'Classic', tour: 'classic-mode' },
+              { value: 'box', label: 'Box', tour: 'box-mode' },
+              { value: 'draw', label: 'Draw', tour: 'draw-mode' },
+            ]}
+          />
 
-
-      {/* Modern Quick Bet Panel — height-capped + internal scroll so wallet/blitz never overflows under the viewport */}
-      <div className="absolute top-2 bottom-6 left-4 right-4 sm:top-4 sm:bottom-12 sm:left-8 sm:right-auto z-[110] pointer-events-none flex min-h-0 flex-col justify-end">
-        <div className={`max-h-full min-h-0 bg-gradient-to-br from-black/95 via-purple-950/30 to-black/95 backdrop-blur-xl border border-purple-500/20 rounded-2xl shadow-2xl overflow-hidden w-full sm:w-[300px] transition-all duration-300 ease-out pointer-events-auto flex flex-col ${isPanelOpen
-          ? 'translate-y-0 opacity-100 scale-100'
-          : 'translate-y-full opacity-0 scale-95 !pointer-events-none sm:translate-y-0 sm:opacity-100 sm:scale-100 sm:!pointer-events-auto'
-          }`}>
-
-          {/* Close button for mobile */}
-          <button
-            onClick={() => setIsPanelOpen(false)}
-            className="sm:hidden absolute top-2 right-2 w-6 h-6 bg-white/10 rounded-full flex items-center justify-center text-gray-400 hover:text-white text-xs z-20"
-          >
-            ✕
-          </button>
-
-          {/* Game Mode Selector */}
-          <div className="flex shrink-0 gap-1 p-1 bg-black/60 border-b border-white/5" data-tour="game-mode-toggle">
-            <button
-              data-tour="classic-mode"
-              onClick={() => setGameMode('binomo')}
-              className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all duration-200 ${gameMode === 'binomo'
-                ? 'bg-purple-600/20 text-purple-400 border border-purple-500/40'
-                : 'text-gray-500 hover:text-gray-300'
-                }`}
-            >
-              Classic
-            </button>
-            <button
-              data-tour="box-mode"
-              onClick={() => setGameMode('box')}
-              className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all duration-200 ${gameMode === 'box'
-                ? 'bg-purple-600/20 text-purple-400 border border-purple-500/40'
-                : 'text-gray-500 hover:text-gray-300'
-                }`}
-            >
-              Box
-            </button>
-            <button
-              data-tour="draw-mode"
-              onClick={() => setGameMode('draw')}
-              className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all duration-200 ${gameMode === 'draw'
-                ? 'bg-purple-600/20 text-purple-400 border border-purple-500/40'
-                : 'text-gray-500 hover:text-gray-300'
-                }`}
-            >
-              Draw
-            </button>
-          </div>
-
-          {/* Tab Navigation - Pill Style */}
-          <div className="flex shrink-0 gap-1 p-2 bg-black/40">
-            <button
-              onClick={() => setActiveTab('bet')}
-              className={`flex-1 flex items-center justify-center px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${activeTab === 'bet'
-                ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-500/30'
-                : 'text-gray-400 hover:text-white hover:bg-white/5'
-                }`}
-            >
-              Bet
-            </button>
-            <button
-              onClick={() => setActiveTab('wallet')}
-              className={`flex-1 flex items-center justify-center px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${activeTab === 'wallet'
-                ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-500/30'
-                : 'text-gray-400 hover:text-white hover:bg-white/5'
-                }`}
-            >
-              Wallet
-            </button>
-            <button
-              onClick={() => setActiveTab('blitz')}
-              className={`flex-1 flex items-center justify-center px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${activeTab === 'blitz'
-                ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg shadow-orange-500/30'
-                : 'text-orange-400/70 hover:text-orange-400 hover:bg-orange-400/5'
-                }`}
-            >
-              Blitz
-            </button>
-          </div>
-
-          {/* Tab body — scrolls inside the card when content (e.g. wallet) is tall */}
-          <div className="relative flex flex-1 min-h-0 flex-col overflow-y-auto p-4">
-            {/* Overlay if not authorized */}
-            {isUnauthorized && (
-              <div className="absolute inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
-                <div className="w-full space-y-4 text-center animate-in fade-in zoom-in duration-300">
-                  <div className="w-12 h-12 bg-purple-500/10 border border-purple-500/20 rounded-2xl flex items-center justify-center mx-auto shadow-lg">
-                    <Key className="w-6 h-6 text-purple-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-white font-black uppercase tracking-[0.2em] text-[10px]">Access Restricted</h4>
-                  </div>
-                  <div className="space-y-3">
-                    <input
-                      type="text"
-                      value={accessInput}
-                      onChange={(e) => setAccessInput(e.target.value.toUpperCase())}
-                      placeholder="ENTER CODE"
-                      disabled={isValidating}
-                      className="w-full bg-black/60 border border-white/10 rounded-xl px-3 py-3 text-center text-white font-mono text-base tracking-[0.2em] placeholder:tracking-normal placeholder:text-white/10 focus:outline-none focus:border-purple-500/50 transition-all"
-                    />
-                    <button
-                      onClick={handleValidateAccess}
-                      disabled={!accessInput || isValidating}
-                      className="w-full bg-white text-black font-black uppercase tracking-widest text-[10px] py-3 rounded-xl hover:bg-gray-200 transition-all disabled:opacity-50"
-                    >
-                      {isValidating ? 'Validating...' : 'Unlock Node'}
-                    </button>
-                    {accessError && (
-                      <p className="text-red-500 text-[8px] font-black uppercase tracking-widest">{accessError}</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className={`flex min-h-0 flex-col transition-all duration-700 ${isUnauthorized ? 'blur-xl grayscale opacity-20 pointer-events-none select-none' : ''}`}>
-              {activeTab === 'bet' ? (
-                <div className="space-y-4">
-                  {/* Amount Presets */}
-                  <div>
-                    <label className="text-gray-500 text-[10px] font-medium uppercase tracking-widest mb-2 block">
-                      Quick Amount
-                    </label>
-                    <div className="grid grid-cols-5 gap-1.5">
-                      {[0.1, 0.5, 1, 5, 10].map(amt => (
-                        <button
-                          key={amt}
-                          onClick={() => setBetAmount(amt.toString())}
-                          className={`
-                            py-2.5 rounded-lg font-bold text-sm transition-all duration-200
-                            ${betAmount === amt.toString()
-                              ? 'bg-gradient-to-b from-purple-500 to-purple-600 text-white shadow-lg shadow-purple-500/30 scale-105'
-                              : 'bg-white/5 text-gray-300 hover:bg-white/10 hover:scale-102'
-                            }
-                          `}
-                        >
-                          {amt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Duration Selector */}
-                  <div>
-                    <label className="text-gray-500 text-[10px] font-medium uppercase tracking-widest mb-2 block">
-                      Expiration Time
-                    </label>
-                    {gameMode === 'draw' && (
-                      <p className="text-purple-300 text-[10px] font-bold uppercase tracking-widest mb-2">
-                        Draw duration fixed at 5s
-                      </p>
-                    )}
-                    <div className="grid grid-cols-5 gap-1.5 sm:gap-2">
-                      {[5, 10, 15, 30, 60].map(duration => (
-                        <button
-                          key={duration}
-                          onClick={() => gameMode !== 'draw' && setSelectedDuration(duration)}
-                          disabled={gameMode === 'draw'}
-                          className={`
-                            py-3 sm:py-2.5 rounded-xl font-black text-[10px] sm:text-xs transition-all duration-300 border
-                            ${selectedDuration === duration
-                              ? 'bg-purple-600/20 border-purple-500/50 text-purple-400 shadow-[0_0_15px_rgba(168,85,247,0.3)] scale-105 z-10'
-                              : 'bg-black/40 border-white/5 text-gray-500 hover:text-gray-300 hover:border-white/10'
-                            }
-                            disabled:opacity-50 disabled:cursor-not-allowed
-                          `}
-                        >
-                          <div className="flex flex-col items-center gap-0.5">
-                            <span className="tracking-tighter">{duration < 60 ? `${duration}s` : '1m'}</span>
-                            {gameMode === 'binomo' && (
-                              <span className="text-[7px] sm:text-[8px] opacity-70 font-mono tracking-tighter">x{getMultiplier(duration)}</span>
-                            )}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Custom Input */}
-                  <div>
-                    <label className="text-gray-500 text-[10px] font-medium uppercase tracking-widest mb-2 block">
-                      Investment Amount
-                    </label>
-                    <div className="flex items-center bg-black/40 rounded-xl p-1 border border-white/5">
-                      <input
-                        type="number"
-                        value={betAmount}
-                        onChange={(e) => setBetAmount(e.target.value)}
-                        className="flex-1 bg-transparent px-2 py-2 text-white font-mono text-base focus:outline-none min-w-0"
-                        placeholder="0.00"
-                      />
-                      <span className="px-2 py-1.5 bg-purple-500/20 rounded-lg text-purple-400 text-[10px] font-bold shrink-0">
-                        {currencySymbol}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Action Buttons / Instructions */}
-                  {gameMode === 'binomo' ? (
-                    <div className="grid grid-cols-2 gap-3 pt-2">
-                      <button
-                        onClick={() => handleStrikeBet('UP')}
-                        disabled={!isWalletConnected || isPlacingBet || isUnauthorized}
-                        className="group relative flex flex-col items-center justify-center gap-1 py-4 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-2xl transition-all duration-200 active:scale-95 disabled:opacity-50"
-                      >
-                        <div className="text-emerald-500 text-2xl font-bold group-hover:scale-110 transition-transform">▲</div>
-                        <span className="text-emerald-400 text-xs font-black tracking-tighter uppercase">Higher</span>
-                      </button>
-
-                      <button
-                        onClick={() => handleStrikeBet('DOWN')}
-                        disabled={!isWalletConnected || isPlacingBet || isUnauthorized}
-                        className="group relative flex flex-col items-center justify-center gap-1 py-4 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded-2xl transition-all duration-200 active:scale-95 disabled:opacity-50"
-                      >
-                        <div className="text-rose-500 text-2xl font-bold group-hover:scale-110 transition-transform">▼</div>
-                        <span className="text-rose-400 text-xs font-black tracking-tighter uppercase">Lower</span>
-                      </button>
-                    </div>
-                  ) : gameMode === 'box' ? (
-                    <div className="pt-2">
-                      <div className="bg-purple-500/10 border border-purple-500/30 rounded-2xl p-4 text-center">
-                        <p className="text-purple-300 text-xs font-bold uppercase tracking-widest mb-1">Box Mode Active</p>
-                        <p className="text-gray-400 text-[10px] leading-relaxed">
-                          Click any cell on the grid chart to place your bet. Each cell has a different multiplier based on its distance from the current price.
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="pt-2">
-                      <div className="bg-purple-500/10 border border-purple-500/30 rounded-2xl p-4 text-center">
-                        <p className="text-purple-300 text-xs font-bold uppercase tracking-widest mb-1">Draw Mode Active</p>
-                        <p className="text-gray-400 text-[10px] leading-relaxed">
-                          Draw a box on chart → then confirm to place your bet.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* ERROR MESSAGE DISPLAY */}
-                  {error && (
-                    <div className="mt-2 p-3 bg-red-500/10 border border-red-500/30 rounded-xl relative group">
-                      <button
-                        onClick={clearError}
-                        className="absolute top-2 right-2 text-red-500/50 hover:text-red-500 p-1"
-                      >
-                        ✕
-                      </button>
-                      <div className="flex items-start gap-2">
-                        <span className="text-lg">⚠️</span>
-                        <div className="flex-1">
-                          <p className="text-red-400 text-[10px] font-bold uppercase tracking-wider">Error</p>
-                          <p className="text-red-300 text-[11px] leading-tight mt-0.5">
-                            {error.includes('User not found') ||
-                            error.includes('No house balance') ||
-                            error.includes('Insufficient house') ||
-                            error.includes('balance')
-                              ? `No house credits yet or not enough balance. Deposit ${currencySymbol} from the Wallet tab, then place your bet.`
-                              : error}
-                          </p>
-                          {(error.includes('User not found') ||
-                            error.includes('No house balance') ||
-                            error.includes('Insufficient house') ||
-                            error.includes('balance')) && (
-                            <button
-                              onClick={() => {
-                                setActiveTab('wallet');
-                                clearError();
-                              }}
-                              className="mt-2 px-3 py-1 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 rounded-lg text-red-400 text-[10px] font-bold transition-all"
-                            >
-                              Go to Deposit
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {!isWalletConnected && null}
-                </div>
-
-              ) : activeTab === 'wallet' ? (
-                <div className="space-y-4" data-tour="deposit-section">
-                  {isWalletConnected && address ? (
-                    <>
-                      {/* House Balance Display */}
-                      <BalanceDisplay />
-
-                      {/* Address Card */}
-                      <div className="bg-black/30 rounded-xl p-3 border border-white/5">
-                        <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Wallet Address</p>
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-white font-mono text-sm truncate">{formatAddress(address)}</p>
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(address);
-                              toast.success('Address copied!');
-                            }}
-                            className="shrink-0 p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-all"
-                            title="Copy full address"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Wallet Balance Display */}
-                      <div className="bg-gradient-to-br from-purple-500/10 to-transparent rounded-xl p-4 border border-purple-500/20">
-                        <div className="flex justify-between items-start mb-1">
-                          <p className="text-gray-400 text-[10px] uppercase tracking-widest">Wallet Balance</p>
-                          {accountType === 'real' && (
-                            <div className="flex gap-1 bg-black/40 p-0.5 rounded-lg border border-white/5">
-                              {['USDC'].map(c => (
-                                <button
-                                  key={c}
-                                  onClick={() => setSelectedCurrency(c)}
-                                  className={`px-2 py-0.5 rounded-md text-[8px] font-black transition-all ${resolveHouseLedgerCurrency({ selectedCurrency }) === c
-                                    ? 'bg-purple-500 text-white shadow-lg'
-                                    : 'text-gray-500 hover:text-gray-300'
-                                    }`}
-                                >
-                                  {c}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-baseline gap-2">
-                          <span className="text-2xl font-bold text-white">
-                            {isLoadingBalance ? 'Loading...' : formatBalance(activeWalletBalance)}
-                          </span>
-                          <span className="text-purple-400 text-sm font-medium">{currencySymbol}</span>
-                        </div>
-                      </div>
-
-                      {/* Disconnect Button */}
-                      <button
-                        onClick={() => {
-                          const s = useStore.getState();
-                          wagmiDisconnect();
-                          s.disconnect();
-                        }}
-                        className="w-full py-2.5 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl text-xs font-semibold hover:bg-red-500/20 transition-all duration-200"
-                      >
-                        Disconnect Wallet
-                      </button>
-                    </>
-                  ) : (
-                    <div className="text-center py-4 space-y-3">
-                      <p className="text-gray-500 text-sm">No wallet connected</p>
-                      <button
-                        type="button"
-                        onClick={() => setConnectModalOpen(true)}
-                        className="w-full py-3 bg-white text-black rounded-xl text-xs font-black uppercase tracking-widest hover:bg-gray-200 transition-all active:scale-95"
-                      >
-                        Connect Wallet
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {/* Blitz Round Section */}
-                  <div className={`rounded-xl p-4 relative overflow-hidden border-2 transition-all duration-500 ${isBlitzActive ? 'bg-gradient-to-br from-orange-500/20 via-red-500/10 to-yellow-500/10 border-orange-500/40 shadow-[0_0_20px_rgba(249,115,22,0.1)]' : 'bg-black/40 border-gray-800/50'}`}>
-                    <div className="absolute top-0 right-0 px-3 py-1 bg-orange-500/20 border-b border-l border-orange-500/30 text-orange-400 text-[9px] font-black uppercase tracking-widest rounded-bl-xl">
-                      Live System
-                    </div>
-
-                    <div className="flex items-center gap-4 mb-4">
-                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-2xl border shadow-inner transition-transform duration-500 ${isBlitzActive ? 'bg-orange-500/20 border-orange-500/50 animate-pulse scale-110' : 'bg-gray-900 border-gray-800'}`}>
-                        {isBlitzActive ? '🔥' : '⏰'}
-                      </div>
-                      <div>
-                        <p className={`text-[10px] uppercase font-black tracking-[0.2em] mb-1 ${isBlitzActive ? 'text-orange-400' : 'text-gray-500'}`}>
-                          {isBlitzActive ? 'Blitz Round Active' : 'Next Blitz Sequence'}
-                        </p>
-                        <p className={`text-2xl font-black font-mono tracking-tighter ${isBlitzActive ? 'text-white' : 'text-gray-400'}`}>
-                          {isBlitzActive ? blitzTimeRemaining : blitzCountdown}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3">
-                      {accountType === 'real' && (
-                        <div className="flex items-center justify-between gap-2 p-2 bg-black/40 border border-white/5 rounded-xl">
-                          <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Pay in</span>
-                          <div className="flex gap-1 bg-black/50 p-0.5 rounded-lg border border-white/5">
-                            {['USDC'].map((c) => (
-                              <button
-                                key={c}
-                                onClick={() => setSelectedCurrency(c)}
-                                className={`px-2 py-1 rounded-md text-[9px] font-black transition-all ${resolveHouseLedgerCurrency({ selectedCurrency }) === c
-                                  ? 'bg-orange-500 text-white'
-                                  : 'text-gray-500 hover:text-gray-300'
-                                  }`}
-                              >
-                                {c}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="p-3 bg-white/5 rounded-xl border border-white/5">
-                        <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">
-                          <span>Current Multiplier Boost</span>
-                          <span className={isBlitzActive ? 'text-orange-400' : 'text-gray-400'}>{isBlitzActive ? '2.0x' : '1.0x'}</span>
-                        </div>
-                        <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full transition-all duration-1000 ${isBlitzActive ? 'bg-gradient-to-r from-orange-500 to-red-500 w-full' : 'bg-gray-700 w-0'}`}
-                          />
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => {
-                          if (!isWalletConnected) {
-                            setConnectModalOpen(true);
-                            return;
-                          }
-                          void handleEnterBlitz();
-                        }}
-                        disabled={isWalletConnected && (hasBlitzAccess || isActivatingBlitz || isUnauthorized)}
-                        className={`w-full py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all duration-300 transform active:scale-95 ${hasBlitzAccess
-                          ? 'bg-emerald-500/20 border-2 border-emerald-500/40 text-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.1)] cursor-default'
-                          : !isWalletConnected
-                            ? 'bg-gray-800 text-gray-500 border border-gray-700'
-                            : 'bg-gradient-to-r from-orange-500 via-red-500 to-orange-500 bg-[length:200%_auto] hover:bg-right text-white shadow-lg shadow-orange-500/20 hover:shadow-orange-500/40 border-t border-white/20'
-                          }`}
-                      >
-                        {isActivatingBlitz ? (
-                          <span className="flex items-center justify-center gap-2">
-                            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
-                            Processing...
-                          </span>
-                        ) : hasBlitzAccess ? (
-                          <span className="flex items-center justify-center gap-2">
-                            <span className="text-base">✓</span> System Enabled
-                          </span>
-                        ) : !isWalletConnected ? (
-                          'Connect Wallet'
-                        ) : (
-                          `Enter Blitz Round (${blitzEntryFee} ${blitzEntryCurrencySymbol})`
-                        )}
-                      </button>
-
-                      <p className={`text-[9px] text-center font-medium leading-relaxed ${isBlitzActive ? 'text-orange-500/60' : 'text-gray-600'}`}>
-                        {isBlitzActive
-                          ? 'Activate now to receive 2x multipliers on all boosted grid cells.'
-                          : 'Blitz rounds occur every 3 minutes. Prepare your balance.'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
+          <div>
+            <Label>Amount</Label>
+            <Field
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={betAmount}
+              onChange={(e) => setBetAmount(e.target.value)}
+              placeholder="0.00"
+              unit={currencySymbol}
+              aria-label="Bet amount in USDC"
+            />
+            <div className="mt-2 grid grid-cols-5 gap-1.5">
+              {[0.1, 0.5, 1, 5, 10].map((amt) => (
+                <button
+                  key={amt}
+                  type="button"
+                  onClick={() => setBetAmount(amt.toString())}
+                  className={`h-9 rounded-full font-jet text-sm font-medium transition-all ${
+                    betAmount === amt.toString() ? 'bg-ink text-white shadow-[0_6px_16px_-8px_rgba(10,12,16,0.6)]' : 'bg-ink/[0.04] text-muted hover:bg-ink/[0.07] hover:text-ink'
+                  }`}
+                >
+                  {amt}
+                </button>
+              ))}
             </div>
           </div>
 
-          <div className="shrink-0 border-t border-white/5 bg-black/20 p-4">
-            {!isWalletConnected ? (
-              <button
-                type="button"
-                onClick={() => setConnectModalOpen(true)}
-                className="w-full py-3 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-gray-200 transition-all active:scale-95"
-              >
-                Connect wallet to start trading
-              </button>
-            ) : isUnauthorized ? (
-              <p className="text-purple-500 text-[10px] font-black uppercase tracking-widest text-center animate-pulse">
-                Initialization Required
-              </p>
-            ) : (
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 bg-[#00ff88] rounded-full shadow-[0_0_8px_#00ff88]" />
-                  <span className="text-[10px] text-white/40 font-black uppercase tracking-widest">Connected</span>
+          <div>
+            <Label>{gameMode === 'draw' ? 'Expiry · fixed at 5s in Draw' : 'Expiry'}</Label>
+            <Segmented
+              value={selectedDuration}
+              onChange={setSelectedDuration}
+              disabled={gameMode === 'draw'}
+              options={[5, 10, 15, 30, 60].map((d) => ({
+                value: d,
+                label: d < 60 ? `${d}s` : '1m',
+                hint: gameMode === 'binomo' ? `×${getMultiplier(d)}` : undefined,
+              }))}
+            />
+          </div>
+
+          {gameMode === 'binomo' ? (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-baseline justify-between text-sm">
+                <span className="text-muted">Payout if you&apos;re right</span>
+                <span className="font-jet font-semibold">
+                  {Number.isFinite(amountNum) ? (amountNum * multiplier).toFixed(2) : '0.00'} {currencySymbol}
+                </span>
+              </div>
+              {isWalletConnected ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <Button variant="up" size="lg" onClick={() => handleStrikeBet('UP')} disabled={isPlacingBet}>
+                    <ArrowUp size={18} weight="bold" /> Higher
+                  </Button>
+                  <Button variant="down" size="lg" onClick={() => handleStrikeBet('DOWN')} disabled={isPlacingBet}>
+                    <ArrowDown size={18} weight="bold" /> Lower
+                  </Button>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-white/20 font-mono">{formatAddress(address)}</span>
-                  <button
-                    onClick={() => {
-                      if (!address) return;
-                      navigator.clipboard.writeText(address);
-                      setAddressCopied(true);
-                      setTimeout(() => setAddressCopied(false), 2000);
-                    }}
-                    className="text-white/20 hover:text-white/60 transition-colors"
-                    title="Copy address"
-                  >
-                    {addressCopied ? (
-                      <svg className="w-3 h-3 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    ) : (
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                    )}
-                  </button>
+              ) : (
+                <Button size="lg" onClick={() => setConnectModalOpen(true)}>
+                  Connect wallet to trade
+                </Button>
+              )}
+            </div>
+          ) : (
+            <p className="rounded-3xl bg-ink/[0.03] px-5 py-4 text-sm leading-relaxed text-muted">
+              {gameMode === 'box'
+                ? 'Click a cell on the chart to bet that the price lands inside it. Cells further from the price pay more.'
+                : 'Drag a box on the chart, then confirm to bet the price lands inside it.'}
+            </p>
+          )}
+
+          {error && (
+            <div role="alert" className="flex items-start gap-3 rounded-2xl bg-down-soft px-4 py-3 text-sm text-down">
+              <p className="flex-1 leading-snug">
+                {isBalanceError ? `Not enough house balance. Deposit ${currencySymbol} below, then place your bet.` : error}
+              </p>
+              <button type="button" onClick={clearError} aria-label="Dismiss error" className="text-down/70 hover:text-down">
+                <X size={16} />
+              </button>
+            </div>
+          )}
+
+          {/* Balance */}
+          <div className="border-y border-line py-6" data-tour="deposit-section">
+            {isWalletConnected && address ? (
+              <div className="flex flex-col gap-3" data-tour="wallet-tab">
+                <BalanceDisplay />
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted">Wallet</span>
+                  <span className="font-jet">
+                    {isLoadingBalance ? '…' : formatBalance(activeWalletBalance)} {currencySymbol}
+                  </span>
                 </div>
               </div>
+            ) : (
+              <p className="text-sm text-muted">Connect a wallet to deposit USDC and start trading.</p>
             )}
           </div>
+
+          {/* Blitz */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">
+                Blitz{' '}
+                <span className={`font-jet font-normal ${isBlitzActive ? 'text-down' : 'text-faint'}`}>
+                  {isBlitzActive ? `${blitzTimeRemaining} left` : `in ${blitzCountdown}`}
+                </span>
+              </div>
+              <p className="mt-0.5 text-xs text-subtle">2× on boosted cells.</p>
+            </div>
+            {hasBlitzAccess ? (
+              <span className="inline-flex items-center gap-1 text-sm font-medium text-up">
+                <Check size={16} weight="bold" /> Entered
+              </span>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="shrink-0 whitespace-nowrap"
+                disabled={isActivatingBlitz || (isWalletConnected && !isBlitzActive)}
+                onClick={() => (isWalletConnected ? void handleEnterBlitz() : setConnectModalOpen(true))}
+              >
+                {isActivatingBlitz ? 'Paying…' : `Enter · ${blitzEntryFee} ${blitzEntryCurrencySymbol}`}
+              </Button>
+            )}
+          </div>
+
+          <MiniHistory />
         </div>
-      </div>
+      </aside>
     </div>
   );
 };

@@ -4,9 +4,10 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 import { useStore, useHouseBalance, useWalletAddress, useIsConnected, useUserTier } from '@/lib/store';
+import { useShallow } from 'zustand/react/shallow';
 import { useToast } from '@/lib/hooks/useToast';
 import { openReferralShareOnX, referralLandingUrl } from '@/lib/referral/shareOnX';
-import { Wallet, User as UserIcon, History, Link as LinkIcon, Check, Edit2, Zap, Shield, Crown, LayoutGrid, Activity, ShieldCheck, ChevronRight } from 'lucide-react';
+import { Wallet, User as UserIcon, ClockCounterClockwise as History, Link as LinkIcon, Check, PencilSimple as Edit2, Lightning as Zap, Shield, Crown, SquaresFour as LayoutGrid, Pulse as Activity, ShieldCheck, CaretRight as ChevronRight } from '@phosphor-icons/react';
 
 const TIER_DATA = [
     {
@@ -71,7 +72,7 @@ export default function ProfilePage() {
         demoBalance,
         accountType,
         fetchBalance,
-    } = useStore();
+    } = useStore(useShallow((s) => ({ username: s.username, updateUsername: s.updateUsername, recentTrades: s.recentTrades, isLoadingTrades: s.isLoadingTrades, referralCode: s.referralCode, referralCount: s.referralCount, accessCode: s.accessCode, fetchRecentTrades: s.fetchRecentTrades, fetchReferralInfo: s.fetchReferralInfo, demoBalance: s.demoBalance, accountType: s.accountType, fetchBalance: s.fetchBalance })));
 
     const treasuryAmount = accountType === 'demo' ? demoBalance : houseBalance;
 
