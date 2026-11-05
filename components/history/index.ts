@@ -1,0 +1,1 @@
+export { MiniHistory } from './MiniHistory';
