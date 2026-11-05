@@ -41,16 +41,16 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
     return (
         <section
             aria-label="Recent settled rounds"
-            className="overflow-hidden rounded-[2rem] border border-white/5 bg-[#050505]"
+            className="overflow-hidden rounded-3xl border border-line bg-white"
             data-testid="ledger-preview"
         >
-            <div className="flex items-center justify-between border-b border-white/5 p-6">
-                <h2 className="flex items-center gap-3 text-[10px] font-black uppercase tracking-[0.4em] text-white/20">
+            <div className="flex items-center justify-between border-b border-line p-6">
+                <h2 className="flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
                     <HistoryIcon className="h-3 w-3" /> Trading Ledger
                 </h2>
                 <Link
                     href="/history"
-                    className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-white/40 transition-colors hover:text-white"
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle transition-colors hover:text-ink"
                 >
                     Full history <ArrowRight className="h-3 w-3" />
                 </Link>
@@ -59,14 +59,14 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
             <div className="overflow-x-auto">
                 <table className="w-full text-left">
                     <thead>
-                        <tr className="border-b border-white/5 bg-white/[0.01] text-[9px] font-black uppercase tracking-widest text-white/20">
+                        <tr className="border-b border-line bg-surface text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">
                             <th className="px-6 py-4">Asset</th>
                             <th className="px-6 py-4">Side</th>
                             <th className="px-6 py-4">Stake</th>
                             <th className="px-6 py-4 text-right">Result</th>
                         </tr>
                     </thead>
-                    <tbody className="divide-y divide-white/5">
+                    <tbody className="divide-y divide-line">
                         {!wallet && (
                             <NoticeCell>Connect a wallet to read your ledger.</NoticeCell>
                         )}
@@ -76,7 +76,7 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
                                 <td colSpan={4} className="px-6 py-10">
                                     <div className="space-y-2" aria-hidden>
                                         {[0, 1, 2].map((i) => (
-                                            <div key={i} className="h-4 w-full animate-pulse rounded bg-white/5" />
+                                            <div key={i} className="h-4 w-full animate-pulse rounded bg-surface" />
                                         ))}
                                     </div>
                                     <span className="sr-only">Loading recent rounds</span>
@@ -88,7 +88,7 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
                             <tr>
                                 <td colSpan={4} className="px-6 py-8">
                                     <div role="alert" className="flex flex-col items-start gap-2">
-                                        <p className="flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-rose-400">
+                                        <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-down">
                                             <WarningCircle className="h-3.5 w-3.5" />
                                             {outcome?.kind === 'unauthorized'
                                                 ? 'Session not verified — ledger is hidden, not empty'
@@ -97,7 +97,7 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
                                         <button
                                             type="button"
                                             onClick={retry}
-                                            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[9px] font-black uppercase tracking-widest text-white/50 transition-colors hover:text-white"
+                                            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted transition-colors hover:text-ink"
                                         >
                                             <ArrowCounterClockwise className="h-3 w-3" /> Retry
                                         </button>
@@ -114,27 +114,27 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
                             const stake = toAmount(row.amount);
                             const net = ledgerRowNet(row);
                             return (
-                                <tr key={row.id ?? idx} className="transition-all hover:bg-white/[0.01]">
+                                <tr key={row.id ?? idx} className="transition-all hover:bg-surface">
                                     <td className="px-6 py-4 text-xs font-bold uppercase">{row.asset ?? '—'}</td>
                                     <td className="px-6 py-4">
                                         <span
-                                            className={`rounded border px-2 py-0.5 text-[7px] font-black uppercase ${
+                                            className={`rounded border px-2 py-0.5 text-[11px] font-semibold uppercase ${
                                                 row.direction === 'UP'
-                                                    ? 'border-emerald-400/20 text-emerald-400'
+                                                    ? 'border-up/20 text-up'
                                                     : row.direction === 'DOWN'
-                                                      ? 'border-rose-400/20 text-rose-400'
-                                                      : 'border-white/10 text-white/40'
+                                                      ? 'border-down/20 text-down'
+                                                      : 'border-line text-subtle'
                                             }`}
                                         >
                                             {row.direction ?? '—'}
                                         </span>
                                     </td>
-                                    <td className="px-6 py-4 font-mono text-[10px] text-white/30">{formatUsdc(stake)}</td>
+                                    <td className="px-6 py-4 font-mono text-[10px] text-subtle">{formatUsdc(stake)}</td>
                                     <td className="px-6 py-4 text-right">
-                                        <span className={`font-mono text-xs font-black tabular-nums ${pnlClass(net)}`}>
+                                        <span className={`font-mono text-xs font-semibold tabular-nums ${pnlClass(net)}`}>
                                             {formatSignedUsdc(net)}
                                         </span>
-                                        <span className="ml-3 text-[8px] font-bold uppercase tracking-widest text-white/15">
+                                        <span className="ml-3 text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
                                             {formatAgo(row.resolved_at ?? row.created_at)}
                                         </span>
                                     </td>
@@ -151,7 +151,7 @@ export default function LedgerPreview({ wallet, ensureSession }: LedgerPreviewPr
 function NoticeCell({ children }: { children: React.ReactNode }) {
     return (
         <tr>
-            <td colSpan={4} className="px-6 py-10 text-center text-[9px] font-black uppercase tracking-widest text-white/15">
+            <td colSpan={4} className="px-6 py-10 text-center text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">
                 {children}
             </td>
         </tr>

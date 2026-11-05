@@ -35,9 +35,9 @@ export interface BalanceTierPanelProps {
 }
 
 const TIER_CLASS: Record<string, string> = {
-    free: 'text-gray-400 border-gray-800 bg-gray-400/5',
-    standard: 'text-amber-400 border-amber-800/30 bg-amber-400/5',
-    vip: 'text-purple-400 border-purple-800/30 bg-purple-400/5',
+    free: 'text-muted border-line bg-surface',
+    standard: 'text-down border-line bg-surface',
+    vip: 'text-up border-line bg-surface',
 };
 
 export function BalanceTierPanel(props: BalanceTierPanelProps) {
@@ -59,28 +59,28 @@ export function BalanceTierPanel(props: BalanceTierPanelProps) {
 
     return (
         <div className="text-right" data-testid="balance-panel" data-view={view}>
-            <p className="mb-1 text-[9px] font-black uppercase tracking-[0.2em] text-white/20">{copy.label}</p>
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">{copy.label}</p>
 
             {view === 'loading' && (
                 <div className="ml-auto w-32 space-y-1.5" aria-hidden>
-                    <div className="h-5 w-28 animate-pulse rounded bg-white/10" />
-                    <div className="h-2 w-20 animate-pulse rounded bg-white/5" />
+                    <div className="h-5 w-28 animate-pulse rounded bg-surface" />
+                    <div className="h-2 w-20 animate-pulse rounded bg-surface" />
                 </div>
             )}
 
             {view === 'failed' && (
                 <div className="flex flex-col items-end gap-1.5">
-                    <p className="flex items-center gap-1.5 text-sm font-black uppercase tracking-widest text-rose-400">
+                    <p className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.14em] text-down">
                         <WarningCircle className="h-4 w-4" />
                         Unreadable
                     </p>
-                    <p className="max-w-[240px] text-[8px] font-bold uppercase leading-relaxed tracking-widest text-white/30">
+                    <p className="max-w-[240px] text-[11px] font-bold uppercase leading-relaxed tracking-[0.14em] text-subtle">
                         {copy.hint}
                     </p>
                     <button
                         type="button"
                         onClick={props.onRefresh}
-                        className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[8px] font-black uppercase tracking-widest text-white/40 transition-all hover:text-white"
+                        className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle transition-all hover:text-ink"
                     >
                         <ArrowCounterClockwise className="h-3 w-3" />
                         Retry balance
@@ -92,13 +92,13 @@ export function BalanceTierPanel(props: BalanceTierPanelProps) {
                 <>
                     <p className="font-mono text-xl font-bold">
                         {view === 'empty' ? '—' : formatHouseCredits(amount)}{' '}
-                        <span className="text-xs text-white/40">USDC</span>
+                        <span className="text-xs text-subtle">USDC</span>
                     </p>
-                    <p className="mt-0.5 text-[8px] font-bold uppercase tracking-wider text-white/25">
+                    <p className="mt-0.5 text-[11px] font-bold uppercase tracking-wider text-faint">
                         {view === 'empty' ? copy.hint : view === 'demo' ? copy.hint : 'Settled in USDC on Arc'}
                     </p>
                     {stale && (
-                        <p className="mt-0.5 text-[8px] font-bold uppercase tracking-wider text-amber-400/80">
+                        <p className="mt-0.5 text-[11px] font-bold uppercase tracking-wider text-down">
                             Could not refresh — last known figure
                         </p>
                     )}
@@ -106,14 +106,14 @@ export function BalanceTierPanel(props: BalanceTierPanelProps) {
             )}
 
             {view === 'disconnected' && (
-                <p className="text-[10px] font-black uppercase tracking-widest text-white/25">{copy.hint}</p>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">{copy.hint}</p>
             )}
 
             <div className="mt-2 flex items-center justify-end gap-2">
-                <span className={`rounded border px-2 py-0.5 text-[9px] font-black uppercase tracking-widest ${tierClass}`}>
+                <span className={`rounded border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] ${tierClass}`}>
                     {props.tier}
                 </span>
-                <Coins className="h-3 w-3 text-white/15" />
+                <Coins className="h-3 w-3 text-faint" />
             </div>
 
             {props.isConnected && (
@@ -123,7 +123,7 @@ export function BalanceTierPanel(props: BalanceTierPanelProps) {
             )}
 
             {props.isLoading && view !== 'loading' && (
-                <p className="mt-1 flex items-center justify-end gap-1 text-[8px] font-bold uppercase tracking-widest text-white/20">
+                <p className="mt-1 flex items-center justify-end gap-1 text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
                     <CircleNotch className="h-3 w-3 animate-spin" /> syncing
                 </p>
             )}

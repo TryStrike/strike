@@ -2,7 +2,7 @@
 # Deploy Strike to a fresh Oracle Cloud Ubuntu VM (Always Free, x86 or Ampere ARM).
 #
 # Run from the repo root on your machine:
-#   scripts/deploy/oracle.sh ubuntu@<public-ip> [~/.ssh/oracle_strike]
+#   backend/deploy/oracle.sh ubuntu@<public-ip> [~/.ssh/oracle_strike]
 #
 # Copies the repo (git archive of HEAD) and .env.local to the VM, builds the
 # Rust backend and the Next frontend with Node 22, runs both under systemd
@@ -10,7 +10,7 @@
 # an automatic HTTPS cert for <ip>.sslip.io (wallets need a secure origin).
 #
 # The ledger is SQLite at /var/lib/strike, outside the release tree, so a
-# redeploy never touches it. scripts/deploy/data.sh does all work on that file:
+# redeploy never touches it. backend/deploy/data.sh does all work on that file:
 # it creates the DB only when there is none and takes an online backup before
 # the binary changes. One backend process only: SQLite is local, one writer.
 # Litestream replicates off the machine when LITESTREAM_REPLICA_URL is set.
@@ -37,7 +37,7 @@ git archive --format=tar.gz HEAD | "${SSH[@]}" 'rm -rf ~/strike.new && mkdir -p 
 # the exported value below and the systemd unit sets it explicitly, so a stale
 # local value cannot leak into production (or survive a rollback). filter-env
 # drops it, DATABASE_URL and every other key the units own.
-scripts/deploy/data.sh filter-env < .env.local \
+backend/deploy/data.sh filter-env < .env.local \
   | sed "s#^NEXT_PUBLIC_APP_URL=.*#NEXT_PUBLIC_APP_URL=https://$DOMAIN#" \
   | "${SSH[@]}" 'cat > ~/strike.new/.env.local && chmod 600 ~/strike.new/.env.local'
 
@@ -102,16 +102,16 @@ cargo build --release --locked --manifest-path backend/Cargo.toml -p server
 # changes, and the backup comes first: if it fails, nothing is replaced.
 DATA=/opt/strike/bin/strike-data
 BIN=/opt/strike/bin/strike-backend
-sudo install -D -m 755 scripts/deploy/data.sh "$DATA"
+sudo install -D -m 755 backend/deploy/data.sh "$DATA"
 sudo ln -sf "$DATA" /usr/local/bin/strike-data
 sudo "$DATA" prepare
 sudo "$DATA" install-litestream
 sudo "$DATA" install-env .env.local
-sudo "$DATA" init db/schema.sqlite.sql
+sudo "$DATA" init backend/schema.sql
 sudo "$DATA" backup
 
-sudo install -m 644 scripts/deploy/strike-backend.service scripts/deploy/strike-litestream.service /etc/systemd/system/
-sudo install -m 644 scripts/deploy/litestream.yml /etc/strike/litestream.yml
+sudo install -m 644 backend/deploy/strike-backend.service backend/deploy/strike-litestream.service /etc/systemd/system/
+sudo install -m 644 backend/deploy/litestream.yml /etc/strike/litestream.yml
 if [ -x "$BIN" ]; then sudo cp -p "$BIN" "$BIN.prev"; fi
 sudo install -m 755 backend/target/release/strike-backend "$BIN"
 

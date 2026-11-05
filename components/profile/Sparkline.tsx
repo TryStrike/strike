@@ -24,7 +24,7 @@ export default function Sparkline({
     values,
     width = '100%',
     height = 64,
-    stroke = '#00ff88',
+    stroke = '#2151F5',
     fill = 'rgba(0,255,136,0.12)',
     className,
     ariaLabel,

@@ -48,7 +48,7 @@ use crate::money::{fixed_json, parse_decimal, to_fixed};
 use crate::rpc;
 use crate::schema::{decode_kind, numeric_scale, Decode};
 
-pub const SCHEMA_SQL: &str = include_str!("../../../../db/schema.sqlite.sql");
+pub const SCHEMA_SQL: &str = include_str!("../../../schema.sql");
 /// Splits [`SCHEMA_SQL`]: what follows it runs on a brand-new database only.
 const SEED_MARKER: &str = "-- SEED";
 /// Changes after version 1, oldest first; entry `n` moves a file to `n + 2`. The

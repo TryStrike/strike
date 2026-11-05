@@ -2,12 +2,12 @@
  * Deploy StrikeTreasury to Arc.
  *
  * Usage:
- *   ARC_TREASURY_SECRET_KEY=... NEXT_PUBLIC_ARC_CHAIN_ID=5042002 node contracts/arc/deploy.mjs
+ *   ARC_TREASURY_SECRET_KEY=... NEXT_PUBLIC_ARC_CHAIN_ID=5042002 node contracts/deploy.mjs
  *   # --force overwrites an existing arc-<chainId>.json; without it the
  *   # script refuses to redeploy over a live treasury.
  *
  * Reads ARC_TREASURY_SECRET_KEY and NEXT_PUBLIC_ARC_* from .env.local/.env and
- * writes contracts/arc/deployments/arc-<chainId>.json.
+ * writes contracts/deployments/arc-<chainId>.json.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -16,7 +16,7 @@ import { ethers } from 'ethers';
 import solc from 'solc';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = resolve(__dirname, '../..');
+const root = resolve(__dirname, '..');
 
 for (const file of ['.env.local', '.env']) {
   const envPath = resolve(root, file);

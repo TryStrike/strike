@@ -119,13 +119,13 @@ export function IdentityPanel({
                                         closeEditor();
                                     }
                                 }}
-                                className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-lg font-black text-white outline-none focus:border-white/25"
+                                className="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 py-1.5 text-lg font-semibold text-ink outline-none focus:border-line"
                             />
                             <button
                                 type="button"
                                 onClick={() => void submit()}
                                 disabled={!validation.ok || busy}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-black transition-all hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-35"
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-ink px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-white transition-all hover:bg-ink/85 disabled:cursor-not-allowed disabled:opacity-35"
                             >
                                 {busy ? <CircleNotch className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                                 Save
@@ -134,7 +134,7 @@ export function IdentityPanel({
                                 type="button"
                                 onClick={closeEditor}
                                 disabled={busy}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-white/40 transition-all hover:text-white disabled:opacity-35"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-subtle transition-all hover:text-ink disabled:opacity-35"
                             >
                                 <X className="h-4 w-4" />
                                 Cancel
@@ -142,7 +142,7 @@ export function IdentityPanel({
                         </div>
                         <p
                             id="username-help"
-                            className={`text-[9px] font-bold uppercase tracking-widest ${showError ? 'text-rose-400' : 'text-white/25'}`}
+                            className={`text-[11px] font-bold uppercase tracking-[0.14em] ${showError ? 'text-down' : 'text-faint'}`}
                         >
                             {showError
                                 ? showError.message
@@ -151,7 +151,7 @@ export function IdentityPanel({
                                   : '2-24 characters · letters, numbers, . _ -'}
                         </p>
                         {result && result.outcome !== 'ok' && (
-                            <p className="flex items-start gap-1.5 text-[9px] font-bold uppercase tracking-widest text-rose-400">
+                            <p className="flex items-start gap-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-down">
                                 <WarningCircle className="mt-px h-3 w-3 shrink-0" />
                                 {result.message ??
                                     usernameSaveErrorMessage(result.outcome === 'rejected' ? 'taken' : 'network')}
@@ -161,11 +161,11 @@ export function IdentityPanel({
                 ) : (
                     <div className="group flex items-center gap-3">
                         {!loadedOnce && !display ? (
-                            <span aria-label="Loading username" className="h-7 w-36 animate-pulse rounded-lg bg-white/10" />
+                            <span aria-label="Loading username" className="h-7 w-36 animate-pulse rounded-lg bg-surface" />
                         ) : (
                             <h1
-                                className={`truncate text-2xl font-black tracking-tighter sm:text-3xl ${
-                                    nameUnavailable ? 'text-white/30' : ''
+                                className={`truncate text-2xl font-semibold tracking-tight sm:text-3xl ${
+                                    nameUnavailable ? 'text-subtle' : ''
                                 }`}
                                 data-testid="identity-name"
                             >
@@ -178,13 +178,13 @@ export function IdentityPanel({
                             onClick={openEditor}
                             disabled={readOnly}
                             title={readOnly ? readOnlyReason : 'Edit username'}
-                            className="rounded-lg p-1.5 text-white/30 opacity-0 transition-all hover:bg-white/10 hover:text-white focus-visible:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
+                            className="rounded-lg p-1.5 text-subtle opacity-0 transition-all hover:bg-surface hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
                             aria-label="Edit username"
                         >
                             <PencilSimple className="h-4 w-4" />
                         </button>
                         {readOnly && (
-                            <span className="text-[8px] font-black uppercase tracking-widest text-white/20">
+                            <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">
                                 {readOnlyReason}
                             </span>
                         )}

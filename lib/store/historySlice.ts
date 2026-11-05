@@ -12,7 +12,7 @@
  */
 
 import { StateCreator } from "zustand";
-import { BetRecord } from "@/types/bet";
+import { BetRecord } from "@/lib/types/bet";
 
 /** Raw `bet_history` row as returned by /api/bets/history (NUMERICs arrive as strings). */
 export interface BetHistoryRow {

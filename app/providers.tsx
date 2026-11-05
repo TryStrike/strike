@@ -14,8 +14,7 @@ import { PrivyEnabledContext } from '@/lib/wallet/privy-enabled';
 // Custom Components
 import { WalletConnectModal } from '@/components/wallet/WalletConnectModal';
 import { ReferralSync } from './ReferralSync';
-import type { AssetType } from '@/lib/utils/priceFeed';
-import { useSessionTracker } from '@/hooks/useSessionTracker';
+import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 
 // Bridges the connected wallet into the Zustand store. Arc is the only
 // network, so this reduces to: adopt the wagmi (or Privy embedded) address,
@@ -143,81 +142,15 @@ function WalletSyncCore({
 }
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [isReady, setIsReady] = useState(false);
   const [queryClient] = useState(() => new QueryClient());
 
+  // Prices and the balance session warm up in the background. Nothing waits on them.
   useEffect(() => {
-    let cancelled = false;
-    let stopPriceFeed: (() => void) | undefined;
-
-    const initializeApp = async () => {
-      try {
-        const { updateAllPrices, startGlobalPriceFeed } = useStore.getState();
-
-        if (cancelled) return;
-
-        // Seed a faster default asset for the chart.
-        // We try a small set in parallel and pick the first one that returns a valid price.
-        // This helps avoid long "Connecting to price feeds..." delays when some feeds are slower.
-        try {
-          const { fetchPrice } = await import('@/lib/utils/priceFeed');
-          const store = useStore.getState();
-
-          const candidates: AssetType[] = ['BTC', 'ETH', 'SOL', 'SUI', 'BNB'];
-
-          const seeded = await Promise.any(
-            candidates.map(async (asset) => {
-              const p = await fetchPrice(asset);
-              if (p?.price && p.price > 0) return { asset, price: p.price };
-              throw new Error('No valid price');
-            })
-          );
-
-          if (cancelled) return;
-
-          store.setSelectedAsset(seeded.asset);
-          // Seed at least 2 points so LiveChart can render quickly.
-          store.updatePrice(seeded.price, seeded.asset);
-          store.updatePrice(seeded.price, seeded.asset);
-        } catch (e) {
-          // Non-fatal: we'll still start the global feed and show the default chart.
-        }
-
-        if (cancelled) return;
-
-        stopPriceFeed = startGlobalPriceFeed(updateAllPrices);
-        if (cancelled) {
-          stopPriceFeed();
-          stopPriceFeed = undefined;
-          return;
-        }
-
-        const { ensureBalanceSession } = await import('@/lib/balance/balanceClientHeaders');
-        await ensureBalanceSession().catch(() => {});
-
-        if (cancelled) return;
-        setIsReady(true);
-      } catch (error) {
-        console.error('Error initializing app:', error);
-        if (!cancelled) setIsReady(true);
-      }
-    };
-
-    void initializeApp();
-
-    return () => {
-      cancelled = true;
-      stopPriceFeed?.();
-    };
+    const store = useStore.getState();
+    const stopPriceFeed = store.startGlobalPriceFeed(store.updateAllPrices);
+    void import('@/lib/balance/balanceClientHeaders').then(({ ensureBalanceSession }) => ensureBalanceSession());
+    return stopPriceFeed;
   }, []);
-
-  if (!isReady) {
-    return (
-      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500"></div>
-      </div>
-    );
-  }
 
   const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID?.trim() || '';
 

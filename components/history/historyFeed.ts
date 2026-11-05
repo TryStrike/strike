@@ -22,7 +22,7 @@ import {
   type BetHistoryPage,
   type BetHistoryRow,
 } from '@/lib/store/historySlice';
-import type { BetRecord } from '@/types/bet';
+import type { BetRecord } from '@/lib/types/bet';
 import type { HistoryView } from './historyQuery';
 
 /**

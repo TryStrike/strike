@@ -160,7 +160,7 @@ Full simulation of every mode with a local balance. No wallet required. Demo bet
 
 ## Treasury contract
 
-`contracts/arc/StrikeTreasury.sol` is the house vault. It holds the playable asset (USDC). Players deposit; the operator pays withdrawals and winnings after off-chain settlement.
+`contracts/StrikeTreasury.sol` is the house vault. It holds the playable asset (USDC). Players deposit; the operator pays withdrawals and winnings after off-chain settlement.
 
 Why a contract instead of an EOA:
 
@@ -169,7 +169,7 @@ Why a contract instead of an EOA:
 
 Events (`Deposited`, `Withdrawn`) are the on-chain audit trail used to reconcile the house ledger.
 
-See [`contracts/arc/README.md`](contracts/arc/README.md) for deploy addresses, e2e coverage, and owner.
+See [`contracts/README.md`](contracts/README.md) for deploy addresses and owner.
 
 ---
 
@@ -267,7 +267,7 @@ flowchart TD
 | `access_codes` / `waitlist` / `user_sessions` | Onboarding and dwell time |
 | `withdrawal_requests` | Manual approval queue |
 
-The schema is `db/schema.sqlite.sql`, and `PRAGMA user_version` tracks changes after it (`MIGRATIONS` in `backend/crates/core/src/db.rs`). Only the backend writes the file.
+The schema is `backend/schema.sql`, and `PRAGMA user_version` tracks changes after it (`MIGRATIONS` in `backend/crates/core/src/db.rs`). Only the backend writes the file.
 
 ---
 
@@ -326,11 +326,9 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 │   ├── balance/                # Client balance helpers
 │   └── supabase/               # Query client for the /api/db gateway
 │
-├── backend/                    # Rust API (axum + SQLite)
-├── contracts/arc/         # StrikeTreasury.sol, deploy
-├── db/                         # schema.sqlite.sql
-├── scripts/deploy/             # oracle.sh, systemd units, backup and restore
-└── docs/                       # ENVIRONMENT.md, CONTRIBUTING.md, SECURITY_REPORTING.md
+├── backend/                    # Rust API (axum + SQLite), schema.sql, deploy/
+├── contracts/                  # StrikeTreasury.sol, deploy
+└── docs/                       # ops, env, pitch deck
 ```
 
 ---
@@ -364,7 +362,7 @@ NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC=
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=
 ```
 
-`ARC_TREASURY_SECRET_KEY` must match `NEXT_PUBLIC_TREASURY_ADDRESS`. Contract deploy/e2e also honor `ARC_RPC_URL`.
+`ARC_TREASURY_SECRET_KEY` must match `NEXT_PUBLIC_TREASURY_ADDRESS`. Contract deploy also honors `ARC_RPC_URL`.
 
 ### Backend, Privy, admin, settlement
 
@@ -419,7 +417,7 @@ Running it in production: `docs/OPERATIONS.md`.
 ## Contracts
 
 ```bash
-ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... node contracts/arc/deploy.mjs
+ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... node contracts/deploy.mjs
 ```
 
 ---

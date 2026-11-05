@@ -126,9 +126,9 @@ export function windowLabel(key: string | null | undefined): string {
  * URL building
  * ------------------------------------------------------------------ */
 
-export const BOARD_LIMIT = 50;
+const BOARD_LIMIT = 50;
 /** Never poll faster than the board can change (s-maxage=30, snapshot TTL 60s). */
-export const MIN_POLL_MS = 30_000;
+const MIN_POLL_MS = 30_000;
 export const POLL_MS = 60_000;
 
 export function buildBoardUrl(opts: {
@@ -214,21 +214,6 @@ export function formatGap(gap: number | null | undefined, metric: LeaderboardMet
   return formatSignedMoney(gap);
 }
 
-/** The value to reach to move up one place — server scalar, formatted here. */
-export function formatClimbTarget(me: YourStanding): string | null {
-  if (me.gapToNextRank == null || me.nextRankValue == null) return null;
-  const target = formatMetricValue(me.nextRankValue, me.metric);
-  const gap = formatGap(me.gapToNextRank, me.metric);
-  const rankLabel = me.nextRank == null ? 'one place' : `#${me.nextRank}`;
-  return gap == null
-    ? `Reach ${target} to move up ${rankLabel}`
-    : `Reach ${target} (+${stripPlus(gap)} away) to move up ${rankLabel}`;
-}
-
-function stripPlus(s: string): string {
-  return s.startsWith('+') ? s.slice(1) : s;
-}
-
 /* ------------------------------------------------------------------ *
  * Identity — never fabricate, never un-truncate
  * ------------------------------------------------------------------ */
@@ -249,30 +234,6 @@ export function hasUsername(row: Pick<LeaderboardRow, 'username'>): boolean {
 }
 
 /* ------------------------------------------------------------------ *
- * Rank display
- * ------------------------------------------------------------------ */
-
-/**
- * Fallback: derive the caller's rank from the public board slice by matching
- * the truncated address the server gave both sides. Returns null when the
- * caller is not in the slice — the page must not claim a rank it cannot see.
- */
-export function rankFromBoardSlice(
-  rows: readonly Pick<LeaderboardRow, 'wallet_address' | 'rank'>[],
-  truncatedAddress: string | null | undefined
-): number | null {
-  const needle = truncatedAddress?.trim().toLowerCase();
-  if (!needle) return null;
-  const hit = rows.find((r) => r.wallet_address?.toLowerCase() === needle);
-  return hit ? hit.rank : null;
-}
-
-/** How the wallet-count denominator should read given truncation. */
-export function rankDenominatorLabel(me: Pick<YourStanding, 'walletsOnBoard'>): string {
-  return `of at least ${me.walletsOnBoard.toLocaleString('en-US')} ranked wallets`;
-}
-
-/* ------------------------------------------------------------------ *
  * Freshness / staleness / truncation labelling
  * ------------------------------------------------------------------ */
 
@@ -290,26 +251,12 @@ export function freshnessText(updatedAtIso: string | null | undefined, nowMs: nu
   return `${Math.floor(m / 60)}h ago`;
 }
 
-/** UTC HH:MM:SS clock, '—' for anything unparseable. */
-export function utcClock(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
-}
-
-export interface PartialWindowNotice {
-  label: 'PARTIAL WINDOW';
-  detail: string;
-}
-
 /**
  * The honest qualifier: non-null when the board cannot claim completeness.
  * truncated → the scan hit the row cap (totals/ranks cover only the most
  * recent `scannedRows` rounds); stale → numbers may lag what is settled now.
  */
-export function partialWindowNotice(meta: BoardMeta | null | undefined): PartialWindowNotice | null {
+export function partialWindowNotice(meta: BoardMeta | null | undefined): { label: 'PARTIAL WINDOW'; detail: string } | null {
   if (!meta) return null;
   if (meta.truncated) {
     const scanned = meta.scannedRows.toLocaleString('en-US');
@@ -325,34 +272,4 @@ export function partialWindowNotice(meta: BoardMeta | null | undefined): Partial
     };
   }
   return null;
-}
-
-/** The window boundary, phrased honestly ("all time" has no `since`). */
-export function windowBoundaryText(meta: BoardMeta | null | undefined): string {
-  if (!meta) return 'All Time · all settled rounds';
-  const label = windowLabel(meta.window);
-  if (meta.window === 'all' || meta.since == null) return `${label} · all settled rounds`;
-  return `${label} · since ${utcClock(meta.since)} UTC`;
-}
-
-/** Board scope summary: shown/total, metric, partial-window tail. */
-export function boardScopeText(meta: BoardMeta | null | undefined): string {
-  if (!meta) return '';
-  const shown = meta.shown ?? 0;
-  const total = meta.walletsOnBoard ?? 0;
-  const base = `${windowBoundaryText(meta)} · by ${metricLabel(meta.metric)} · showing ${shown} of ${total} wallets`;
-  return meta.truncated ? `${base} · partial scan (${meta.scannedRows.toLocaleString('en-US')} rounds)` : base;
-}
-
-/** Estimate qualifier for the "your rank" card. */
-export function standingConfidence(me: Pick<YourStanding, 'estimated'>): {
-  label: string;
-  detail: string;
-} {
-  return me.estimated
-    ? {
-        label: 'ESTIMATED',
-        detail: 'The window was only partially scanned, so this standing is an estimate of your true rank.',
-      }
-    : { label: 'EXACT', detail: 'Computed from the full window scan the public board uses.' };
 }

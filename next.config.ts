@@ -12,7 +12,7 @@ import { PHASE_PRODUCTION_BUILD } from "next/constants";
  * through unchanged. Next's `x-forwarded-for` keeps what Caddy wrote, which is
  * what the Rust rate limiter reads. SSE stays open as long as the upstream keeps
  * writing; the Rust feed sends a heartbeat every 15s, below `proxyTimeout`.
- * Caddy must not buffer (`flush_interval -1` in scripts/deploy/oracle.sh).
+ * Caddy must not buffer (`flush_interval -1` in backend/deploy/oracle.sh).
  */
 const backendUrl = process.env.BACKEND_URL?.trim().replace(/\/+$/, "");
 const DEV_BACKEND_URL = "http://127.0.0.1:8080";

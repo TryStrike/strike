@@ -7,7 +7,7 @@
  */
 
 import { StateCreator } from "zustand";
-import { TargetCell, PricePoint } from "@/types/game";
+import { TargetCell, PricePoint } from "@/lib/types/game";
 import { AssetType } from "@/lib/utils/priceFeed";
 import { playWinSound, playLoseSound } from "@/lib/utils/sounds";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";

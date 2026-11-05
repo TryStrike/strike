@@ -12,7 +12,7 @@
 //!     `one_decode_per_column_name` test refuses a schema where it would not be.
 //!
 //! `schema_matches_the_sql_file` in `db.rs` checks this list against
-//! `db/schema.sqlite.sql`.
+//! `backend/schema.sql`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

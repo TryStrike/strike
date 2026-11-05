@@ -73,7 +73,7 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
     if (accountType === 'demo') {
         return (
             <Shell windowSel={windowSel} loading={false} showTabs={false} onPick={() => {}} onRetry={() => {}}>
-                <p className="flex items-start gap-2 text-[10px] font-bold uppercase leading-relaxed tracking-widest text-white/30">
+                <p className="flex items-start gap-2 text-[10px] font-bold uppercase leading-relaxed tracking-[0.14em] text-subtle">
                     <Info className="mt-px h-3 w-3 shrink-0" />
                     Practice mode has no official record — demo bets are excluded from /api/bets/stats by design.
                     Switch to a funded account to see win rate, PnL and streaks.
@@ -99,7 +99,7 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
             )}
 
             {!wallet && (
-                <p className="text-[10px] font-black uppercase tracking-widest text-white/25">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
                     Connect a wallet to read your record.
                 </p>
             )}
@@ -113,7 +113,7 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
                     label="Net PnL"
                     value={stat(stats, (s) => formatSignedUsdc(s.netPnl), stale)}
                     sub="USDC"
-                    valueClass={stats && !stale ? pnlClass(stats.netPnl) : 'text-white/40'}
+                    valueClass={stats && !stale ? pnlClass(stats.netPnl) : 'text-subtle'}
                 />
                 <Metric
                     loading={skeleton}
@@ -127,35 +127,35 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
                     label="Win Streak"
                     value={stat(stats, (s) => String(s.longestWinStreak), stale)}
                     sub="longest"
-                    valueClass="text-emerald-400"
+                    valueClass="text-up"
                 />
                 <Metric
                     loading={skeleton}
                     label="Loss Streak"
                     value={stat(stats, (s) => String(s.longestLossStreak), stale)}
                     sub="longest"
-                    valueClass="text-rose-400"
+                    valueClass="text-down"
                 />
             </div>
 
             {/* Sparkline + best/worst */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <div className="lg:col-span-2 bg-white/[0.02] border border-white/5 rounded-2xl p-4 min-h-[132px]">
+                <div className="lg:col-span-2 bg-surface border border-line rounded-2xl p-4 min-h-[132px]">
                     <div className="flex items-center justify-between mb-2">
-                        <p className="text-[8px] font-black uppercase tracking-[0.25em] text-white/25">Cumulative Net PnL</p>
-                        <span className="text-[8px] font-mono text-white/20">{windowCaption(windowSel)}</span>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">Cumulative Net PnL</p>
+                        <span className="text-[11px] font-mono text-faint">{windowCaption(windowSel)}</span>
                     </div>
                     {skeleton ? (
-                        <div className="h-16 animate-pulse rounded bg-white/5" aria-hidden />
+                        <div className="h-16 animate-pulse rounded bg-surface" aria-hidden />
                     ) : failed && stats === null ? (
-                        <div className="flex h-16 items-center text-[9px] font-black uppercase tracking-widest text-white/25">
+                        <div className="flex h-16 items-center text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">
                             Trend unavailable — request failed
                         </div>
                     ) : (
                         <Sparkline
                             values={sparkValues}
                             height={64}
-                            stroke={sparkPositive ? '#00ff88' : '#fb7185'}
+                            stroke={sparkPositive ? '#2151F5' : '#C2410C'}
                             fill={sparkPositive ? 'rgba(0,255,136,0.10)' : 'rgba(251,113,133,0.10)'}
                             ariaLabel={`Net PnL trend, ${windowCaption(windowSel)}`}
                         />
@@ -165,23 +165,23 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
                 <div className="grid grid-cols-1 gap-4">
                     {(
                         [
-                            { label: 'Best Trade', t: stats?.bestTrade ?? null, tone: 'text-emerald-400' },
-                            { label: 'Worst Trade', t: stats?.worstTrade ?? null, tone: 'text-rose-400' },
+                            { label: 'Best Trade', t: stats?.bestTrade ?? null, tone: 'text-up' },
+                            { label: 'Worst Trade', t: stats?.worstTrade ?? null, tone: 'text-down' },
                         ] as const
                     ).map(({ label, t, tone }) => (
                         <div
                             key={label}
-                            className="bg-white/[0.02] border border-white/5 rounded-2xl p-4 min-h-[64px] flex items-center justify-between"
+                            className="bg-surface border border-line rounded-2xl p-4 min-h-[64px] flex items-center justify-between"
                         >
                             <div className="min-w-0">
-                                <p className="text-[8px] font-black uppercase tracking-[0.25em] text-white/25 mb-1">{label}</p>
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-faint mb-1">{label}</p>
                                 {skeleton ? (
-                                    <div className="h-4 w-20 animate-pulse rounded bg-white/10" aria-hidden />
+                                    <div className="h-4 w-20 animate-pulse rounded bg-surface" aria-hidden />
                                 ) : (
-                                    <p className="truncate text-[11px] font-bold uppercase text-white/60">
+                                    <p className="truncate text-[11px] font-bold uppercase text-muted">
                                         {t ? t.asset : '—'}
                                         {t && (
-                                            <span className="ml-2 text-[9px] font-normal normal-case text-white/20">
+                                            <span className="ml-2 text-[11px] font-normal normal-case text-faint">
                                                 {formatShortDay(t.at)}
                                             </span>
                                         )}
@@ -189,7 +189,7 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
                                 )}
                             </div>
                             {!skeleton && (
-                                <span className={`font-mono text-sm font-black tabular-nums ${t ? tone : 'text-white/15'}`}>
+                                <span className={`font-mono text-sm font-semibold tabular-nums ${t ? tone : 'text-faint'}`}>
                                     {t ? formatSignedUsdc(t.net) : '—'}
                                 </span>
                             )}
@@ -200,17 +200,17 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
 
             {/* Genuinely empty wallet: an explicit statement, not a field of zeros. */}
             {empty ? (
-                <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-6 text-center">
-                    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-white/35">
+                <div className="rounded-2xl border border-line bg-surface p-6 text-center">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-subtle">
                         No settled bets in the {windowSel.toUpperCase()} window
                     </p>
-                    <p className="mx-auto mt-2 max-w-md text-[9px] font-bold uppercase leading-relaxed tracking-widest text-white/20">
+                    <p className="mx-auto mt-2 max-w-md text-[11px] font-bold uppercase leading-relaxed tracking-[0.14em] text-faint">
                         The server confirmed an empty record — that is different from a failed request. Full ledger and
                         per-round proofs live in bet history.
                     </p>
                     <Link
                         href="/history"
-                        className="mt-4 inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-[9px] font-black uppercase tracking-widest text-white/60 hover:text-white"
+                        className="mt-4 inline-flex items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted hover:text-ink"
                     >
                         <HistoryIcon className="h-3.5 w-3.5" /> Open bet history
                     </Link>
@@ -219,7 +219,7 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
                 <div className="overflow-x-auto">
                     <table className="w-full text-left">
                         <thead>
-                            <tr className="border-b border-white/5 text-[9px] uppercase font-black tracking-widest text-white/20">
+                            <tr className="border-b border-line text-[11px] uppercase font-semibold tracking-[0.14em] text-faint">
                                 <th className="py-3 pr-4">Asset</th>
                                 <th className="py-3 pr-4">Bets</th>
                                 <th className="py-3 pr-4">Volume</th>
@@ -227,31 +227,31 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
                                 <th className="py-3 text-right">Net PnL</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-white/5">
+                        <tbody className="divide-y divide-line">
                             {skeleton ? (
                                 <tr>
                                     <td colSpan={5} className="py-8">
-                                        <div className="h-4 w-full animate-pulse rounded bg-white/5" aria-hidden />
+                                        <div className="h-4 w-full animate-pulse rounded bg-surface" aria-hidden />
                                     </td>
                                 </tr>
                             ) : stats && stats.perAsset.length > 0 ? (
                                 stats.perAsset.slice(0, 6).map((a) => (
-                                    <tr key={a.asset} className="hover:bg-white/[0.01] transition-colors">
+                                    <tr key={a.asset} className="hover:bg-surface transition-colors">
                                         <td className="py-3 pr-4 text-xs font-bold uppercase">
-                                            <ActivityIcon className="mr-2 inline h-3 w-3 text-white/20" />
+                                            <ActivityIcon className="mr-2 inline h-3 w-3 text-faint" />
                                             {a.asset}
                                         </td>
-                                        <td className="py-3 pr-4 font-mono text-[10px] tabular-nums text-white/40">{a.bets}</td>
-                                        <td className="py-3 pr-4 font-mono text-[10px] tabular-nums text-white/40">{formatUsdc(a.volume)}</td>
-                                        <td className="py-3 pr-4 font-mono text-[10px] tabular-nums text-white/60">{formatPercent(a.winRate)}</td>
-                                        <td className={`py-3 text-right font-mono text-xs font-black tabular-nums ${pnlClass(a.netPnl)}`}>
+                                        <td className="py-3 pr-4 font-mono text-[10px] tabular-nums text-subtle">{a.bets}</td>
+                                        <td className="py-3 pr-4 font-mono text-[10px] tabular-nums text-subtle">{formatUsdc(a.volume)}</td>
+                                        <td className="py-3 pr-4 font-mono text-[10px] tabular-nums text-muted">{formatPercent(a.winRate)}</td>
+                                        <td className={`py-3 text-right font-mono text-xs font-semibold tabular-nums ${pnlClass(a.netPnl)}`}>
                                             {formatSignedUsdc(a.netPnl)}
                                         </td>
                                     </tr>
                                 ))
                             ) : (
                                 <tr>
-                                    <td colSpan={5} className="py-8 text-center text-[9px] uppercase font-black text-white/15">
+                                    <td colSpan={5} className="py-8 text-center text-[11px] uppercase font-semibold text-faint">
                                         {failed ? 'Per-asset breakdown unavailable' : 'No settled bets in this window'}
                                     </td>
                                 </tr>
@@ -262,7 +262,7 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
             )}
 
             {stats?.truncated && !failed && (
-                <p className="text-[8px] font-bold uppercase tracking-widest text-white/20">
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
                     Activity exceeds the analysis cap — showing most recent bets.
                 </p>
             )}
@@ -270,13 +270,13 @@ export default function PerformanceSection({ wallet, accountType = 'real', ensur
             <div className="flex flex-wrap items-center gap-3 pt-1">
                 <Link
                     href="/history"
-                    className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2 text-[9px] font-black uppercase tracking-widest text-white/55 transition-colors hover:text-white"
+                    className="inline-flex items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted transition-colors hover:text-ink"
                 >
                     <HistoryIcon className="h-3.5 w-3.5" /> Full bet history
                 </Link>
                 <Link
                     href="/withdrawals"
-                    className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2 text-[9px] font-black uppercase tracking-widest text-white/55 transition-colors hover:text-white"
+                    className="inline-flex items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted transition-colors hover:text-ink"
                 >
                     Withdrawals ledger
                 </Link>
@@ -310,14 +310,14 @@ function Shell({
         <section
             aria-label="Trading performance"
             aria-busy={loading || undefined}
-            className="bg-[#050505] border border-white/5 rounded-[2rem] overflow-hidden"
+            className="bg-white border border-line rounded-3xl overflow-hidden"
             data-testid="performance-section"
         >
-            <div className="px-6 py-5 border-b border-white/5 flex flex-wrap items-center justify-between gap-4">
-                <h2 className="flex items-center gap-3 text-[10px] font-black uppercase tracking-[0.4em] text-white/20">
+            <div className="px-6 py-5 border-b border-line flex flex-wrap items-center justify-between gap-4">
+                <h2 className="flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
                     <ActivityIcon className="h-3 w-3" /> Performance
-                    {loading && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" aria-label="Refreshing" />}
-                    <span className="text-white/10">{windowSel.toUpperCase()}</span>
+                    {loading && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-up" aria-label="Refreshing" />}
+                    <span className="text-faint">{windowSel.toUpperCase()}</span>
                 </h2>
                 <div className="flex items-center gap-1.5">
                     {showTabs && (
@@ -329,10 +329,10 @@ function Shell({
                                     role="tab"
                                     aria-selected={windowSel === w.id}
                                     onClick={() => onPick(w.id)}
-                                    className={`rounded-lg px-3 py-1.5 text-[9px] font-black uppercase tracking-widest transition-all ${
+                                    className={`rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] transition-all ${
                                         windowSel === w.id
-                                            ? 'bg-white text-black'
-                                            : 'bg-white/5 text-white/40 hover:bg-white/10 hover:text-white'
+                                            ? 'bg-ink text-ink'
+                                            : 'bg-surface text-subtle hover:bg-surface hover:text-ink'
                                     }`}
                                 >
                                     {w.label}
@@ -345,7 +345,7 @@ function Shell({
                         onClick={onRetry}
                         disabled={!showTabs}
                         aria-label="Reload performance"
-                        className="rounded-lg border border-white/10 bg-white/5 p-1.5 text-white/35 transition-colors hover:text-white disabled:opacity-30"
+                        className="rounded-lg border border-line bg-surface p-1.5 text-subtle transition-colors hover:text-ink disabled:opacity-30"
                     >
                         <ArrowCounterClockwise className="h-3.5 w-3.5" />
                     </button>
@@ -370,21 +370,21 @@ function UnavailableBanner({
         <div
             role="alert"
             data-testid="stats-unavailable"
-            className="rounded-2xl border border-rose-500/15 bg-rose-500/[0.04] p-4"
+            className="rounded-2xl border border-down/20 bg-down-soft p-4"
         >
-            <p className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.25em] text-rose-400">
+            <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-down">
                 <WarningCircle className="h-4 w-4" />
                 {copy.title}
             </p>
-            <p className="mt-1.5 text-[9px] font-bold uppercase leading-relaxed tracking-widest text-white/30">{copy.hint}</p>
+            <p className="mt-1.5 text-[11px] font-bold uppercase leading-relaxed tracking-[0.14em] text-subtle">{copy.hint}</p>
             {staleNote && (
-                <p className="mt-1.5 text-[9px] font-bold uppercase leading-relaxed tracking-widest text-amber-400/70">{staleNote}</p>
+                <p className="mt-1.5 text-[11px] font-bold uppercase leading-relaxed tracking-[0.14em] text-down">{staleNote}</p>
             )}
             {copy.retry && (
                 <button
                     type="button"
                     onClick={onRetry}
-                    className="mt-3 inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[9px] font-black uppercase tracking-widest text-white/60 transition-colors hover:text-white"
+                    className="mt-3 inline-flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted transition-colors hover:text-ink"
                 >
                     <ArrowCounterClockwise className="h-3 w-3" /> Retry
                 </button>
@@ -408,19 +408,19 @@ function Metric({
 }) {
     return (
         <div
-            className="flex min-h-[86px] flex-col justify-center rounded-2xl border border-white/5 bg-white/[0.02] p-4"
+            className="flex min-h-[86px] flex-col justify-center rounded-2xl border border-line bg-surface p-4"
             data-testid={`metric-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}
         >
-            <p className="mb-1.5 text-[8px] font-black uppercase tracking-[0.25em] text-white/25">{label}</p>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-faint">{label}</p>
             {loading ? (
                 <div className="space-y-1.5 animate-pulse" aria-hidden>
-                    <div className="h-5 w-16 rounded bg-white/10" />
-                    {sub !== undefined && <div className="h-2.5 w-10 rounded bg-white/5" />}
+                    <div className="h-5 w-16 rounded bg-surface" />
+                    {sub !== undefined && <div className="h-2.5 w-10 rounded bg-surface" />}
                 </div>
             ) : (
                 <>
-                    <p className={`font-mono text-lg font-black tabular-nums tracking-tight ${valueClass || 'text-white'}`}>{value}</p>
-                    {sub !== undefined && <p className="mt-0.5 text-[8px] font-bold uppercase tracking-widest text-white/20">{sub}</p>}
+                    <p className={`font-mono text-lg font-semibold tabular-nums tracking-tight ${valueClass || 'text-ink'}`}>{value}</p>
+                    {sub !== undefined && <p className="mt-0.5 text-[11px] font-bold uppercase tracking-[0.14em] text-faint">{sub}</p>}
                 </>
             )}
         </div>

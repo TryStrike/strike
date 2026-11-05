@@ -53,7 +53,7 @@ export function AddressChip({ address, label = 'Wallet', className = '' }: Addre
 
     return (
         <span className={`inline-flex items-center gap-2 ${className}`} data-testid="address-chip">
-            <span className="text-[10px] font-mono text-white/40" aria-label={`${label} address, shortened`}>
+            <span className="text-[10px] font-mono text-subtle" aria-label={`${label} address, shortened`}>
                 {short || 'no wallet'}
             </span>
             {canonical && (
@@ -62,14 +62,14 @@ export function AddressChip({ address, label = 'Wallet', className = '' }: Addre
                     onClick={copy}
                     aria-label={`Copy full ${label.toLowerCase()} address`}
                     title="Copy the full address to the clipboard"
-                    className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-white/35 transition-colors hover:text-white hover:bg-white/10"
+                    className="inline-flex items-center gap-1 rounded-md border border-line bg-surface px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle transition-colors hover:text-ink hover:bg-surface"
                 >
-                    {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                    {copied ? <Check className="h-3 w-3 text-up" /> : <Copy className="h-3 w-3" />}
                     {copied ? 'Copied' : 'Copy'}
                 </button>
             )}
             {denied && (
-                <span className="inline-flex items-center gap-1 text-[8px] font-black uppercase tracking-widest text-rose-400">
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-down">
                     <WarningCircle className="h-3 w-3" /> Clipboard blocked
                 </span>
             )}

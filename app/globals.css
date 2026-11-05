@@ -48,7 +48,7 @@ body {
 }
 
 /* Respect reduced motion globally (also quiets LiveChart cell transitions and
-   the stall-dim fade; JS loops in LiveChart/GridScan check the same query). */
+   the stall-dim fade; JS loops in LiveChart check the same query). */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

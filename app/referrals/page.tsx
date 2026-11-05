@@ -5,7 +5,6 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { useStore } from '@/lib/store';
 import { useShallow } from 'zustand/react/shallow';
-import GridScan from '@/components/ui/GridScan';
 import { WalletConnect } from '@/components/wallet';
 import { useToast } from '@/lib/hooks/useToast';
 import { openReferralShareOnX, referralLandingUrl } from '@/lib/referral/shareOnX';
@@ -86,19 +85,6 @@ export default function ReferralPage() {
 
     return (
         <main className="min-h-screen bg-[#02040a] text-white selection:bg-purple-500/30">
-            {/* Background */}
-            <div className="fixed inset-0 pointer-events-none opacity-50">
-                <GridScan
-                    sensitivity={0.01}
-                    lineThickness={1}
-                    linesColor="#14141a"
-                    gridScale={0.1}
-                    scanColor="#A855F7"
-                    scanOpacity={0.05}
-                    scanDuration={16.0}
-                    enablePost
-                />
-            </div>
 
             <div className="relative z-10 max-w-7xl mx-auto px-6 py-20 pb-32">
                 {/* Header Section */}
