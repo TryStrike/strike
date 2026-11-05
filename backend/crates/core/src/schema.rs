@@ -2,8 +2,8 @@
 //!
 //! STRICT tables store NUMERIC, TIMESTAMPTZ and BOOLEAN all as INTEGER, so the
 //! file alone cannot say how a value is read or written. This list keeps the
-//! logical types, spelled as Postgres spelled them because handlers and the
-//! `/api/db` gateway write them into `CAST($n AS <type>)` placeholders.
+//! logical types, because handlers write them into `CAST($n AS <type>)`
+//! placeholders.
 //!
 //! Two consumers:
 //!   * binds: `db::typed_param` converts a JSON value by its declared type;
@@ -101,25 +101,11 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("bet_rounds", "payout", MONEY),
     ("bet_rounds", "settled_by", "text"),
     ("bet_rounds", "settled_at", TS),
-    ("user_profiles", "user_address", "text"),
-    ("user_profiles", "username", "text"),
-    ("user_profiles", "access_code", "text"),
-    ("user_profiles", "updated_at", TS),
-    ("user_profiles", "created_at", TS),
     ("user_referrals", "user_address", "text"),
     ("user_referrals", "referral_code", "text"),
     ("user_referrals", "referred_by", "text"),
     ("user_referrals", "referral_count", "integer"),
     ("user_referrals", "created_at", TS),
-    ("access_codes", "id", "uuid"),
-    ("access_codes", "code", "text"),
-    ("access_codes", "is_used", "boolean"),
-    ("access_codes", "used_at", TS),
-    ("access_codes", "wallet_address", "text"),
-    ("access_codes", "created_at", TS),
-    ("waitlist", "id", "uuid"),
-    ("waitlist", "email", "text"),
-    ("waitlist", "created_at", TS),
     ("banned_wallets", "wallet_address", "text"),
     ("banned_wallets", "reason", "text"),
     ("banned_wallets", "created_at", TS),
@@ -135,9 +121,6 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("deposit_locks", "amount", MONEY),
     ("deposit_locks", "created_at", TS),
 ];
-
-/// Tables Postgres never had. The migration leaves them empty.
-pub const SQLITE_ONLY_TABLES: &[&str] = &["bet_rounds"];
 
 /// How an INTEGER cell in a result set becomes JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,4 @@
-//! `lib/admin/computeStats.ts` — the single source of truth behind both
-//! `/api/admin/stats` and `/api/stats/public`.
+//! Platform stats behind `/api/admin/stats`.
 //!
 //! Kept as a pure aggregation over row arrays plus a thin fetch layer, so the
 //! money invariants that the landing page quotes are testable offline:
@@ -62,8 +61,7 @@ pub fn is_demo_bet(row: &Value) -> bool {
 // JS-shaped coercion
 // ---------------------------------------------------------------------------
 
-/// `Number(v)` for the values PostgREST could hand back. Anything unparsable is
-/// `NaN`, exactly as it was in the TS — the callers sum it and the `NaN` shows
+/// `Number(v)` for a JSON cell. Anything unparsable is `NaN`: the callers sum it and the `NaN` shows
 /// up as `null` in the JSON, which is the honest outcome.
 pub fn js_number(value: Option<&Value>) -> f64 {
     match value {
@@ -453,54 +451,6 @@ impl PlatformStats {
         );
         Value::Object(map)
     }
-
-    /// `GET /api/stats/public`. Only the real subset is exposed, plus the five
-    /// top currencies by volume — no demo data and no addresses.
-    pub fn public_value(&self) -> Value {
-        let mut networks: Vec<(&String, &NetworkPnL)> =
-            self.real.platform_pnl_by_network.iter().collect();
-        networks.sort_by(|a, b| {
-            b.1.volume
-                .partial_cmp(&a.1.volume)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let top_currencies: Vec<Value> = networks
-            .into_iter()
-            .take(5)
-            .map(|(currency, row)| {
-                let mut map = Map::new();
-                map.insert("currency".into(), Value::String(currency.clone()));
-                map.insert("wagered".into(), number_to_json(row.volume));
-                map.insert("paid".into(), number_to_json(row.payout));
-                map.insert("count".into(), json_usize(0));
-                Value::Object(map)
-            })
-            .collect();
-
-        let mut map = Map::new();
-        map.insert("totalBets".into(), json_usize(self.real.total_bets));
-        map.insert("totalWins".into(), json_usize(self.real.total_wins));
-        map.insert("totalLosses".into(), json_usize(self.real.total_losses));
-        map.insert("winRate".into(), number_to_json(self.real.win_rate));
-        map.insert(
-            "totalWagered".into(),
-            number_to_json(self.real.total_volume),
-        );
-        map.insert(
-            "totalPaidOut".into(),
-            number_to_json(self.real.total_payout),
-        );
-        map.insert("uniqueWallets".into(), json_usize(self.real.total_users));
-        // Arc only: the TS hardcoded 1 and the landing page renders it.
-        map.insert("chainsActive".into(), json_usize(1));
-        map.insert("totalDeposits".into(), json_usize(self.total_deposits));
-        map.insert(
-            "totalWithdrawals".into(),
-            json_usize(self.total_withdrawals),
-        );
-        map.insert("topCurrencies".into(), Value::Array(top_currencies));
-        Value::Object(map)
-    }
 }
 
 /// The rows the aggregate needs. Each scan pages like the TS `for(;;)` loops;
@@ -687,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn public_numbers_carry_the_real_subset_only() {
+    fn real_and_demo_bets_aggregate_apart() {
         let bets = vec![
             bet("b1", "0xAbC0", 100.0, 30.0, true, "USDC"),
             bet("demo-b2", "0xAbC0", 500.0, 400.0, true, "USDC"),
@@ -697,18 +647,6 @@ mod tests {
         assert_eq!(stats.real.total_bets, 1);
         assert_eq!(stats.demo.total_bets, 2);
         assert_eq!(stats.real.total_volume, 100.0);
-
-        let public = stats.public_value();
-        assert_eq!(public["totalBets"], json!(1));
-        assert_eq!(public["totalWagered"], json!(100.0));
-        assert_eq!(public["totalPaidOut"], json!(30.0));
-        // The landing page shows one chain and never a demo figure.
-        assert_eq!(public["chainsActive"], json!(1));
-        assert!(
-            public.get("demo").is_none(),
-            "the demo subset is not public"
-        );
-        assert_eq!(public["topCurrencies"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -265,21 +265,6 @@ pub fn json_truthy(value: Option<&Value>) -> bool {
     }
 }
 
-/// `String(value).trim()` for a field the TS only guarded with `if (!x)`: a
-/// number or a bool arrives here as its string spelling rather than being
-/// rejected as "not a string".
-pub fn body_stringified<'a>(body: &'a Value, key: &str) -> Option<std::borrow::Cow<'a, str>> {
-    if !json_truthy(body.get(key)) {
-        return None;
-    }
-    match body.get(key) {
-        Some(Value::String(s)) => Some(std::borrow::Cow::Owned(s.trim().to_string())),
-        Some(Value::Number(n)) => Some(std::borrow::Cow::Owned(n.to_string())),
-        Some(Value::Bool(b)) => Some(std::borrow::Cow::Owned(b.to_string())),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

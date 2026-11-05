@@ -1,6 +1,5 @@
 'use client';
 
-import React from 'react';
 import { sanitizeUserError } from '@/components/states/ErrorNote';
 
 /**

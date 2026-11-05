@@ -1,4 +1,4 @@
-//! `lib/bans/walletBan.ts` — the global ban check every money path runs.
+//! The global ban check every money path runs.
 
 use serde_json::Value;
 

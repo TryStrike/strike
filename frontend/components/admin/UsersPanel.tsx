@@ -4,7 +4,7 @@
  * Ledger (users) panel — server-side filtering + pagination via /api/admin/users.
  */
 
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import type { DashFilters } from './dashQuery';
 import { apiListQuery } from './dashQuery';
@@ -69,7 +69,6 @@ export default function UsersPanel({
                                         <tr key={u.user_address + u.currency} className="hover:bg-surface transition-colors border-b border-line">
                                             <td className="px-8 py-6">
                                                 <div className="flex flex-col">
-                                                    <span className="text-ink text-sm font-bold">{u.username || 'Anonymous'}</span>
                                                     <a
                                                         href={explorerAddressUrl(u.user_address)}
                                                         target="_blank"

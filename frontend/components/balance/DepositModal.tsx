@@ -8,8 +8,6 @@ import { ArrowUpRight, CheckCircle, CircleNotch, WarningCircle } from '@phosphor
 import { useStore } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
-import { useWallets, type ConnectedWallet } from '@privy-io/react-auth';
-import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 import { getArcConfig, ARC_ASSETS, explorerTxUrl, explorerAddressUrl, type ArcAsset } from '@/lib/arc/config';
 import { shortenAddress } from '@/lib/utils/address';
@@ -295,26 +293,11 @@ async function runVerification(
   verifications.delete(record.txHash);
 }
 
-export const DepositModal: React.FC<DepositModalProps> = (props) => {
-  // Privy embedded wallets have no wagmi connector, so the deposit needs Privy's
-  // own wallet API. Its hooks may only run when a Privy app id is configured
-  // (see app/providers.tsx), hence the wrapper split — same shape as WithdrawModal.
-  const privyEnabled = usePrivyEnabled();
-  if (!privyEnabled) return <DepositModalInner {...props} privyWallets={[]} />;
-  return <DepositModalWithPrivy {...props} />;
-};
-
-function DepositModalWithPrivy(props: DepositModalProps) {
-  const { wallets } = useWallets();
-  return <DepositModalInner {...props} privyWallets={wallets} />;
-}
-
-const DepositModalInner: React.FC<DepositModalProps & { privyWallets: ConnectedWallet[] }> = ({
+export const DepositModal: React.FC<DepositModalProps> = ({
   isOpen,
   onClose,
   onSuccess,
   onError,
-  privyWallets,
 }) => {
   const address = useStore(state => state.address);
   const fetchBalance = useStore(state => state.fetchBalance);
@@ -350,25 +333,7 @@ const DepositModalInner: React.FC<DepositModalProps & { privyWallets: ConnectedW
 
   const treasuryConfigured = ethers.isAddress(config.treasuryAddress || '');
 
-  const embeddedWallet = useMemo(() => {
-    const ethereum = privyWallets.filter((w) => w.type === 'ethereum');
-    return (
-      ethereum.find((w) => w.address?.toLowerCase() === address?.toLowerCase()) ??
-      ethereum[0] ??
-      null
-    );
-  }, [privyWallets, address]);
-
-  /** Chain the wallet actually reports: wagmi first, Privy's CAIP-2 id second. */
-  const connectedChainId = useMemo(() => {
-    if (typeof accountChainId === 'number' && Number.isFinite(accountChainId)) return accountChainId;
-    const caip = embeddedWallet?.chainId;
-    if (caip && caip.includes(':')) {
-      const parsed = Number.parseInt(caip.split(':').pop() as string, 10);
-      if (Number.isFinite(parsed)) return parsed;
-    }
-    return null;
-  }, [accountChainId, embeddedWallet]);
+  const connectedChainId = typeof accountChainId === 'number' ? accountChainId : null;
 
   const wrongNetwork = connectedChainId !== null && connectedChainId !== config.chainId;
 
@@ -593,7 +558,7 @@ const DepositModalInner: React.FC<DepositModalProps & { privyWallets: ConnectedW
     const amountError = validate(amount);
     if (amountError) return amountError;
     if (!address) return 'Connect a wallet first';
-    if (!walletClient && !connector && !embeddedWallet) return 'Wallet is not connected';
+    if (!walletClient && !connector) return 'Wallet is not connected';
     if (wrongNetwork) {
       return `Your wallet is on chain ${connectedChainId}, not ${config.name} (${config.chainId}). Switch before depositing`;
     }
@@ -641,31 +606,21 @@ const DepositModalInner: React.FC<DepositModalProps & { privyWallets: ConnectedW
   const switchToArc = useCallback(async () => {
     try {
       if (connector) await switchChainAsync({ chainId: config.chainId });
-      else if (embeddedWallet?.switchChain) await embeddedWallet.switchChain(config.chainId);
       else setError(`Add ${config.name} (chain ${config.chainId}) to your wallet and try again`);
     } catch {
       setError(`Switch your wallet to ${config.name} and try again`);
     }
-  }, [config.chainId, config.name, connector, embeddedWallet, switchChainAsync]);
+  }, [config.chainId, config.name, connector, switchChainAsync]);
 
-  /**
-   * wagmi/ConnectKit exposes an EIP-1193 provider; Privy embedded wallets (the
-   * default onboarding path) are not wagmi connectors, so they expose their own
-   * provider instead. Without this fallback an embedded-wallet player could only
-   * ever withdraw — the transfer would never be signed.
-   */
   const resolveWalletProvider = useCallback(async (): Promise<ethers.Eip1193Provider> => {
     if (connector) {
       return (await connector.getProvider()) as ethers.Eip1193Provider;
-    }
-    if (embeddedWallet?.getEthereumProvider) {
-      return (await embeddedWallet.getEthereumProvider()) as unknown as ethers.Eip1193Provider;
     }
     if (walletClient) {
       throw new Error('This wallet does not expose a signing provider. Reconnect and try again.');
     }
     throw new Error('Wallet is not connected');
-  }, [connector, embeddedWallet, walletClient]);
+  }, [connector, walletClient]);
 
   const markCredited = useCallback(
     async (txHash: string, creditedAmount: number, walletAddress: string, credit?: ServerCredit) => {

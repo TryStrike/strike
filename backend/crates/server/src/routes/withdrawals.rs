@@ -1,6 +1,6 @@
 //! `/api/withdrawals` — the player's own withdrawal history.
 //!
-//! Port of `app/api/withdrawals/route.ts`. Two gates, in this order:
+//! Two gates, in this order:
 //!   1. the first-party balance session (`assertBalanceApiAuthorized`), and
 //!   2. a wallet-signed read proof (`strike_core::read_auth`).
 //!

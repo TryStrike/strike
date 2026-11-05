@@ -141,29 +141,13 @@ pub async fn load_banned_wallets() -> ApiResult<Value> {
     Ok(banned_wallets_body(&rows))
 }
 
-/// `isMissingTableMessage` — the pattern that distinguishes an un-run migration
-/// (the TS answers 503 with a migration hint) from a genuine failure (500).
-pub fn is_missing_table_message(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    lower.contains("schema cache")
-        || lower.contains("does not exist")
-        || lower.contains("no such table")
-        || lower.contains("banned_wallets")
-}
-
-/// The banned-wallets failure mapping: `503` for a missing table, `500`
-/// otherwise, both carrying the sanitized message. The Supabase service-key
-/// guard and operator hints are a PostgREST-deployment concern with no analog on
-/// a direct Postgres pool, so they are intentionally not reproduced here.
+/// Logs the failure and answers a sanitized 500.
 pub fn banned_wallets_failure(err: &ApiError, fallback: &str, label: &str) -> ApiError {
-    let raw = err.to_string();
     tracing::error!("[admin/{label}] {fallback}: {err}");
-    let safe = crate::admin_reads_a::sanitize_error_message(&raw, fallback);
-    if is_missing_table_message(&raw) {
-        ApiError::unavailable(safe)
-    } else {
-        ApiError::internal(safe)
-    }
+    ApiError::internal(crate::admin_reads_a::sanitize_error_message(
+        &err.to_string(),
+        fallback,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -273,77 +257,7 @@ pub async fn load_withdrawal_pending(p: &ListParams) -> ApiResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/admin/access-codes
-// ---------------------------------------------------------------------------
-
-/// `status` is the usage state, mirroring the panel's ready/consumed filter.
-pub const ACCESS_CODE_STATUS_VALUES: [&str; 2] = ["ready", "consumed"];
-
-/// The filtered, paged list with an exact count over the same WHERE prefix.
-pub fn access_codes_statement(p: &ListParams) -> Prepared {
-    let mut binds = Binds::new();
-    let mut clauses: Vec<String> = Vec::new();
-
-    match p.status.as_deref() {
-        Some("ready") => clauses.push("is_used = false".to_string()),
-        Some("consumed") => clauses.push("is_used = true".to_string()),
-        _ => {}
-    }
-    if let Some(q) = &p.q {
-        let ph = binds.push(TEXT, Value::String(like_pattern(q)));
-        clauses.push(format!(
-            "(pg_ilike(code, {ph}) OR pg_ilike(wallet_address, {ph}))"
-        ));
-    }
-    if let Some(from) = &p.from {
-        let ph = binds.push(TIMESTAMPTZ, Value::String(from.clone()));
-        clauses.push(format!("created_at >= {ph}"));
-    }
-    if let Some(to) = &p.to {
-        let ph = binds.push(TIMESTAMPTZ, Value::String(to.clone()));
-        clauses.push(format!("created_at <= {ph}"));
-    }
-
-    let where_sql = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", clauses.join(" AND "))
-    };
-    let filter_binds = binds.len();
-    let limit_ph = binds.push(INT8, json_int(p.limit));
-    let offset_ph = binds.push(INT8, json_int(p.offset));
-
-    Prepared {
-        sql: format!(
-            "SELECT id, code, is_used, wallet_address, used_at, created_at FROM access_codes {where_sql} \
-             ORDER BY created_at DESC, id DESC LIMIT {limit_ph} OFFSET {offset_ph}"
-        ),
-        count_sql: Some(format!("SELECT COUNT(*) AS count FROM access_codes {where_sql}")),
-        binds,
-        filter_binds,
-    }
-}
-
-/// `{ codes, total, limit, offset }`: `codes` keeps its historical shape, the
-/// rest lets the panel paginate server-side.
-pub async fn load_access_codes(p: &ListParams) -> ApiResult<Value> {
-    let prepared = access_codes_statement(p);
-    let rows = db::fetch(&prepared.sql, &prepared.row_refs()).await?;
-    let count_sql = prepared.count_sql.as_deref().unwrap_or_default();
-    let total = db::fetch_scalar(count_sql, &prepared.count_refs()).await?;
-
-    let total = total.as_i64().unwrap_or(rows.len() as i64);
-
-    let mut body = Map::new();
-    body.insert("codes".into(), Value::Array(rows));
-    body.insert("total".into(), json_int(total));
-    body.insert("limit".into(), json_int(p.limit));
-    body.insert("offset".into(), json_int(p.offset));
-    Ok(Value::Object(body))
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/admin/export  (lib/admin/csvExport.ts)
+// GET /api/admin/export
 // ---------------------------------------------------------------------------
 
 /// `EXPORT_ROW_CAP`: a single export never returns more than this many rows.
@@ -355,7 +269,6 @@ const EXPORT_SCAN_PAGE: i64 = 1_000;
 pub enum ExportDataset {
     Transactions,
     GameHistory,
-    AccessCodes,
 }
 
 impl ExportDataset {
@@ -363,7 +276,6 @@ impl ExportDataset {
         match self {
             Self::Transactions => "transactions",
             Self::GameHistory => "game_history",
-            Self::AccessCodes => "access_codes",
         }
     }
 }
@@ -375,7 +287,6 @@ pub fn resolve_dataset(raw: Option<&str>) -> Option<ExportDataset> {
     match value.as_str() {
         "transactions" => Some(ExportDataset::Transactions),
         "game_history" => Some(ExportDataset::GameHistory),
-        "access_codes" => Some(ExportDataset::AccessCodes),
         _ => None,
     }
 }
@@ -404,20 +315,10 @@ const BET_COLUMNS: [&str; 10] = [
     "mode",
     "network",
 ];
-const CODE_COLUMNS: [&str; 6] = [
-    "id",
-    "code",
-    "is_used",
-    "wallet_address",
-    "used_at",
-    "created_at",
-];
-
 fn dataset_columns(dataset: ExportDataset) -> &'static [&'static str] {
     match dataset {
         ExportDataset::Transactions => &TX_COLUMNS,
         ExportDataset::GameHistory => &BET_COLUMNS,
-        ExportDataset::AccessCodes => &CODE_COLUMNS,
     }
 }
 
@@ -425,7 +326,6 @@ fn dataset_table(dataset: ExportDataset) -> &'static str {
     match dataset {
         ExportDataset::Transactions => "balance_audit_log",
         ExportDataset::GameHistory => "bet_history",
-        ExportDataset::AccessCodes => "access_codes",
     }
 }
 
@@ -486,28 +386,6 @@ pub fn export_statement(dataset: ExportDataset, p: &ListParams, from: i64) -> Pr
                 let id_ph = binds.push(TEXT, pattern);
                 clauses.push(format!(
                     "(pg_ilike(wallet_address, {wallet_ph}) OR pg_ilike(asset, {asset_ph}) OR pg_ilike(id, {id_ph}))"
-                ));
-            }
-            push_created_bounds(&mut binds, &mut clauses, p);
-        }
-        ExportDataset::AccessCodes => {
-            match p.status.as_deref() {
-                Some("ready") => {
-                    let ph = binds.push(BOOLEAN, Value::Bool(false));
-                    clauses.push(format!("is_used = {ph}"));
-                }
-                Some("consumed") => {
-                    let ph = binds.push(BOOLEAN, Value::Bool(true));
-                    clauses.push(format!("is_used = {ph}"));
-                }
-                _ => {}
-            }
-            if let Some(q) = &p.q {
-                let pattern = Value::String(like_pattern(q));
-                let code_ph = binds.push(TEXT, pattern.clone());
-                let wallet_ph = binds.push(TEXT, pattern);
-                clauses.push(format!(
-                    "(pg_ilike(code, {code_ph}) OR pg_ilike(wallet_address, {wallet_ph}))"
                 ));
             }
             push_created_bounds(&mut binds, &mut clauses, p);
@@ -900,70 +778,4 @@ pub async fn treasury_balances_body() -> ApiResult<Value> {
         Value::String("USD is indicative. USDC is quoted at $1.".to_string()),
     );
     Ok(Value::Object(body))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::admin_reads_a::{parse_list_params, ListOptions};
-
-    fn params(pairs: &[(&str, &str)]) -> Result<ListParams, String> {
-        let owned: Vec<(String, String)> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let opts = ListOptions {
-            status_values: Some(&ACCESS_CODE_STATUS_VALUES),
-            extra_enums: &[],
-        };
-        parse_list_params(&owned, &opts)
-    }
-
-    #[test]
-    fn access_codes_default_to_the_whole_table_newest_first() {
-        let p = access_codes_statement(&params(&[]).unwrap());
-        assert_eq!(
-            p.sql,
-            "SELECT id, code, is_used, wallet_address, used_at, created_at FROM access_codes  \
-             ORDER BY created_at DESC, id DESC LIMIT CAST($1 AS int8) OFFSET CAST($2 AS int8)"
-        );
-        assert_eq!(
-            p.count_sql.as_deref(),
-            Some("SELECT COUNT(*) AS count FROM access_codes ")
-        );
-        assert_eq!((p.filter_binds, p.binds.len()), (0, 2));
-    }
-
-    #[test]
-    fn access_code_filters_share_one_where_with_the_count() {
-        let parsed = params(&[
-            ("status", "consumed"),
-            ("q", "AB12"),
-            ("from", "2026-01-01"),
-        ])
-        .unwrap();
-        let p = access_codes_statement(&parsed);
-        let count = p.count_sql.clone().unwrap();
-        assert!(count.contains("is_used = true"), "{count}");
-        // One bind drives both ILIKEs, as the single or-expression term did.
-        assert!(
-            count.contains(
-                "(pg_ilike(code, CAST($1 AS text)) OR pg_ilike(wallet_address, CAST($1 AS text)))"
-            ),
-            "{count}"
-        );
-        assert!(count.contains("created_at >= "), "{count}");
-        assert!(p.sql.contains(count.split("access_codes ").nth(1).unwrap()));
-        assert_eq!(p.filter_binds, 2);
-        assert_eq!(p.count_refs().len(), 2);
-
-        let ready = access_codes_statement(&params(&[("status", "ready")]).unwrap());
-        assert!(ready.sql.contains("is_used = false"));
-    }
-
-    #[test]
-    fn access_code_status_outside_the_enum_is_a_400_message() {
-        assert!(params(&[("status", "used")]).is_err());
-        assert!(params(&[("limit", "abc")]).is_err());
-    }
 }

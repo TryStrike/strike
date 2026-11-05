@@ -1,4 +1,4 @@
-//! `GET /api/bets/recent` — `app/api/bets/recent/route.ts`.
+//! `GET /api/bets/recent`.
 //!
 //! Public live-wins feed: no guard, addresses shortened server-side, demo rows
 //! dropped. Reads a 60-row slice but ships at most 8 real wins so a play-money

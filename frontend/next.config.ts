@@ -3,7 +3,8 @@ import { loadEnvConfig } from "@next/env";
 import { PHASE_PRODUCTION_BUILD } from "next/constants";
 
 // One .env.local at the repo root drives the frontend, the Rust backend and contracts/deploy.mjs.
-loadEnvConfig(`${__dirname}/..`);
+// forceReload: Next already loaded (and cached) env from frontend/, which has none.
+loadEnvConfig(`${__dirname}/..`, process.env.NODE_ENV !== "production", console, true);
 
 /**
  * The Rust service owns every `/api/*` path; there is no other backend. Next bakes
@@ -58,13 +59,12 @@ const config = (phase: string): NextConfig => ({
       "frame-ancestors 'none'",
       "form-action 'self'",
       // Keep script policy compatible with Next/Turbopack runtime and in-app tooling.
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://va.vercel-scripts.com https://*.posthog.com",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https:",
       "connect-src 'self' https: wss:",
-      // Allow only known embed providers used by the app.
-      "frame-src https://www.youtube.com https://youtube.com https://docs.google.com https://dexscreener.com https://app.family.co",
+      "frame-src 'none'",
       "upgrade-insecure-requests",
     ].join("; ");
 

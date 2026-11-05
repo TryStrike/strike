@@ -1,4 +1,4 @@
-/** Arc network configuration (mainnet defaults; NEXT_PUBLIC_ARC_* switches to testnet). */
+/** Arc network configuration. Arc Testnet by default, NEXT_PUBLIC_ARC_* overrides. */
 
 export type ArcAsset = 'USDC';
 
@@ -19,10 +19,10 @@ interface NetworkConfig {
 }
 
 const ARC_DEFAULTS: NetworkConfig = {
-  chainId: 5042,
-  name: 'Arc',
-  rpcEndpoint: 'https://rpc.mainnet.arc.io',
-  explorer: 'https://explorer.arc.io',
+  chainId: 5042002,
+  name: 'Arc Testnet',
+  rpcEndpoint: 'https://rpc.testnet.arc.io',
+  explorer: 'https://explorer.testnet.arc.io',
   usdc: '0x3600000000000000000000000000000000000000',
 };
 

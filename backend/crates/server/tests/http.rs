@@ -127,14 +127,14 @@ async fn auth_failures_are_401_not_500() {
         .await
         .unwrap();
     assert_eq!(list.status(), StatusCode::UNAUTHORIZED);
-    let code = s
+    let bet = s
         .http
-        .post(format!("{}/api/validate-access-code", s.url))
-        .json(&json!({ "code": "X", "walletAddress": WALLET }))
+        .post(format!("{}/api/balance/bet", s.url))
+        .json(&json!({ "userAddress": WALLET, "betAmount": 1 }))
         .send()
         .await
         .unwrap();
-    assert_eq!(code.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(bet.status(), StatusCode::UNAUTHORIZED);
     let forged = s
         .http
         .get(format!("{}/api/withdrawals", s.url))
@@ -143,19 +143,6 @@ async fn auth_failures_are_401_not_500() {
         .await
         .unwrap();
     assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bet_save_needs_a_real_wallet() {
-    let s = start().await;
-    for wallet in [json!(42), json!(true), json!(["x"]), json!("not-a-wallet")] {
-        let body = json!({ "id": "bet-1", "walletAddress": wallet });
-        let (status, reply) = s.post_bearer("/api/bets/save", body).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
-    }
-    let body = json!({ "id": "bet-1", "walletAddress": WALLET });
-    let (status, reply) = s.post_bearer("/api/bets/save", body).await;
-    assert_eq!(status, StatusCode::OK, "{reply}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

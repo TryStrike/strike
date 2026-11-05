@@ -16,19 +16,16 @@ import { WinBurst } from './WinBurst';
 import { SettlementProof, matchSettledRound, type SettlementProofInput } from './SettlementProof';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { ArrowUpRight } from '@phosphor-icons/react';
-import posthog from 'posthog-js';
 
 
 export const GameBoard: React.FC = () => {
   const {
     address,
     isConnected,
-    network,
     walletBalance,
     gameMode,
     setGameMode,
     setTimeframeSeconds,
-    selectedAsset,
     placeBetFromHouseBalance,
     isPlacingBet,
     isBlitzActive,
@@ -40,13 +37,11 @@ export const GameBoard: React.FC = () => {
     error,
     clearError,
     isLoading: isLoadingBalance,
-    userTier,
     refreshWalletBalance,
     selectedCurrency,
-    accessCode,
     setConnectModalOpen,
     bets,
-  } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, network: s.network, walletBalance: s.walletBalance, gameMode: s.gameMode, setGameMode: s.setGameMode, setTimeframeSeconds: s.setTimeframeSeconds, selectedAsset: s.selectedAsset, placeBetFromHouseBalance: s.placeBetFromHouseBalance, isPlacingBet: s.isPlacingBet, isBlitzActive: s.isBlitzActive, blitzEndTime: s.blitzEndTime, nextBlitzTime: s.nextBlitzTime, hasBlitzAccess: s.hasBlitzAccess, updateBlitzTimer: s.updateBlitzTimer, enableBlitzAccess: s.enableBlitzAccess, error: s.error, clearError: s.clearError, isLoading: s.isLoading, userTier: s.userTier, refreshWalletBalance: s.refreshWalletBalance, selectedCurrency: s.selectedCurrency, accessCode: s.accessCode, setConnectModalOpen: s.setConnectModalOpen, bets: s.bets })));
+  } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, walletBalance: s.walletBalance, gameMode: s.gameMode, setGameMode: s.setGameMode, setTimeframeSeconds: s.setTimeframeSeconds, placeBetFromHouseBalance: s.placeBetFromHouseBalance, isPlacingBet: s.isPlacingBet, isBlitzActive: s.isBlitzActive, blitzEndTime: s.blitzEndTime, nextBlitzTime: s.nextBlitzTime, hasBlitzAccess: s.hasBlitzAccess, updateBlitzTimer: s.updateBlitzTimer, enableBlitzAccess: s.enableBlitzAccess, error: s.error, clearError: s.clearError, isLoading: s.isLoading, refreshWalletBalance: s.refreshWalletBalance, selectedCurrency: s.selectedCurrency, setConnectModalOpen: s.setConnectModalOpen, bets: s.bets })));
 
   const { connector } = useAccount();
 
@@ -90,12 +85,6 @@ export const GameBoard: React.FC = () => {
     try {
       setIsActivatingBlitz(true);
       
-      // Track Blitz entry attempt (no wallet address sent to third-party analytics)
-      posthog.capture('blitz_entry_started', {
-        network,
-        entryFee: blitzEntryFee
-        // address intentionally omitted to protect user privacy
-      })
 
       const arcConfig = getArcConfig();
       const assetConfig = getAssetConfig('USDC');
@@ -128,24 +117,12 @@ export const GameBoard: React.FC = () => {
       enableBlitzAccess();
       refreshWalletBalance();
       
-      // Track successful Blitz entry (sanitized - no wallet address)
-      posthog.capture('blitz_entry_success', {
-        network,
-        entryFee: blitzEntryFee
-        // address removed to protect user privacy
-      })
     } catch (err: unknown) {
       if (process.env.NODE_ENV === 'development') {
         console.error("Blitz entry failed:", err);
       }
       const errorMessage = err instanceof Error ? err.message : String(err ?? "");
       
-      // Track Blitz entry failure (sanitized - no wallet address)
-      posthog.capture('blitz_entry_failed', {
-        network,
-        error: errorMessage
-        // address removed to protect user privacy
-      })
       
       if (errorMessage.includes('rejected') || errorMessage.includes('denied') || errorMessage.includes('User rejected')) {
         toast.error("User rejected");
@@ -177,26 +154,6 @@ export const GameBoard: React.FC = () => {
     return () => clearInterval(interval);
   }, [isBlitzActive, blitzEndTime, nextBlitzTime, updateBlitzTimer]);
 
-  // Identify user when wallet connects — use a one-way hash of the address
-  // so PostHog receives a stable anonymous ID without the raw wallet address.
-  // This keeps session stitching while protecting user privacy.
-  useEffect(() => {
-    if (address) {
-      // Simple deterministic hash: last 12 chars is NOT sufficient, use a digest approach
-      // We XOR-fold a basic hash to create a stable non-reversible identifier
-      const simpleHash = address
-        .split('')
-        .reduce((acc, c) => ((acc << 5) - acc + c.charCodeAt(0)) | 0, 0);
-      const anonymousId = `u_${Math.abs(simpleHash).toString(36)}_${address.slice(-6)}`;
-      posthog.identify(anonymousId, {
-        // Never send raw wallet address to third-party analytics
-        network,
-        hasBlitzAccess,
-        userTier,
-        hasAccessCode: !!accessCode
-      });
-    }
-  }, [address, network, hasBlitzAccess, userTier, accessCode])
 
 
   // Sync selectedDuration with store's timeframeSeconds
@@ -237,17 +194,6 @@ export const GameBoard: React.FC = () => {
 
     try {
       const multiplier = getMultiplier(selectedDuration);
-      // Track bet placement (sanitized - no wallet address or specific amounts)
-      posthog.capture('bet_placed', {
-        direction,
-        // amount removed to protect financial privacy
-        multiplier,
-        duration: selectedDuration,
-        asset: selectedAsset,
-        network,
-        currency: currencySymbol
-        // wallet address never sent to analytics
-      })
 
       // House balance only — /api/balance/bet deducts house balance; no on-chain stake per bet.
       await placeBetFromHouseBalance(
@@ -261,14 +207,6 @@ export const GameBoard: React.FC = () => {
         console.error("Failed to place bet:", err instanceof Error ? err.message : err);
       }
       
-      // Track bet failure (sanitized - no wallet address or specific amounts)
-      posthog.capture('bet_failed', {
-        direction,
-        // amount removed to protect financial privacy
-        error: err instanceof Error ? err.message : 'Unknown error',
-        network
-        // wallet address never sent to analytics
-      })
     }
   };
 

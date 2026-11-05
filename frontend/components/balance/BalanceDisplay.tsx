@@ -12,34 +12,16 @@ import { ARC_ASSETS } from '@/lib/arc/config';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { calculateFeeAmount } from '@/lib/fees/platformFee';
 
-/**
- * BalanceDisplay Component
- * 
- * Displays the user's house balance with controls for deposit and withdrawal
- * 
- * Task: 8.1 Create BalanceDisplay component
- * Requirements: 8.1
- * 
- * Features:
- * - Display current house balance with chain-appropriate symbol
- * - Refresh button to fetch latest balance
- * - Deposit and Withdraw buttons with modals
- * - Show loading state while fetching
- * - Format balance to 4 decimal places
- */
+/** House balance with deposit and withdraw. */
 export const BalanceDisplay: React.FC = () => {
   const houseBalance = useStore(state => state.houseBalance);
-  const demoBalance = useStore(state => state.demoBalance);
-  const accountType = useStore(state => state.accountType);
   const network = useStore(state => state.network);
   const userTier = useStore(state => state.userTier);
   const selectedCurrency = useStore(state => state.selectedCurrency);
   const setSelectedCurrency = useStore(state => state.setSelectedCurrency);
-  const toggleAccountType = useStore(state => state.toggleAccountType);
   const isLoading = useStore(state => state.isLoading);
   const address = useStore(state => state.address);
   const fetchBalance = useStore(state => state.fetchBalance);
-  const updateBalance = useStore(state => state.updateBalance);
   const toast = useToast();
 
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -51,7 +33,7 @@ export const BalanceDisplay: React.FC = () => {
   // House credits: sync when this panel mounts or wallet / ledger currency changes.
   // WalletSync only refreshed on-chain balance; fetchBalance loads the house balance.
   useEffect(() => {
-    if (accountType === 'demo' || !address || !network) return;
+    if (!address || !network) return;
     let cancelled = false;
     const id = requestAnimationFrame(() => {
       if (!cancelled) void fetchBalance(address);
@@ -60,21 +42,7 @@ export const BalanceDisplay: React.FC = () => {
       cancelled = true;
       cancelAnimationFrame(id);
     };
-  }, [accountType, address, network, selectedCurrency, fetchBalance]);
-
-  // Actions from other slices (using the unified store)
-  const setAddress = useStore(state => state.setAddress);
-  const setIsConnected = useStore(state => state.setIsConnected);
-
-  /**
-   * Exit demo mode and reset demo credentials
-   */
-  const handleExitDemo = () => {
-    toggleAccountType(); // Switch back to 'real'
-    setAddress(null);    // Clear 0xDEMO address
-    setIsConnected(false); // Logout from demo session
-    toast.info('Returned to real account');
-  };
+  }, [address, network, selectedCurrency, fetchBalance]);
 
   /**
    * Handle refresh button click
@@ -167,9 +135,7 @@ export const BalanceDisplay: React.FC = () => {
     setIsReceiptOpen(true);
   };
 
-  // Choose balance based on account type
-  const activeBalance = accountType === 'real' ? houseBalance : demoBalance;
-  const formattedBalance = activeBalance.toFixed(4);
+  const formattedBalance = houseBalance.toFixed(4);
 
   // The ledger row the player is playing with.
   const currentSymbol = resolveHouseLedgerCurrency({ selectedCurrency });
@@ -179,11 +145,10 @@ export const BalanceDisplay: React.FC = () => {
       <div className="font-tight text-ink">
         <div className="flex items-center justify-between">
           <span className="text-sm text-subtle">
-            {accountType === 'demo' ? 'Practice Balance' : 'House Balance'}
+            House Balance
           </span>
 
-          {accountType === 'real' && (
-            <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1">
               {ARC_ASSETS.length > 1 && ARC_ASSETS.map((asset) => (
                 <button
                   key={asset}
@@ -207,11 +172,10 @@ export const BalanceDisplay: React.FC = () => {
               >
                 <ArrowClockwise size={16} className={isRefreshing ? 'animate-spin' : ''} />
               </button>
-            </div>
-          )}
+          </div>
         </div>
 
-        {isLoading && accountType === 'real' ? (
+        {isLoading ? (
           <div className="mt-1 h-10 w-40 animate-pulse rounded-lg bg-surface" />
         ) : (
           <div className="mt-1 flex items-baseline gap-2">
@@ -222,25 +186,7 @@ export const BalanceDisplay: React.FC = () => {
           </div>
         )}
 
-        {accountType === 'demo' ? (
-          <>
-            <p className="mt-2 text-[13px] text-subtle">
-              Practice funds, no real USDC.{' '}
-              <button type="button" onClick={handleExitDemo} className="font-medium text-ink underline-offset-2 hover:underline">
-                Exit practice
-              </button>
-            </p>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => updateBalance(10000 - demoBalance, 'add')}
-              className="mt-4 w-full"
-            >
-              Reset Practice Balance
-            </Button>
-          </>
-        ) : (
-          <div className="mt-4 grid grid-cols-2 gap-2">
+        <div className="mt-4 grid grid-cols-2 gap-2">
             <Button onClick={handleDeposit} disabled={!address || isLoading} variant="primary" size="sm">
               Deposit
             </Button>
@@ -253,7 +199,6 @@ export const BalanceDisplay: React.FC = () => {
               Withdraw
             </Button>
           </div>
-        )}
 
         {!address && (
           <p className="mt-3 text-[13px] text-subtle">Connect a wallet to see your balance.</p>

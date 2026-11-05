@@ -824,16 +824,16 @@ async fn statements_read_and_write_like_postgres() {
     // SELECT on the read pool is really read-only.
     let (rows, changed) = db
         .run(
-            "INSERT INTO access_codes (code) VALUES (CAST($1 AS text)) RETURNING id, code, is_used, created_at",
-            vec![rusqlite::types::Value::Text("CODE-1".into())],
+            "INSERT INTO user_sessions (wallet_address) VALUES (CAST($1 AS text)) RETURNING id, network, started_at",
+            vec![rusqlite::types::Value::Text("0xW".into())],
         )
         .await
         .unwrap();
     assert_eq!(changed, 1);
     let row = rows[0].as_object().unwrap();
-    assert_eq!(row["is_used"], json!(false));
+    assert_eq!(row["network"], json!("BNB"));
     assert!(uuid::Uuid::parse_str(row["id"].as_str().unwrap()).is_ok());
-    let created = row["created_at"].as_str().unwrap();
+    let created = row["started_at"].as_str().unwrap();
     assert!(created.ends_with('Z') && created.len() == 24, "{created}");
 
     let v = |text: &str| rusqlite::types::Value::Text(text.to_string());
@@ -962,31 +962,6 @@ async fn the_deposit_lock_is_claimed_once() {
         }
     }
     assert_eq!(claimed, 1);
-}
-
-#[tokio::test]
-async fn the_profile_trigger_stamps_updated_at() {
-    let t = TempDb::new();
-    let db = &t.db;
-    let stale = 1_000_000i64;
-    db.write(move |c| {
-        c.execute(
-            "INSERT INTO user_profiles (user_address, updated_at) VALUES ('0xa', ?1)",
-            params![stale],
-        )?;
-        c.execute("UPDATE user_profiles SET username = 'bob'", [])?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    let stored: i64 = db
-        .read(|c| Ok(c.query_row("SELECT updated_at FROM user_profiles", [], |r| r.get(0))?))
-        .await
-        .unwrap();
-    assert!(
-        stored > stale * 1000,
-        "BEFORE UPDATE trigger's effect: {stored}"
-    );
 }
 
 // -- withdrawal races --------------------------------------------------------

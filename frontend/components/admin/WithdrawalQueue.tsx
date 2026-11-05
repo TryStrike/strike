@@ -9,7 +9,7 @@
  * admin never clicks a payout that the server will refuse.
  */
 
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { formatCountdown, intentRemainingMs } from '@/lib/admin/countdown';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { shortenAddress } from './AdminUi';

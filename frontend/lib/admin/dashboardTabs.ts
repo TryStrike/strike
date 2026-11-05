@@ -11,7 +11,6 @@ export const DASHBOARD_TABS = [
     'financial',
     'markets',
     'referrals',
-    'access_codes',
     'danger',
 ] as const;
 

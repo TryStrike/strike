@@ -1,6 +1,5 @@
 //! `/api/bets/*` — the betting-history family.
 //!
-//! Ports `app/api/bets/{history,stats,leaderboard,recent,save,[id]}/route.ts`.
 //! All param parsing, aggregation and formatting is pure logic in
 //! `strike_core::bets`; these modules are transport plus hand-written SQL with
 //! typed binds (see `crate::sql` and the `Binds` helper below).
@@ -8,7 +7,6 @@
 pub mod bet_id;
 pub mod history;
 pub mod recent;
-pub mod save;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -32,7 +30,6 @@ pub fn routes() -> Router {
     Router::new()
         .merge(history::routes())
         .merge(recent::routes())
-        .merge(save::routes())
         .merge(bet_id::routes())
 }
 

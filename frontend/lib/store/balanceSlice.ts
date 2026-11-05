@@ -1,10 +1,4 @@
-/**
- * Balance state slice for Zustand store
- * Manages house balance state and operations (deposit, withdraw, bet)
- * 
- * Task: 8.2 Update balance slice
- * Requirements: 3.5
- */
+/** House balance state: fetch, optimistic updates, withdraw. */
 
 import { StateCreator } from "zustand";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
@@ -12,8 +6,6 @@ import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 export interface BalanceState {
   // State
   houseBalance: number;
-  demoBalance: number;
-  accountType: 'real' | 'demo';
   userTier: 'free' | 'standard' | 'vip';
   isLoading: boolean;
   error: string | null;
@@ -27,7 +19,6 @@ export interface BalanceState {
     amount: number,
     security?: { signature?: string; signedAt?: number }
   ) => Promise<any>;
-  toggleAccountType: () => void;
   clearError: () => void;
 }
 
@@ -38,8 +29,6 @@ export interface BalanceState {
 export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
   // Initial state
   houseBalance: 0,
-  demoBalance: 10000, // 10,000 demo USDC to start
-  accountType: (typeof window !== 'undefined' && localStorage.getItem('strike_account_type') as 'real' | 'demo') || 'real', // Persist account type
   userTier: 'free',
   isLoading: false,
   error: null,
@@ -50,15 +39,11 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
    * @param address - Wallet address
    */
   fetchBalance: async (address: string) => {
-    const { accountType } = get();
     const currency = resolveHouseLedgerCurrency({
       selectedCurrency: (get() as any).selectedCurrency,
     });
 
-    // Skip API fetch for demo mode as it uses local state only
-    if (!address || accountType === 'demo' || address.startsWith('0xDEMO')) {
-      return;
-    }
+    if (!address) return;
 
     try {
       set({ isLoading: true, error: null });
@@ -103,33 +88,13 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
    * @param operation - 'add' to increase balance, 'subtract' to decrease
    */
   updateBalance: (amount: number, operation: 'add' | 'subtract') => {
-    const { houseBalance, demoBalance, accountType } = get();
-
-    if (accountType === 'demo') {
-      const newDemoBalance = operation === 'add'
-        ? demoBalance + amount
-        : Math.max(0, demoBalance - amount);
-      set({ demoBalance: newDemoBalance });
-      return;
-    }
+    const { houseBalance } = get();
 
     const newBalance = operation === 'add'
       ? houseBalance + amount
       : Math.max(0, houseBalance - amount);
 
     set({ houseBalance: newBalance });
-  },
-
-  /**
-   * Toggle between real and demo accounts
-   */
-  toggleAccountType: () => {
-    const { accountType } = get();
-    const newType = accountType === 'real' ? 'demo' : 'real';
-    set({ accountType: newType });
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('strike_account_type', newType);
-    }
   },
 
   /**

@@ -10,7 +10,7 @@
  * route unconditionally dynamic.
  */
 
-import React, { Suspense } from 'react';
+import { Suspense } from 'react';
 import AdminDashboard from '@/components/admin/AdminDashboard';
 
 function DashboardFallback() {

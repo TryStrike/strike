@@ -50,7 +50,7 @@ mod tests {
     async fn bind_count_mismatch_is_refused_without_touching_the_pool() {
         let value = Value::from("1");
         // Two placeholders, one bind: the error must come from the arity check,
-        // not from a connection attempt - so this passes with no DATABASE_URL.
+        // not from a connection attempt - so this passes with no SQLITE_PATH.
         let err = fetch("SELECT $1, $2", &[("text", &value)])
             .await
             .expect_err("arity mismatch is refused");

@@ -7,7 +7,7 @@
  * access, so each one requires typing a confirmation string first.
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { adminMutation, useAdminFetch } from './useAdminFetch';
 import { type DashFilters } from './dashQuery';

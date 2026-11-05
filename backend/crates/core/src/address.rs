@@ -1,8 +1,5 @@
 //! Address handling. The database stores lowercase keys; the chain speaks
 //! EIP-55 checksum. Every comparison goes through one of these.
-//!
-//! Ports `lib/wallet/canonicalAddress.ts`, `lib/utils/address.ts`,
-//! `lib/admin/walletAddressVariants.ts` and `lib/bans/walletAddress`.
 
 use tiny_keccak::{Hasher, Keccak};
 
@@ -130,7 +127,7 @@ fn push_unique(list: &mut Vec<String>, value: String) {
     }
 }
 
-/// `lib/utils/address.ts` — a short label like `0x1234…abcd` for the UI.
+/// A short label like `0x1234…abcd` for the UI.
 pub fn shorten(value: &str, prefix: usize, suffix: usize) -> String {
     let trimmed = value.trim();
     if trimmed.len() <= prefix + suffix {

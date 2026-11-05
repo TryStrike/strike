@@ -5,7 +5,6 @@
  * empty and error+retry states.
  */
 
-import React from 'react';
 import { EmptyState, ErrorState, SkeletonRows } from './AdminUi';
 import { useAdminFetch } from './useAdminFetch';
 import type { TreasuryBalanceApiRow } from './types';

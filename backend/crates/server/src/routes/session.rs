@@ -1,5 +1,4 @@
-//! `/api/session/ping` — presence. Port of `app/api/session/ping/route.ts`,
-//! including its opportunistic housekeeping and its "ignore lookup errors and
+//! `/api/session/ping`: presence, with its opportunistic housekeeping and its "ignore lookup errors and
 //! fall through" behaviour, which is what makes a malformed session id a resume
 //! instead of a 500.
 

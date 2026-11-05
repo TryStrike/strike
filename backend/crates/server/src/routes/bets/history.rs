@@ -1,4 +1,4 @@
-//! `GET /api/bets/history` — `app/api/bets/history/route.ts`.
+//! `GET /api/bets/history`.
 //!
 //! Param parsing, clamping, row decoration and demo detection are pure
 //! (`strike_core::bets`); this module owns the transport and the two bounded

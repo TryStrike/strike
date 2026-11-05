@@ -1,4 +1,4 @@
-//! `/api/prices/stream` — the SSE feed (`app/api/prices/stream/route.ts`).
+//! `/api/prices/stream` — the SSE feed.
 //!
 //! Pushes `data: {"asset":"BTC","price":111111.5,"ts":1700000000000}` the moment
 //! the aggregated feed moves, primed with one snapshot frame per asset on

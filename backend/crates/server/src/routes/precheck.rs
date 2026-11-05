@@ -1,6 +1,6 @@
 //! `/api/arc/deposit-precheck` — the deposit modal's read-only pre-flight.
 //!
-//! Port of `app/api/arc/deposit-precheck/route.ts`. Deliberately narrow:
+//! Deliberately narrow:
 //!   * it never writes a balance — crediting stays on `POST /api/balance/deposit`;
 //!   * it never touches the treasury signer, so the key is not even reachable
 //!     from this path;
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_and_invalid_addresses_short_circuit_before_the_ledger() {
-        // No DATABASE_URL in tests: reaching the ledger would panic/err out, so
+        // No SQLITE_PATH in tests: reaching the ledger would panic/err out, so
         // these two passing proves the order is right.
         let (outcome, _) = run(Params::default()).await;
         assert_eq!(outcome, PreFlight::AddressMissing);

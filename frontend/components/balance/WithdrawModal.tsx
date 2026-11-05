@@ -6,8 +6,6 @@ import { Button, Segmented } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount } from 'wagmi';
-import { useWallets, type ConnectedWallet } from '@privy-io/react-auth';
-import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 import { ARC_ASSETS, type ArcAsset } from '@/lib/arc/config';
 import { calculateFeeAmount, getFeePercentLabel } from '@/lib/fees/platformFee';
@@ -48,27 +46,8 @@ interface WithdrawModalProps {
  * Moves credits out of the house balance and back to the player's wallet on
  * Arc. The withdrawal is authorised by a signed message so the backend
  * can prove the request came from the wallet that owns the balance.
- *
- * Privy embedded wallets have no wagmi connector, so the signing falls back
- * to Privy's own wallet API. The Privy hooks must only run when a Privy app
- * id is configured (see providers.tsx), hence the wrapper split below.
  */
-export const WithdrawModal: React.FC<WithdrawModalProps> = (props) => {
-  const privyEnabled = usePrivyEnabled();
-  if (!privyEnabled) {
-    return <WithdrawModalInner {...props} privyWallets={[]} />;
-  }
-  return <WithdrawModalWithPrivy {...props} />;
-};
-
-function WithdrawModalWithPrivy(props: WithdrawModalProps) {
-  const { wallets } = useWallets();
-  return <WithdrawModalInner {...props} privyWallets={wallets} />;
-}
-
-const WithdrawModalInner: React.FC<
-  WithdrawModalProps & { privyWallets: ConnectedWallet[] }
-> = ({ isOpen, onClose, onSuccess, onError, privyWallets }) => {
+export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, onSuccess, onError }) => {
   const [amount, setAmount] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -146,24 +125,8 @@ const WithdrawModalInner: React.FC<
       return signer.signMessage(message);
     }
 
-    // Privy embedded wallets (the default onboarding path) are not wagmi
-    // connectors, so walletClient and connector are both empty above. Sign
-    // through the embedded wallet itself, matching the address the store
-    // holds so the backend signature check passes.
-    const privyWallet =
-      privyWallets.find(
-        (w) =>
-          w.type === 'ethereum' &&
-          w.address?.toLowerCase() === address?.toLowerCase()
-      ) ??
-      privyWallets.find((w) => w.type === 'ethereum');
-
-    if (privyWallet?.sign) {
-      return privyWallet.sign(message);
-    }
-
     throw new Error(
-      'Unable to sign the withdrawal authorization. Connect a wallet (MetaMask/WalletConnect) or log in with Privy and try again.'
+      'Unable to sign the withdrawal authorization. Reconnect your wallet and try again.'
     );
   };
 

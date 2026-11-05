@@ -30,7 +30,7 @@ for (const file of ['.env.local', '.env']) {
 // No implicit chain default: silently landing on mainnet (5042) when only a
 // testnet deployment is intended has fund-loss consequences, so the chain id
 // must be stated in the environment.
-const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID ?? process.env.ARC_CHAIN_ID);
+const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID);
 if (!Number.isInteger(chainId) || chainId <= 0) {
   console.error(
     'ARC chain id is not configured. Set NEXT_PUBLIC_ARC_CHAIN_ID explicitly ' +
@@ -42,12 +42,9 @@ const FORCE = process.argv.includes('--force');
 const net = {
   chainId,
   name: chainId === 5042 ? 'Arc' : 'Arc Testnet',
-  rpc: process.env.ARC_RPC_URL || process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || 'https://rpc.mainnet.arc.io',
-  explorer: process.env.NEXT_PUBLIC_ARC_EXPLORER || 'https://explorer.arc.io',
-  usdc:
-    process.env.ARC_USDC_ADDRESS ||
-    process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS ||
-    '0x3600000000000000000000000000000000000000',
+  rpc: process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || (chainId === 5042 ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io'),
+  explorer: process.env.NEXT_PUBLIC_ARC_EXPLORER || (chainId === 5042 ? 'https://explorer.arc.io' : 'https://explorer.testnet.arc.io'),
+  usdc: process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS || '0x3600000000000000000000000000000000000000',
 };
 
 function compile() {

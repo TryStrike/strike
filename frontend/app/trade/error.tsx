@@ -1,6 +1,5 @@
 'use client';
 
-import React from 'react';
 import { RouteError } from '@/components/states/RouteFallbacks';
 
 export default function TradeError({

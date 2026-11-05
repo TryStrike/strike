@@ -195,25 +195,6 @@ BEGIN
   SELECT RAISE(ABORT, 'a round is permanent');
 END;
 
-CREATE TABLE IF NOT EXISTS user_profiles (
-  user_address TEXT PRIMARY KEY,
-  username     TEXT UNIQUE,
-  access_code  TEXT,
-  updated_at   INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER)),
-  created_at   INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
-) STRICT;
-
--- Postgres ran this BEFORE UPDATE and assigned NEW.updated_at. SQLite cannot
--- assign NEW; recursive_triggers is off, so this inner UPDATE does not re-fire.
-CREATE TRIGGER IF NOT EXISTS update_user_profiles_updated_at
-AFTER UPDATE ON user_profiles
-FOR EACH ROW
-BEGIN
-  UPDATE user_profiles
-     SET updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
-   WHERE user_address = NEW.user_address;
-END;
-
 CREATE TABLE IF NOT EXISTS user_referrals (
   user_address   TEXT PRIMARY KEY,
   referral_code  TEXT UNIQUE NOT NULL,
@@ -222,34 +203,6 @@ CREATE TABLE IF NOT EXISTS user_referrals (
   created_at     INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_ur_referral_count ON user_referrals(referral_count DESC);
-
--- wallet_address is not UNIQUE: 001 created this table first, so the UNIQUE in
--- access_system.sql never took effect on Postgres either.
-CREATE TABLE IF NOT EXISTS access_codes (
-  id             TEXT PRIMARY KEY DEFAULT (
-    lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))), 2) || '-' ||
-    substr('89ab', abs(random() % 4) + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
-  code           TEXT UNIQUE NOT NULL,
-  is_used        INTEGER NOT NULL DEFAULT 0 CHECK (is_used IN (0, 1)),
-  used_at        INTEGER,
-  wallet_address TEXT,
-  created_at     INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
-) STRICT;
-CREATE INDEX IF NOT EXISTS idx_access_codes_created ON access_codes(created_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS waitlist (
-  id         TEXT PRIMARY KEY DEFAULT (
-    lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))), 2) || '-' ||
-    substr('89ab', abs(random() % 4) + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
-  email      TEXT UNIQUE NOT NULL,
-  created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
-) STRICT;
 
 CREATE TABLE IF NOT EXISTS banned_wallets (
   wallet_address TEXT PRIMARY KEY,

@@ -6,7 +6,7 @@
  * with server-side filtering, pagination and CSV export.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { explorerTxUrl } from '@/lib/arc/config';
 import { adminMutation } from './useAdminFetch';
 import { useAdminFetch } from './useAdminFetch';

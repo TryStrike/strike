@@ -79,13 +79,13 @@ Playable asset: **USDC** (6 decimals). Markets cover crypto, forex, stocks, meta
 | **Faucet** | — | https://faucet.circle.com |
 | **Treasury** | `NEXT_PUBLIC_TREASURY_ADDRESS` (StrikeTreasury) | `NEXT_PUBLIC_TREASURY_ADDRESS` (StrikeTreasury) |
 
-Mainnet is the default; set the `NEXT_PUBLIC_ARC_*` variables to run on testnet.
+Testnet is the default; set the `NEXT_PUBLIC_ARC_*` variables to point elsewhere.
 
 On Arc, native USDC (the gas token, 18 decimals) and the USDC ERC-20 interface (6 decimals) are **the same balance**. Strike only moves USDC through the ERC-20 interface so amounts are never mis-scaled.
 
-**Wallets:** MetaMask, Trust Wallet, WalletConnect (wagmi + ConnectKit), and Privy social login (embedded EVM wallet). The app switches the connected wallet onto Arc on connect.
+**Wallets:** MetaMask, Trust Wallet and WalletConnect (wagmi + ConnectKit). The app switches the connected wallet onto Arc on connect.
 
-Config lives in `lib/arc/config.ts` for compatibility with existing internal imports. Arc values use `NEXT_PUBLIC_ARC_*` variables.
+Config lives in `frontend/lib/arc/config.ts` and `backend/crates/core/src/config.rs`.
 
 ---
 
@@ -104,7 +104,7 @@ Deposits and withdrawals are on-chain. Bets, wins, and losses are atomic house-b
 
 ```mermaid
 flowchart LR
-  subgraph Browser["Browser — Next.js 16 + wagmi/ConnectKit/Privy"]
+  subgraph Browser["Browser — Next.js 16 + wagmi/ConnectKit"]
     UI[Trade UI · Zustand store]
   end
   subgraph Server["Rust backend, behind Next's /api proxy"]
@@ -152,10 +152,6 @@ Pay a one-time entry fee to the fee collector during the active window. All mult
 |-------|-----------|
 | USDC | 1 USDC |
 
-### Demo
-
-Full simulation of every mode with a local balance. No wallet required. Demo bet IDs are prefixed `demo-*` and never written to `bet_history`.
-
 ---
 
 ## Treasury contract
@@ -192,11 +188,11 @@ Net amount is what is credited on deposit or sent on withdrawal. Blitz entry fee
 | Layer | Stack |
 |-------|--------|
 | Frontend | Next.js 16 App Router, React 19, TypeScript, Tailwind v4, Zustand, TanStack Query |
-| Arc | wagmi 3 + viem 2 + ConnectKit, ethers 6, Privy |
+| Arc | wagmi 3 + viem 2 + ConnectKit, ethers 6 |
 | Backend | Rust (axum) service in `backend/`, SQLite in WAL mode |
 | Oracle | live price feeds (Yahoo/Binance) |
 | Contracts | Solidity (`StrikeTreasury`) |
-| Tooling | cargo test, ESLint, PostHog |
+| Tooling | cargo test, ESLint |
 
 ---
 
@@ -206,12 +202,11 @@ Net amount is what is credited on deposit or sent on withdrawal. Blitz entry fee
 
 | Slice | Responsibility |
 |-------|----------------|
-| `walletSlice` | Address, USDC currency, real vs demo |
+| `walletSlice` | Address, USDC currency, connect state |
 | `gameSlice` | Mode, active/settled bets, price feed, Blitz |
-| `balanceSlice` | House balance, deposit/withdraw, demo balance |
+| `balanceSlice` | House balance, deposit/withdraw |
 | `historySlice` | Local bet history |
 | `referralSlice` | Referral code |
-| `profileSlice` | Username / profile |
 
 Combined as `useStore` in `lib/store/index.ts`.
 
@@ -263,8 +258,8 @@ flowchart TD
 | `user_balances` | PK `(user_address, currency)` — USDC house balance, tier, status |
 | `balance_audit_log` | deposit, withdrawal, bet_placed, bet_won, bet_lost, platform_fee, refund, … |
 | `bet_history` | Settled real-mode bets |
-| `user_profiles` / `user_referrals` | Username and referrals |
-| `access_codes` / `waitlist` / `user_sessions` | Onboarding and dwell time |
+| `user_referrals` | Referral codes and counts |
+| `user_sessions` | Dwell time |
 | `withdrawal_requests` | Manual approval queue |
 
 The schema is `backend/schema.sql`, and `PRAGMA user_version` tracks changes after it (`MIGRATIONS` in `backend/crates/core/src/db.rs`). Only the backend writes the file.
@@ -286,15 +281,15 @@ The schema is `backend/schema.sql`, and `PRAGMA user_version` tracks changes aft
 
 Deposits are verified against the Arc RPC (`verify_deposit` in `backend/crates/core/src/eth.rs`).
 
-### Bets / public
+### Bets
 
 | Method | Route | Purpose |
 |--------|-------|---------|
-| `POST` | `/api/bets/save` | Upsert settled bet |
 | `GET` | `/api/bets/history` | User history |
-| `GET` | `/api/stats/public` | Platform stats (`chainsActive: 1`) |
+| `GET` | `/api/bets/recent` | Recent rounds |
+| `GET` | `/api/bets/[id]` | Settlement proof for one round |
 
-Admin routes live under `/api/admin/*` (auth, stats, ledger, treasury balances, withdrawal queue, access codes).
+Admin routes live under `/api/admin/*` (auth, stats, ledger, treasury balances, withdrawal queue).
 
 ---
 
@@ -302,7 +297,7 @@ Admin routes live under `/api/admin/*` (auth, stats, ledger, treasury balances, 
 
 `/dashboard` — every `/api/admin/*` route requires the admin session cookie.
 
-Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Accept/Reject), Inventory, Referrals, Access Codes, Danger Zone. Treasury snapshots read USDC on Arc.
+Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Accept/Reject), Inventory, Referrals, Danger Zone. Treasury snapshots read USDC on Arc.
 
 ---
 
@@ -318,65 +313,14 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 │
 ├── backend/                    # Rust API (axum + SQLite), schema.sql, deploy/
 ├── contracts/                  # StrikeTreasury.sol, deploy
-└── docs/                       # ops, env, pitch deck
+└── docs/                       # prd, ops, pitch deck
 ```
 
 ---
 
 ## Environment variables
 
-Copy `.env.example` to `.env` / `.env.local`. Arc values that this app actually reads:
-
-### App
-
-```env
-NEXT_PUBLIC_APP_NAME=Strike
-NEXT_PUBLIC_ROUND_DURATION=30
-NEXT_PUBLIC_PRICE_UPDATE_INTERVAL=1000
-NEXT_PUBLIC_CHART_TIME_WINDOW=300000
-```
-
-### Arc
-
-```env
-NEXT_PUBLIC_ARC_CHAIN_ID=5042            # optional override
-NEXT_PUBLIC_ARC_RPC_ENDPOINT=https://rpc.mainnet.arc.io
-NEXT_PUBLIC_ARC_EXPLORER=https://explorer.arc.io
-NEXT_PUBLIC_ARC_USDC_ADDRESS=0x3600000000000000000000000000000000000000
-
-NEXT_PUBLIC_TREASURY_ADDRESS=0x53A4228A2a50438e815E6c7CfD4f29DcA88e92CF
-ARC_TREASURY_SECRET_KEY=                 # owner key — server only
-
-NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC=
-
-NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=
-```
-
-`ARC_TREASURY_SECRET_KEY` must match `NEXT_PUBLIC_TREASURY_ADDRESS`. Contract deploy also honors `ARC_RPC_URL`.
-
-### Backend, Privy, admin, settlement
-
-```env
-BACKEND_URL=http://127.0.0.1:8080        # required by next build
-SQLITE_PATH=./strike.sqlite
-
-NEXT_PUBLIC_PRIVY_APP_ID=
-PRIVY_APP_SECRET=
-
-DASHBOARD_PASSWORD=
-
-BALANCE_SETTLEMENT_SECRET=
-BALANCE_INTERNAL_SECRET=
-```
-
-### Analytics / oracle
-
-```env
-NEXT_PUBLIC_POSTHOG_KEY=
-NEXT_PUBLIC_POSTHOG_HOST=
-```
-
-Do not commit secrets. See `docs/ENVIRONMENT.md`.
+One `.env.local` at the repo root drives the backend, the frontend and the contract deploy. `.env.example` lists every variable with its default. Arc Testnet is the default, so a local run needs only the treasury address and key, `SQLITE_PATH`, the two balance secrets and `DASHBOARD_PASSWORD`. `ARC_TREASURY_SECRET_KEY` must own `NEXT_PUBLIC_TREASURY_ADDRESS`.
 
 ---
 
@@ -422,7 +366,7 @@ Set the Arc env vars in the project. `next.config.ts` applies CSP, `X-Frame-Opti
 - Signed withdrawal intents on Arc (replay protection)
 - Duplicate payout guard: `betId` checked in `balance_audit_log`
 - Treasury `pause()` and two-step ownership
-- The browser has no database credentials: `/api/db` serves only an allow-list, and the backend is the only writer
+- The browser has no database access. Every read and write goes through a typed backend route
 - Admin routes behind `requireAdminAuth`
 - Balance mutation routes gated by session cookie / `BALANCE_INTERNAL_SECRET`
 

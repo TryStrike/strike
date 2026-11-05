@@ -1,4 +1,4 @@
-//! `lib/withdrawals/readAuth.ts` — the wallet-bound proof that scopes
+//! The wallet-bound proof that scopes
 //! `GET /api/withdrawals`.
 //!
 //! The header used to be an `address` query parameter guarded by a global,

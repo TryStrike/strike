@@ -28,7 +28,6 @@ import GameplayPanel from './GameplayPanel';
 import FinancialPanel from './FinancialPanel';
 import MarketsPanel from './MarketsPanel';
 import ReferralsPanel from './ReferralsPanel';
-import AccessCodesPanel from './AccessCodesPanel';
 import DangerZonePanel from './DangerZonePanel';
 
 const TAB_LABELS: Record<DashboardTab, string> = {
@@ -39,7 +38,6 @@ const TAB_LABELS: Record<DashboardTab, string> = {
     financial: 'Financials',
     markets: 'Inventory',
     referrals: 'Referrals',
-    access_codes: 'Access Codes',
     danger: 'Danger Zone',
 };
 
@@ -58,10 +56,6 @@ const TAB_STATUS_OPTIONS: Partial<Record<DashboardTab, { value: string; label: s
     financial: [
         { value: 'deposit', label: 'Deposits' },
         { value: 'withdrawal', label: 'Withdrawals' },
-    ],
-    access_codes: [
-        { value: 'ready', label: 'Ready' },
-        { value: 'consumed', label: 'Consumed' },
     ],
 };
 
@@ -472,9 +466,6 @@ export default function AdminDashboard() {
                             )}
                             {filters.tab === 'referrals' && (
                                 <ReferralsPanel filters={filters} nonce={nonce} onUnauthorized={handleUnauthorized} onPatch={onPatch} />
-                            )}
-                            {filters.tab === 'access_codes' && (
-                                <AccessCodesPanel filters={filters} nonce={nonce} onUnauthorized={handleUnauthorized} onPatch={onPatch} />
                             )}
                             {filters.tab === 'danger' && (
                                 <DangerZonePanel

@@ -1,15 +1,13 @@
-//! Environment-backed configuration for the Strike backend.
-//!
-//! Mirrors the TypeScript service's `process.env` reads exactly, so the same
-//! `.env` file drives both during the migration.
+//! Environment-backed configuration for the Strike backend. The root
+//! `.env.local` drives both this service and the Next app.
 
 use std::env;
 use std::sync::OnceLock;
 
-/// Arc network defaults from `lib/arc/config.ts`.
-pub const ARC_DEFAULT_CHAIN_ID: u64 = 5042;
-pub const ARC_DEFAULT_RPC: &str = "https://rpc.mainnet.arc.io";
-pub const ARC_DEFAULT_EXPLORER: &str = "https://explorer.arc.io";
+/// Arc Testnet, matching `frontend/lib/arc/config.ts`.
+pub const ARC_DEFAULT_CHAIN_ID: u64 = 5042002;
+pub const ARC_DEFAULT_RPC: &str = "https://rpc.testnet.arc.io";
+pub const ARC_DEFAULT_EXPLORER: &str = "https://explorer.testnet.arc.io";
 pub const ARC_DEFAULT_USDC: &str = "0x3600000000000000000000000000000000000000";
 /// USDC on Arc is 6 decimals; the native gas balance is the same unit at 18.
 pub const USDC_DECIMALS: u32 = 6;
@@ -42,7 +40,7 @@ fn parse_num<T: std::str::FromStr>(key: &str) -> Option<T> {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Path of the SQLite file. `DATABASE_URL` is deliberately not read.
+    /// Path of the SQLite ledger file.
     pub sqlite_path: Option<String>,
     pub read_pool: usize,
     pub statement_timeout_ms: u64,
@@ -96,7 +94,7 @@ impl Config {
     /// without a fully populated environment.
     pub fn from_env() -> Self {
         let node_env = str_var("NODE_ENV").unwrap_or_default();
-        let production = node_env == "production" || str_var("VERCEL_ENV").is_some();
+        let production = node_env == "production";
 
         let banned = str_var("BANNED_WALLET_ADDRESSES")
             .map(|v| split_list(&v))
@@ -135,12 +133,10 @@ impl Config {
                 .unwrap_or(8.0),
             arc_chain_id: parse_num("NEXT_PUBLIC_ARC_CHAIN_ID").unwrap_or(ARC_DEFAULT_CHAIN_ID),
             arc_rpc: str_var("NEXT_PUBLIC_ARC_RPC_ENDPOINT")
-                .or_else(|| str_var("ARC_RPC_URL"))
                 .unwrap_or_else(|| ARC_DEFAULT_RPC.to_string()),
             arc_explorer: str_var("NEXT_PUBLIC_ARC_EXPLORER")
                 .unwrap_or_else(|| ARC_DEFAULT_EXPLORER.to_string()),
             arc_usdc: str_var("NEXT_PUBLIC_ARC_USDC_ADDRESS")
-                .or_else(|| str_var("ARC_USDC_ADDRESS"))
                 .unwrap_or_else(|| ARC_DEFAULT_USDC.to_string()),
             treasury_address: str_var("NEXT_PUBLIC_TREASURY_ADDRESS").unwrap_or_default(),
             treasury_secret_key: str_var("ARC_TREASURY_SECRET_KEY"),

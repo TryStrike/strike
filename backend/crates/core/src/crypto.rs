@@ -1,13 +1,11 @@
-//! Signed-token formats, byte-compatible with the TypeScript service so that
-//! cookies/tokens minted by either implementation verify in the other.
+//! Signed-token formats for cookies and settlement tokens.
 //!
 //! Three formats, all `base64url(payload).base64url(sig)` or a JSON envelope:
 //!   balance session  {v,exp,n}            HMAC-SHA256 over the payload string
 //!   settlement token {betId,...,iat,exp}  HMAC-SHA256 over the payload string
 //!   admin session    {iat,sig}            sig = hex HMAC-SHA256("admin:<iat>")
 //!
-//! Payload key order follows the struct field order, matching
-//! `JSON.stringify`'s insertion order in the TS code.
+//! Payload key order follows the struct field order.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -22,7 +20,7 @@ const SESSION_TTL_SECONDS: i64 = 60 * 60 * 12;
 const DEFAULT_SETTLEMENT_TTL_SECONDS: i64 = 5 * 60;
 const MIN_SETTLEMENT_TTL_SECONDS: i64 = 60;
 
-/// Withdrawal-intent freshness windows (`lib/balance/withdrawalIntent.ts`).
+/// Withdrawal-intent freshness windows.
 pub const MAX_INTENT_AGE_MS: i64 = 5 * 60 * 1000;
 pub const MAX_CLOCK_SKEW_MS: i64 = 60 * 1000;
 pub const MAX_ACCEPT_INTENT_AGE_MS: i64 = 10 * 60 * 1000;
@@ -311,7 +309,7 @@ pub fn dashboard_password_matches(stored: &str, candidate: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Withdrawal intent freshness (`lib/balance/withdrawalIntent.ts`)
+// Withdrawal intent freshness
 // ---------------------------------------------------------------------------
 
 /// Signature good for 5 minutes, tolerating a client clock 60s ahead.

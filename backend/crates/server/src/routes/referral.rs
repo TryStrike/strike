@@ -1,7 +1,7 @@
 //! `/api/referral` — a wallet's own referral record, its referred friends, and
 //! the public leaderboard.
 //!
-//! Port of `app/api/referral/route.ts`. Every decision that changes what the
+//! Every decision that changes what the
 //! response *says* (code minting, address truncation, demo-row exclusion,
 //! qualification arithmetic, referrer resolution) is pure logic in
 //! `strike_core::referral`; this module owns HTTP and the SQL statements.

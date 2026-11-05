@@ -7,7 +7,6 @@
  * skeletons / errors independently of the tabs.
  */
 
-import React from 'react';
 import { isArcAsset } from '@/lib/arc/config';
 import { EmptyState, ErrorState, fmtPnL, SkeletonRows, StatBox } from './AdminUi';
 import { useAdminFetch } from './useAdminFetch';

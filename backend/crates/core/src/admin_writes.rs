@@ -1,12 +1,6 @@
-//! Pure logic behind the admin WRITE routes.
-//!
-//! Ports the non-IO halves of `app/api/admin/withdrawal-requests/[id]/{accept,
-//! reject}/route.ts`, `app/api/admin/unban-wallet/route.ts`,
-//! `app/api/admin/banned-wallets/route.ts` and
-//! `app/api/admin/danger-zone/route.ts`, plus the error-sanitising layer of
-//! `lib/admin/adminError.ts` and the demo predicates of
-//! `lib/admin/walletAddressVariants.ts`. Everything here is offline-testable:
-//! the handlers in the server crate supply the database and the chain.
+//! Pure logic behind the admin write routes (withdrawal accept/reject, unban,
+//! banned wallets, danger zone) and the error sanitiser. Everything here is
+//! offline-testable: the server crate supplies the database and the chain.
 
 use rust_decimal::Decimal;
 use serde_json::{Map, Value};
@@ -177,7 +171,7 @@ pub fn within_accept_window(now_ms: i64, signed_at_ms: i64) -> bool {
     is_within_accept_window_at(now_ms, signed_at_ms)
 }
 
-// ── Platform fee (`lib/fees/platformFee.ts`) ────────────────────────────────
+// ── Platform fee ────────────────────────────────
 
 /// `executeTreasuryWithdrawal`'s pre-chain arithmetic, in the TS order:
 /// currency gate, fee source, then the net-must-be-positive gate. The error
@@ -226,7 +220,7 @@ pub fn reconciliation_note(reason: &str) -> String {
     take_utf16(&format!("NEEDS_RECONCILIATION:{reason}"), 500)
 }
 
-// ── `lib/admin/adminError.ts` ────────────────────────────────────────────────
+// ── Error sanitising ───────────────────────────────────────────────────────
 
 const MAX_CLIENT_MESSAGE_LENGTH: usize = 220;
 
@@ -278,8 +272,6 @@ pub fn looks_like_internal_error(message: &str) -> bool {
         "econnreset",
         "etimedout",
         "enotfound",
-        "database_url",
-        "supabase_service",
         "apikey",
         "api_key",
         "api key",
@@ -327,14 +319,6 @@ pub fn looks_like_internal_error(message: &str) -> bool {
     has_pg_error_json(&lower)
 }
 
-/// Route errors through the TS sanitizer and wrap them as `{ error }` bodies.
-pub fn admin_error_body(err_text: &str, fallback: &str) -> Value {
-    Value::Object(Map::from_iter([(
-        "error".to_string(),
-        Value::String(sanitize_error_text(err_text, fallback)),
-    )]))
-}
-
 /// `sanitizeErrorMessage`: the length/shape gates run against the raw message,
 /// so a long SQL fragment cannot sneak through as a "short" message.
 pub fn sanitize_error_text(err_text: &str, fallback: &str) -> String {
@@ -343,57 +327,6 @@ pub fn sanitize_error_text(err_text: &str, fallback: &str) -> String {
         return fallback.to_string();
     }
     message.to_string()
-}
-
-/// `/schema cache|does not exist|banned_wallets/i` — the "un-migrated project"
-/// signature that turns a 500 into a 503 with the migration nudge.
-pub fn is_missing_table_message(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    lower.contains("schema cache")
-        || lower.contains("does not exist")
-        || lower.contains("no such table")
-        || lower.contains("banned_wallets")
-}
-
-pub const MISSING_TABLE_HINT: &str =
-    " Run supabase/migrations/002_banned_wallets.sql (or full 001_complete_schema.sql) on your Supabase project.";
-
-/// `appendSupabaseServiceKeyHint`: only connection-shaped failures get the
-/// operator instructions; everything else passes through untouched.
-pub fn append_service_key_hint(message: &str) -> String {
-    let lower = message.to_lowercase();
-    if ![
-        "connect",
-        "password",
-        "authentication",
-        "does not exist",
-        "econnrefused",
-        "timeout",
-    ]
-    .iter()
-    .any(|p| lower.contains(p))
-    {
-        return message.to_string();
-    }
-    format!(
-        "{message} — Fix: set DATABASE_URL to the Neon pooled connection string (Neon → Project → Connection Details). In Vercel: Project → Settings → Environment Variables, then redeploy."
-    )
-}
-
-/// The banned-wallets route family's error responder: the RAW text decides
-/// whether this is a missing-table 503, the sanitized text is what the client
-/// reads, and the operator hint is appended after both.
-pub fn respond_supabase_error(err_text: &str, fallback: &str) -> (u16, Value) {
-    let missing = is_missing_table_message(err_text);
-    let safe = sanitize_error_text(err_text, fallback);
-    let body = append_service_key_hint(&format!(
-        "{safe}{}",
-        if missing { MISSING_TABLE_HINT } else { "" }
-    ));
-    (
-        if missing { 503 } else { 500 },
-        Value::Object(Map::from_iter([("error".to_string(), Value::String(body))])),
-    )
 }
 
 fn ascii_lower(bytes: &[u8]) -> Vec<u8> {
@@ -579,10 +512,10 @@ fn has_pg_error_json(lower: &[u8]) -> bool {
     false
 }
 
-// ── Danger-zone aggregation (`app/api/admin/danger-zone/route.ts`) ───────────
+// ── Danger-zone aggregation ───────────
 
 pub const FREQUENCY_REVIEW_THRESHOLD: i64 = 10;
-/// PostgREST-era caps transcribed: every scan is bounded and pages of 1000.
+/// Every scan is bounded and pages of 1000.
 pub const SCAN_PAGE: i64 = 1000;
 pub const BET_SCAN_CAP: i64 = 20_000;
 pub const AUDIT_SCAN_CAP: i64 = 20_000;
@@ -846,7 +779,7 @@ pub(crate) fn json_like(pairs: &[(&str, Value)]) -> Value {
     ))
 }
 
-// ── Unban audit rows (`app/api/admin/unban-wallet/route.ts` step 4) ─────────
+// ── Unban audit rows ─────────────────────────────────────────────────────────
 
 /// One `admin_balance_wipe` audit row per currency whose balance was actually
 /// non-zero before the wipe. `amount` is negative: the house took it back.
@@ -1072,7 +1005,6 @@ mod tests {
             "syntax error at or near \"FORM\"",
             "connection timeout reached",
             "ECONNREFUSED 10.0.0.1:5432",
-            "DATABASE_URL is wrong",
             "    at Object.<anonymous> (/app/node_modules/x/y.js:1:2)",
             r#"{"severity": "ERROR", "code": "42P01"}"#,
             "an unknown pg_ extension blew up",
@@ -1099,45 +1031,6 @@ mod tests {
             );
         }
         assert!(looks_like_internal_error(""), "empty messages fall back");
-    }
-
-    #[test]
-    fn missing_table_detection_and_hint_appends() {
-        assert!(is_missing_table_message(
-            "banned_wallets: relation does not exist"
-        ));
-        assert!(is_missing_table_message("the schema cache is not loaded"));
-        assert!(!is_missing_table_message("Insufficient balance"));
-        assert_eq!(
-            append_service_key_hint("Insufficient balance"),
-            "Insufficient balance"
-        );
-        let hinted = append_service_key_hint("connection refused by host");
-        assert!(hinted.ends_with("then redeploy."));
-        assert!(hinted.contains("Fix: set DATABASE_URL"));
-        let (status, body) = respond_supabase_error(
-            "relation \"banned_wallets\" does not exist",
-            "Failed to add ban",
-        );
-        assert_eq!(status, 503);
-        let text = body["error"].as_str().unwrap();
-        assert!(
-            text.starts_with("Failed to add ban"),
-            "raw driver text leaked: {text}"
-        );
-        assert!(text.contains("002_banned_wallets.sql"));
-        // The hint keys off the SANITIZED text (appendSupabaseServiceKeyHint(safe)
-        // in the TS), so raw connection text collapses to the bare fallback...
-        let (status, body) = respond_supabase_error("connection timeout", "Failed to remove ban");
-        assert_eq!(status, 500);
-        assert_eq!(body["error"], json!("Failed to remove ban"));
-        // ...and only a message that survives sanitising earns the hint.
-        let (status, body) = respond_supabase_error("Request timeout", "Failed to remove ban");
-        assert_eq!(status, 500);
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("Request timeout — Fix: set DATABASE_URL"));
     }
 
     #[test]

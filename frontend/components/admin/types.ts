@@ -31,7 +31,6 @@ export interface Stats {
 
 export interface UserRow {
     user_address: string;
-    username: string | null;
     currency: string;
     balance: number;
     status?: string;

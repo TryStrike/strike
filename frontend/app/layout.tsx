@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Inter_Tight, Instrument_Serif, JetBrains_Mono, Pixelify_Sans } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-import { PostHogProvider } from "@/lib/posthog/PostHogProvider";
 import { BRAND } from "@/lib/brand";
 import { Header } from "@/components/Header";
 import { AI_ROUTE } from "@/lib/theme";
@@ -33,12 +32,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         suppressHydrationWarning
         className={`${interTight.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable} ${pixelify.variable} flex flex-col overflow-hidden antialiased`}
       >
-        <PostHogProvider>
-          <Providers>
-            <Header />
-            <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">{children}</main>
-          </Providers>
-        </PostHogProvider>
+        <Providers>
+          <Header />
+          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">{children}</main>
+        </Providers>
       </body>
     </html>
   );

@@ -433,7 +433,7 @@ pub fn hex_decode(value: &str) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// deposit verification (`lib/balance/verifyArcDepositTx.ts`)
+// deposit verification
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -650,7 +650,7 @@ pub async fn verify_deposit(
 }
 
 // ---------------------------------------------------------------------------
-// treasury payouts (`lib/arc/backend-client.ts`)
+// treasury payouts
 // ---------------------------------------------------------------------------
 
 /// One transfer out of the treasury, in token base units.

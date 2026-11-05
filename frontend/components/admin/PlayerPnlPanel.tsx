@@ -8,7 +8,7 @@
  * wallet balance, so it is treated as a money-path action.
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { adminMutation, useAdminFetch } from './useAdminFetch';
 import { apiListQuery, type DashFilters } from './dashQuery';
@@ -17,7 +17,6 @@ import { EmptyState, ErrorState, Pagination, TypedConfirmButton, shortenAddress 
 interface PlayerRow {
     user_address: string;
     currency: string;
-    username: string | null;
     total_deposited: number;
     total_withdrawn: number;
     current_balance: number;
@@ -208,7 +207,6 @@ export default function PlayerPnlPanel({
                                                         <span className="text-faint font-mono text-xs w-8">#{rankBase + i + 1}</span>
                                                         <div className="flex flex-col gap-1">
                                                             <div className="flex items-center gap-2 flex-wrap">
-                                                                <span className="text-ink text-sm font-bold">{p.username || 'Anonymous'}</span>
                                                                 {isBanned && (
                                                                     <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest bg-down-soft text-down border border-down/30">
                                                                         ⊘ Banned

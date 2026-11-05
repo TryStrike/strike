@@ -1,4 +1,4 @@
-//! Server-side price aggregation — Rust port of `lib/server/marketPrices.ts`.
+//! Server-side price aggregation.
 //!
 //! It answers `GET`/`POST /api/prices/latest` and feeds the `/api/prices/stream`
 //! SSE ticker with exactly the JSON the browser already parses:
@@ -7,29 +7,24 @@
 //! { "prices": { "<ASSET>": <number>, ... } }
 //! ```
 //!
-//! Upstreams match the TS: crypto quotes come from Binance (a single batched
+//! Crypto quotes come from Binance (a single batched
 //! call), everything else from Yahoo's `spark` endpoint, and Yahoo doubles as the
-//! crypto fallback if Binance returns nothing for an asset. Pyth is *not* a live
-//! upstream in the ported code — its feed IDs (lib/utils/priceFeed.ts) are only
-//! the canonical asset list / SSE selector domain, so the aggregator never
-//! talks to Pyth either.
+//! crypto fallback if Binance returns nothing for an asset.
 //!
 //! Design notes carried through the whole module:
-//!   * Timings are compile-time constants, exactly as the TS hard-codes them.
+//!   * Timings are compile-time constants.
 //!     The endpoints are constants too, overridable only through `crate::config`
 //!     so tests can stand in for the market.
 //!   * Every upstream error path is isolated per source and yields an empty
 //!     quote list, never an `Err`: `fetch_latest_prices` is infallible so a
-//!     dead upstream still returns whatever else succeeded (200), matching TS.
+//!     dead upstream still returns whatever else succeeded (200).
 //!   * Upstream HTTP plumbing returns `ApiResult` so `reqwest`/decode failures
 //!     map onto the crate `ApiError`; the callers swallow them (per-source
 //!     isolation).
 //!   * Numbers are serialised the way `JSON.stringify` does it (see
 //!     [`number_to_json`]) and object key order is made deterministic
 //!     (alphabetical via `BTreeMap`), which the client never observes since it
-//!     looks prices up by key. That ordering choice is the one deliberate,
-//!     client-invisible divergence from the TS (whose key order is source-fill
-//!     order and therefore already non-deterministic).
+//!     looks prices up by key.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -711,7 +706,7 @@ fn json_escape(value: &str) -> String {
 pub const PRICE_ERROR_BODY: &str = "{\"prices\":{},\"error\":\"Failed to load prices\"}";
 
 // ---------------------------------------------------------------------------
-// SSE stream primitives (`lib/server/priceStream.ts` parsing / framing)
+// SSE stream primitives (parsing / framing)
 // ---------------------------------------------------------------------------
 
 /// `parseAssetSelector`: accepts bare codes (`BTC`) and pair-style (`BTC-USD`);
@@ -805,16 +800,6 @@ pub async fn latest_post(assets: &[String]) -> ApiResult<PricesResponse> {
         cache_control: String::new(),
         vary: None,
     })
-}
-
-/// The snapshot the SSE route primes a connection with: one `data:` frame per
-/// requested asset that has a usable quote, stamped `now`.
-pub async fn snapshot_frames(assets: &[String]) -> Vec<String> {
-    snapshot_frames_at(
-        assets,
-        &fetch_latest_prices(assets, false).await,
-        now_millis(),
-    )
 }
 
 /// The same priming with the quotes and the clock supplied, so the pairing is

@@ -1,18 +1,15 @@
-//! Server-side tick broadcaster that feeds every SSE price connection
-//! (`lib/server/priceStream.ts`).
+//! Server-side tick broadcaster that feeds every SSE price connection.
 //!
 //! One shared loop per process re-quotes the union of every subscribed asset
 //! and fans the *changes* out to listeners, so N browser tabs cost one upstream
 //! call per tick instead of N. `/api/prices/latest` keeps its own cache-bounded
 //! semantics and is untouched by anything here.
 //!
-//! The TypeScript holds module-level `Set`/`Map`s and a `setInterval` reaped
-//! when the last client leaves. The equivalent here is a hub behind one mutex
-//! plus a single spawned task aborted on the same condition. Starting the loop
+//! A hub behind one mutex plus a single spawned task, aborted when the last
+//! client leaves. Starting the loop
 //! is an explicit call rather than a side effect of subscribing, which keeps the
 //! hub testable without a live upstream. The pump awaits its own fetch, so ticks
-//! cannot overlap and the `pumpInFlight` re-entrancy flag has no counterpart to
-//! maintain.
+//! cannot overlap.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};

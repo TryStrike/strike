@@ -11,7 +11,6 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod eth;
-pub mod gateway;
 pub mod ledger; // TEMP-REGISTRATION ledger
 pub mod money;
 pub mod platform_stats;
@@ -31,6 +30,5 @@ pub use error::{ApiError, ApiResult};
 pub mod admin_reads_a;
 pub mod admin_reads_extra_b; // TEMP-REGISTRATION admin_reads_extra_b
 pub mod admin_writes; // TEMP-REGISTRATION admin_writes
-pub mod admin_writes_extra; // TEMP-REGISTRATION admin_writes_extra
 pub mod error;
 pub mod referral; // TEMP-REGISTRATION referral

@@ -36,6 +36,6 @@ export const config = createConfig(
     // Optional App Info
     appDescription: BRAND.tagline,
     appUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
-    appIcon: typeof window !== 'undefined' ? `${window.location.origin}/favicon.ico` : '/favicon.ico',
+    appIcon: typeof window !== 'undefined' ? `${window.location.origin}/icon.svg` : '/icon.svg',
   })
 );

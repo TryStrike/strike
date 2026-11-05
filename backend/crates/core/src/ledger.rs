@@ -4,20 +4,19 @@
 //! or clock — handlers pass rows, secrets and timestamps in explicitly, and
 //! tests pin every branch offline. The HTTP layer in the server crate
 //! (`routes/balance_mutation.rs`) owns I/O; this module owns validation
-//! order, amount math and the exact JSON bodies the TypeScript routes emit.
+//! order, amount math and the exact JSON bodies.
 //!
-//! Wire-parity rules inherited from the TS implementation:
+//! Wire rules:
 //!   * a `Rejection` is `(status, body)` and reproduces `NextResponse.json`
 //!     byte-for-byte, key order included (`serde_json/preserve_order`);
-//!   * every check fires in the TS source order, including the quirks that
+//!   * every check fires in a fixed order, including the quirks that
 //!     decide which 400 a caller gets (e.g. bet validates the ban *before*
 //!     the positivity check, withdraw crashes on `currency.toUpperCase()`
 //!     before it ever reaches the address);
 //!   * money that only JS touches in f64 (balance comparisons, the token's
 //!     `toFixed(8)` ceiling) is ported as the same f64 operations. Fees are not:
 //!     [`split_fee`] is exact, because a float fee could not be sent on-chain.
-//!     Multi-row cap totals keep the TS exact-integer path
-//!     (`amount_to_base_units`, the port of `lib/balance/ledgerMath.ts`).
+//!     Multi-row cap totals use the exact-integer `amount_to_base_units`.
 //!
 //! Deliberate, documented deviations:
 //!   * `amount_to_base_units` saturates at `i128::MAX` where JS BigInt would
@@ -441,7 +440,7 @@ pub struct BetHead<'a> {
     pub bet_amount: &'a Value,
     /// `Number(betAmount)` — used for every comparison; the *original* value
     /// is what reaches the RPC (a stringified amount must land verbatim, as
-    /// node-pg stringified it for the TS).
+    /// the driver stringified it).
     pub amount: f64,
 }
 
@@ -868,18 +867,6 @@ pub fn deposit_pending_body(reason: &str, confirmations: Option<u64>) -> (u16, V
 
 pub const MIN_CONFIRMATIONS_TS: u64 = 3;
 
-/// Terminal on-chain rejection: 400 with the verifier's message embedded.
-pub fn deposit_invalid_body(message: &str) -> (u16, Value) {
-    (
-        400,
-        json!({
-            "error": format!("Deposit transaction is not valid: {message}"),
-            "retryable": false,
-            "code": "amount_mismatch_placeholder",
-        }),
-    )
-}
-
 /// Same, with the real reason code.
 pub fn deposit_terminal(reason: &str, message: &str) -> (u16, Value) {
     (
@@ -1163,8 +1150,7 @@ pub fn withdraw_signature_mismatch() -> Rejection {
     )
 }
 
-/// The exact EIP-191 message from `withdraw` (mirrors
-/// `lib/balance/withdrawalIntent.ts` call sites): the *raw* userAddress
+/// The exact EIP-191 message from `withdraw`: the *raw* userAddress
 /// spelling, `amount.toFixed(8)`, the uppercased currency and the raw
 /// signedAt. `amount.toFixed` throws on anything that is not a number — the
 /// outer catch answers 500.

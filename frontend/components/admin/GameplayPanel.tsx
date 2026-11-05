@@ -6,7 +6,7 @@
  * real/demo account split and the global filters deep-link via URL params.
  */
 
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { apiExportQuery, apiListQuery, type DashFilters } from './dashQuery';
 import { EmptyState, ErrorState, Pagination, Table, THead, shortenAddress } from './AdminUi';
 import { useAdminFetch } from './useAdminFetch';

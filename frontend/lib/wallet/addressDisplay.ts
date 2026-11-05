@@ -22,7 +22,7 @@ export interface WalletLabelInput {
   address?: string | null;
   /** ENS name (or other resolution) when the app has one. */
   ens?: string | null;
-  /** Arbitrary human label (Privy email, ConnectKit connector name…). */
+  /** Arbitrary human label (e.g. a ConnectKit connector name). */
   label?: string | null;
   head?: number;
   tail?: number;

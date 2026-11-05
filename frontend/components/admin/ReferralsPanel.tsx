@@ -6,7 +6,7 @@
  * computed before pagination (no post-slicing of a page).
  */
 
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { apiListQuery, type DashFilters } from './dashQuery';
 import { EmptyState, ErrorState, Pagination, Table, THead, shortenAddress } from './AdminUi';
@@ -79,7 +79,6 @@ export default function ReferralsPanel({
                                                     >
                                                         {shortenAddress(u.user_address)} ↗
                                                     </a>
-                                                    <span className="block text-[11px] text-faint">{u.username || 'Anonymous'}</span>
                                                 </td>
                                                 <td className="px-8 py-6 font-black text-ink uppercase tracking-widest">{u.referral?.referral_code}</td>
                                                 <td className="px-8 py-6 text-subtle font-mono text-xs">

@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useStore } from '@/lib/store';
 import { useWalletClient, useAccount } from 'wagmi';
-import { useWallets, type ConnectedWallet } from '@privy-io/react-auth';
-import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
 import {
   CheckCircle as CheckCircle2,
   Clock as Clock3,
@@ -239,7 +237,7 @@ function bucketOf(v: WithdrawalViewModel): FilterKey {
   return 'review';
 }
 
-function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[] }) {
+export default function WithdrawalsPage() {
   const address = useStore((s) => s.address);
   const isConnected = useStore((s) => s.isConnected);
 
@@ -294,11 +292,7 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
         const signer = await new ethers.BrowserProvider(provider as never).getSigner();
         signature = await signer.signMessage(message);
       } else {
-        const privyWallet =
-          privyWallets.find((w) => w.type === 'ethereum' && w.address?.toLowerCase() === address.toLowerCase()) ??
-          privyWallets.find((w) => w.type === 'ethereum');
-        if (!privyWallet?.sign) throw new ReadAuthNeededError('no_signer');
-        signature = await privyWallet.sign(message);
+        throw new ReadAuthNeededError('no_signer');
       }
     } catch (e) {
       if (e instanceof ReadAuthNeededError) throw e;
@@ -311,7 +305,7 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
     const value = JSON.stringify({ address, issuedAt, nonce, signature });
     proofCache.current = { value, issuedAt, forAddress: address };
     return value;
-  }, [address, walletClient, connector, privyWallets]);
+  }, [address, walletClient, connector]);
 
   const load = useCallback(
     async (mode: 'refresh' | 'more') => {
@@ -502,7 +496,7 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
               <p className="font-bold uppercase text-[11px] tracking-widest text-up">Read authorization needed</p>
               <p className="mt-1">
                 {authIssue === 'no_signer'
-                  ? 'No signer is available for the connected wallet. Reconnect via MetaMask/WalletConnect or log in with Privy, then authorize.'
+                  ? 'No signer is available for the connected wallet. Reconnect your wallet, then authorize.'
                   : authIssue === 'invalid'
                     ? 'The read authorization was rejected by the server. Please authorize again with your wallet.'
                     : 'You declined (or the list authorization lapsed). Viewing your withdrawal statuses requires a one-time wallet signature — it only authorizes reading YOUR OWN request history and cannot move funds.'}
@@ -719,15 +713,3 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
   );
 }
 
-function WithdrawalsPageWithPrivy() {
-  const { wallets } = useWallets();
-  return <WithdrawalsPageInner privyWallets={wallets} />;
-}
-
-export default function WithdrawalsPage() {
-  const privyEnabled = usePrivyEnabled();
-  if (!privyEnabled) {
-    return <WithdrawalsPageInner privyWallets={[]} />;
-  }
-  return <WithdrawalsPageWithPrivy />;
-}

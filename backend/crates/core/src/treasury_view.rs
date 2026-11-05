@@ -1,4 +1,4 @@
-//! Live on-chain view of the treasury contract (`app/api/arc/treasury/route.ts`).
+//! Live on-chain view of the treasury contract.
 //!
 //! The landing page polls this, so it is read straight from the Arc RPC and
 //! CDN-cached briefly. Everything that can be decided without a socket — the
@@ -144,8 +144,7 @@ pub fn parse_transfer_logs(
 }
 
 /// Deposits first, then payouts, ordered by descending block and truncated.
-/// The sort is stable, so two events in the same block keep that order — the
-/// TypeScript relied on the same property of `Array.prototype.sort`.
+/// The sort is stable, so two events in the same block keep that order.
 pub fn top_events(
     deposits: &[TransferEvent],
     payouts: &[TransferEvent],

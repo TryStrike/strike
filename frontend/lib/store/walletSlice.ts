@@ -150,13 +150,8 @@ export const createWalletSlice: StateCreator<WalletState> = (set, get) => ({
 
   /**
    * Disconnect wallet
-   * Note: Actual disconnection is handled by Privy integration
    */
   disconnect: () => {
-    const state = get() as any;
-    const accountType = state.accountType;
-
-    // Reset state
     set({
       address: null,
       walletBalance: 0,
@@ -168,17 +163,6 @@ export const createWalletSlice: StateCreator<WalletState> = (set, get) => ({
       connectingSince: null,
       lastError: null
     } as any);
-
-    // Only clear profile data if we are NOT in demo mode AND don't have an access code
-    // When exiting demo mode, we want to keep the accessCode to show the "Demo Mode" button
-    // Also if the user just refreshed, we want to keep the accessCode if it exists
-    const currentAccessCode = state.accessCode;
-    if (accountType !== 'demo' && !currentAccessCode) {
-      set({
-        username: null,
-        accessCode: null
-      } as any);
-    }
   },
 
   /**

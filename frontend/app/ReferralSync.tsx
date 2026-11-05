@@ -47,7 +47,7 @@ function ReferralSyncInner() {
     );
 
     // Capture the incoming code as soon as the URL is known — BEFORE any wallet is
-    // connected. Privy embedded wallets arrive asynchronously, so the code has to
+    // connected. Wallets reconnect asynchronously, so the code has to
     // be persisted to the store/localStorage here; the attach below happens later.
     useEffect(() => {
         let captured = false;
@@ -73,10 +73,8 @@ function ReferralSyncInner() {
         if (syncInFlight.has(address)) return;
         syncInFlight.add(address);
         (async () => {
-            const state = useStore.getState();
             try {
-                await state.syncOnConnect(address);
-                await useStore.getState().fetchRecentTrades(address);
+                await useStore.getState().syncOnConnect(address);
             } finally {
                 syncInFlight.delete(address);
             }

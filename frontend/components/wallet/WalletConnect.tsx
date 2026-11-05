@@ -2,14 +2,11 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { usePrivy } from '@privy-io/react-auth';
 import { useStore, useHouseBalance } from '@/lib/store';
-import { formatUsdc } from '@/lib/profile/format';
 import { useShallow } from 'zustand/react/shallow';
 import { CaretDown, Check, CopySimple, SignOut, Wallet } from '@phosphor-icons/react';
 import { glassPrimary } from '@/components/ui/kit';
-import { useAccount, useDisconnect as useWagmiDisconnect, useEnsName, useSwitchChain } from 'wagmi';
-import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
+import { useAccount, useDisconnect as useWagmiDisconnect, useSwitchChain } from 'wagmi';
 import { arcChainLabel, arcTargetChainId } from '@/lib/wallet/arcChain';
 import { classifyConnectError, safeConnectErrorMessage } from '@/lib/wallet/connectErrors';
 import { isConnectingPhase } from '@/lib/wallet/connectMachine';
@@ -36,16 +33,7 @@ function Spinner() {
   );
 }
 
-function WalletConnectButton({
-  ready,
-  privyLabel,
-  logoutPrivy,
-}: {
-  ready: boolean;
-  /** Email/username from a Privy session, used as a human label when set. */
-  privyLabel?: string | null;
-  logoutPrivy?: () => void;
-}) {
+export const WalletConnect: React.FC = () => {
   const { address: wagmiAddress, connector, isConnected: wagmiConnected, chainId } = useAccount();
   const { disconnect: wagmiDisconnect } = useWagmiDisconnect();
   const { switchChainAsync } = useSwitchChain();
@@ -85,17 +73,15 @@ function WalletConnectButton({
     if (stored.length > 0) setRecentWallets(stored);
   }, [setRecentWallets]);
 
-  // Resolve success from the single source of truth (store address,
-  // set by WalletSync for both wagmi and Privy-embedded wallets). Also
-  // adopts an already-restored session on mount (idle -> authed).
+  // The store address (set by WalletSync) is the source of truth. Also adopts
+  // an already-restored session on mount (idle -> authed).
   useEffect(() => {
     if (address && connectPhase !== 'authed') {
       dispatchConnectEvent({ type: 'CONNECT_SUCCESS' });
     }
   }, [address, connectPhase, dispatchConnectEvent]);
 
-  // Remember the wallet for one-tap reconnect (wagmi path only — embedded
-  // Privy sessions have no connector to re-open).
+  // Remember the wallet for one-tap reconnect.
   const recordedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!wagmiConnected || !wagmiAddress || !connector) return;
@@ -106,7 +92,7 @@ function WalletConnectButton({
     saveRecentWallets(useStore.getState().recentWallets);
   }, [wagmiConnected, wagmiAddress, connector, recordRecentWallet]);
 
-  // Wallet (or Privy) ended an authed session -> disconnected.
+  // Wallet ended an authed session -> disconnected.
   useEffect(() => {
     if (connectPhase === 'authed' && !address) {
       dispatchConnectEvent({ type: 'DISCONNECT' });
@@ -128,17 +114,12 @@ function WalletConnectButton({
   const targetChainId = arcTargetChainId();
   const wrongNetwork = wagmiConnected && chainId != null && chainId !== targetChainId;
 
-  // ENS when the connected chain actually ships an ENS registry; elsewhere
-  // (Arc has no ENS contracts) the label falls through to Privy/connector.
-  const ensEnabled = wagmiConnected && (chainId === 1 || chainId === 5 || chainId === 11155111);
-  const { data: ensName } = useEnsName({ address: wagmiAddress, query: { enabled: ensEnabled } });
 
   const isConnected = !!address;
   const pending = isConnectingPhase(connectPhase);
   const stalePending = pending && connectingSince !== null && Date.now() - connectingSince > STALE_CONNECT_MS;
 
   const handleDisconnect = () => {
-    logoutPrivy?.();
     wagmiDisconnect();
     disconnectStore();
     dispatchConnectEvent({ type: 'DISCONNECT' });
@@ -162,10 +143,6 @@ function WalletConnectButton({
       setLastError({ kind, message: safeConnectErrorMessage(err) });
     }
   }, [switchChainAsync, targetChainId, setLastError]);
-
-  if (!ready) {
-    return <div className="h-9 w-32 animate-pulse rounded-full bg-surface" />;
-  }
 
   if (!isConnected) {
     const disabled = pending && !stalePending;
@@ -202,8 +179,6 @@ function WalletConnectButton({
 
   const label = displayNameForWallet({
     address: wagmiAddress ?? address,
-    ens: ensName,
-    label: privyLabel,
   });
 
   return (
@@ -290,7 +265,7 @@ function AccountMenu({
         >
           <div className="px-3 pb-2 pt-1.5">
             <p className="font-jet text-[11px] uppercase tracking-[0.14em] text-faint">Balance</p>
-            <p className="font-jet text-lg font-semibold tabular-nums">{formatUsdc(balance)} USDC</p>
+            <p className="font-jet text-lg font-semibold tabular-nums">{balance.toFixed(2)} USDC</p>
           </div>
           <button type="button" role="menuitem" onClick={onCopy} title={address} className={item}>
             <span className="truncate font-jet text-[13px]">{truncateAddress(address)}</span>
@@ -322,18 +297,3 @@ const ERROR_SUMMARY: Record<string, string> = {
   timeout: 'Connection timed out',
   unknown: 'Connection failed',
 };
-
-function WalletConnectWithPrivy() {
-  const { logout, ready, authenticated, user } = usePrivy();
-  const optionalUsername = (user as { username?: string } | null)?.username;
-  const privyLabel = authenticated ? (user?.email?.address ?? optionalUsername ?? null) : null;
-  return <WalletConnectButton ready={ready} privyLabel={privyLabel} logoutPrivy={logout} />;
-}
-
-export const WalletConnect: React.FC = () => {
-  const privyEnabled = usePrivyEnabled();
-  if (!privyEnabled) {
-    return <WalletConnectButton ready />;
-  }
-  return <WalletConnectWithPrivy />;
-}

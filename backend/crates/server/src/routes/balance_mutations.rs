@@ -1,13 +1,13 @@
 //! `/api/balance/{bet,deposit,win,withdraw}` — the house-ledger mutations.
 //!
-//! Ports `app/api/balance/{bet,deposit,win,withdraw}/route.ts`. This is the thin
+//! This is the thin
 //! HTTP transport `strike_core::ledger` was written for: guard the session, read
 //! the body, and let the core module decide validation order, amount maths and
 //! the exact JSON bodies. What lives here is the I/O —
-//!   * SQL reads that reproduce the PostgREST `select/in/eq` calls the TS made,
-//!   * `db::call_rpc` with the *same named parameters* the TS passed, and
+//!   * SQL reads,
+//!   * `db::call_rpc` into the ledger functions, and
 //!   * the on-chain calls (`verify_deposit`, the treasury fee transfer, EIP-191
-//!     recovery) that the TS reached through `ethers`.
+//!     recovery).
 //!
 //! The four ledger functions this family drives:
 //!   * `place_bet_locked` — bet: the bet_lock row plus `deduct_balance_for_bet`,
@@ -18,9 +18,8 @@
 //!   * withdraw writes `withdrawal_requests` only: the balance is debited later,
 //!     by the admin accept route, through `update_balance_for_withdrawal`.
 //!
-//! Order is the specification. Every route runs its checks in the TS source
-//! order, including the quirks that decide *which* 400 a caller gets, so a
-//! request refused before now is refused before then.
+//! Order is the specification. Every route runs its checks in a fixed order,
+//! including the quirks that decide *which* 400 a caller gets.
 
 // `!(x > 0)` is the NaN-safe spelling; `Rejection` is the wire body on purpose.
 #![allow(clippy::neg_cmp_op_on_partial_ord, clippy::result_large_err)]
@@ -146,8 +145,7 @@ async fn balance_rows(variants: &[String], currency: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The `verifier.reason` spelling from `lib/balance/verifyArcDepositTx.ts`. The
-/// Rust `DepositFailure` carries the message but not the machine-readable code,
+/// The machine-readable deposit failure code. `DepositFailure` carries the message but not the machine-readable code,
 /// and the deposit body echoes the code back so the caller can branch on it.
 fn failure_reason(failure: &DepositFailure) -> &'static str {
     match failure {
@@ -229,7 +227,7 @@ async fn tier_for(user_key: &str) -> ledger::Tier {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/balance/bet  <-  app/api/balance/bet/route.ts
+// POST /api/balance/bet
 // ---------------------------------------------------------------------------
 
 async fn bet(headers: HeaderMap, raw: Bytes) -> Response {
@@ -407,7 +405,7 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/balance/deposit  <-  app/api/balance/deposit/route.ts
+// POST /api/balance/deposit
 // ---------------------------------------------------------------------------
 
 async fn deposit(headers: HeaderMap, raw: Bytes) -> Response {
@@ -706,7 +704,7 @@ async fn release_deposit_lock(tx_hash: &str, reason: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/balance/win  <-  app/api/balance/win/route.ts
+// POST /api/balance/win
 // ---------------------------------------------------------------------------
 
 async fn win(headers: HeaderMap, raw: Bytes) -> Response {
@@ -769,7 +767,7 @@ async fn win_run(body: &Value) -> Result<Value, ledger::Rejection> {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/balance/withdraw  <-  app/api/balance/withdraw/route.ts
+// POST /api/balance/withdraw
 // ---------------------------------------------------------------------------
 
 async fn withdraw(headers: HeaderMap, raw: Bytes) -> Response {

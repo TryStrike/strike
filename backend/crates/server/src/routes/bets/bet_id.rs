@@ -1,4 +1,4 @@
-//! `GET /api/bets/:id` — `app/api/bets/[id]/route.ts`.
+//! `GET /api/bets/:id`.
 //!
 //! Settlement proof for one bet, read with BOTH the id and the caller's
 //! canonical wallet in the predicate so a foreign bet is indistinguishable from

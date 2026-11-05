@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Same .env the TypeScript service reads; a missing file is normal in containers,
+/// The root .env.local. A missing file is normal in containers,
 /// where the variables come from the environment directly. Only `dir` itself is
 /// looked at: `dotenvy::from_filename` walks up parent directories, which would
 /// let a worktree pick up the checkout's live env.

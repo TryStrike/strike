@@ -1,56 +1,28 @@
-//! Admin MUTATION routes — the POST/DELETE half of `app/api/admin/*`.
-//!
-//! Ports, with the guards in the original order:
-//!   * `GET    /api/admin/access-codes`               (paged list)
-//!   * `POST   /api/admin/access-codes`               (generate codes)
-//!   * `POST   /api/admin/banned-wallets`             (add a ban)
-//!   * `DELETE /api/admin/banned-wallets`             (remove a ban)
-//!   * `POST   /api/admin/unban-wallet`               (unban + wipe + audit)
-//!   * `POST   /api/admin/users/status`               (freeze/ban/activate)
-//!   * `POST   /api/admin/withdrawal-requests/{id}/accept`
-//!   * `POST   /api/admin/withdrawal-requests/{id}/reject`
-//!
-//! The GET halves are read routes owned by the read-porting agent. The TS
-//! `currencies`, `danger-zone` and `users` routes export no mutators at all
-//! (`app/api/admin/currencies/route.ts` etc. are GET-only), so no POST/PUT/
-//! DELETE is registered for them here — exactly what Next.js exposes.
-//!
-//! The pure validation/amount/aggregation logic lives in
-//! `strike_core::admin_writes` / `strike_core::admin_writes_extra`; this module
-//! is transport, SQL with typed binds (`crate::sql`), and the exact JSON error
-//! bodies the TS routes produced.
-//!
-//! One deliberate hardening runs throughout: every string the TS echoed from a
-//! thrown error passes through `admin_writes::sanitize_error_text` first, so a
-//! pg/reqwest internal becomes the route's own fallback string instead of a
-//! connection-string leak. Operator-authored messages — short, single-line
-//! strings like "Insufficient house balance for acceptance" — pass through
-//! byte-identical, so the client-visible shape is unchanged for every failure
-//! the TS could actually produce.
+//! Admin mutation routes: bans, user status, and withdrawal accept/reject.
+//! Validation and amount logic lives in `strike_core::admin_writes`. Every echoed
+//! error passes through `sanitize_error_text`, so a driver internal becomes the
+//! route's fallback string.
 
 use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::Path;
 use axum::extract::Query;
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Map, Value};
 
 use strike_core::address::{canonical, search_variants};
-use strike_core::admin_reads_a::{parse_list_params, url_query_pairs, ListOptions};
-use strike_core::admin_reads_extra_b::{load_access_codes, ACCESS_CODE_STATUS_VALUES};
 use strike_core::admin_writes::{
     aggregate_withdrawal_stats, ban_reason, combined_tx_hash, danger_zone_json,
     frequency_review_candidates, frequency_user_json, js_number_string, parse_request_id,
-    plan_payout, reconciliation_note, respond_supabase_error, sanitize_error_text, scans_json,
-    sort_frequency_users, stale_intent_message, suspicious_user_json, verify_withdrawal_intent,
-    wallet_address_too_long, win_streak_hits, wipe_audit_rows, within_accept_window,
-    AUDIT_SCAN_CAP, BET_SCAN_CAP, PENDING_SCAN_CAP, SCAN_PAGE,
+    plan_payout, reconciliation_note, sanitize_error_text, scans_json, sort_frequency_users,
+    stale_intent_message, suspicious_user_json, verify_withdrawal_intent, wallet_address_too_long,
+    win_streak_hits, wipe_audit_rows, within_accept_window, AUDIT_SCAN_CAP, BET_SCAN_CAP,
+    PENDING_SCAN_CAP, SCAN_PAGE,
 };
-use strike_core::admin_writes_extra::{access_code_count, generate_access_codes};
 use strike_core::bets::{is_truthy, iso_ms, now_ms, number_coerce, to_number, value_to_string};
 use strike_core::config::{config, USDC_DECIMALS};
 use strike_core::db;
@@ -64,9 +36,6 @@ use crate::bans::is_globally_banned;
 use crate::http;
 use crate::sql;
 
-/// Columns the access-codes route selects after inserting, in TS order.
-const ACCESS_CODE_COLUMNS: &str = "id, code, is_used, wallet_address, used_at, created_at";
-
 /// Columns the accept/reject routes select explicitly ("to avoid exposing
 /// sensitive future columns"); the lists differ per route, as in the TS.
 const ACCEPT_REQUEST_COLUMNS: &str = "id, user_address, currency, amount, net_amount, fee_amount, \
@@ -74,19 +43,8 @@ const ACCEPT_REQUEST_COLUMNS: &str = "id, user_address, currency, amount, net_am
 const REJECT_REQUEST_COLUMNS: &str = "id, user_address, currency, amount, net_amount, fee_amount, \
     requested_at, status, decided_by, tx_hash, created_at";
 
-/// The production-only service-role gate of the banned-wallets family
-/// (`requireServiceRoleInProduction`). The TS `isSupabaseServiceRoleConfigured`
-/// is literally `Boolean(process.env.DATABASE_URL?.trim())`, so the Rust
-/// equivalent is a missing `DATABASE_URL` in a production deployment. The body
-/// text stays byte-identical because the browser bundle is unchanged.
-const SERVICE_ROLE_MISSING: &str = "SUPABASE_SERVICE_KEY is not set on this server. In Vercel: Settings → Environment Variables → add SUPABASE_SERVICE_KEY (Supabase Dashboard → Project Settings → API → service_role secret). Redeploy.";
-
 pub fn routes() -> Router {
     Router::new()
-        .route(
-            "/api/admin/access-codes",
-            get(access_codes_list).post(access_codes_generate),
-        )
         .route("/api/admin/danger-zone", get(danger_zone))
         .route(
             "/api/admin/banned-wallets",
@@ -121,25 +79,15 @@ fn catch_500(err: &ApiError, fallback: &str) -> Response {
     error(StatusCode::INTERNAL_SERVER_ERROR, safe)
 }
 
-/// The access-codes / banned-wallets catch: `appendSupabaseServiceKeyHint`
-/// around the echoed message, 500.
-fn hinted_catch_500(err_text: &str, fallback: &str) -> Response {
-    let safe = sanitize_error_text(err_text, fallback);
-    let body = strike_core::admin_writes::append_service_key_hint(&safe);
-    error(StatusCode::INTERNAL_SERVER_ERROR, body)
-}
-
-/// The banned-wallets statement-error responder: missing-table 503 with the
-/// migration nudge, otherwise a sanitized 500 (`respondSupabaseError`).
-fn supabase_statement_error(err_text: &str, fallback: &str) -> Response {
-    let (status, body) = respond_supabase_error(err_text, fallback);
-    http::json_status(
-        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        body,
+/// Sanitized `{ error }` 500 for the banned-wallets routes.
+fn admin_500(err_text: &str, fallback: &str) -> Response {
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        sanitize_error_text(err_text, fallback),
     )
 }
 
-/// `id, code, …` row fields default to JSON null, like PostgREST columns.
+/// A missing row field reads as JSON null.
 fn row_field<'a>(row: &'a Value, key: &str) -> &'a Value {
     row.get(key).unwrap_or(&Value::Null)
 }
@@ -150,95 +98,18 @@ fn text_binds(values: &[Value]) -> Vec<(&str, &Value)> {
 }
 
 // ---------------------------------------------------------------------------
-// GET + POST /api/admin/access-codes
-// ---------------------------------------------------------------------------
-
-async fn access_codes_list(headers: HeaderMap, uri: Uri) -> Response {
-    if let Err(deny) = http::require_admin(&headers) {
-        return deny.into_response();
-    }
-    let pairs = url_query_pairs(uri.query().unwrap_or(""));
-    let opts = ListOptions {
-        status_values: Some(&ACCESS_CODE_STATUS_VALUES),
-        extra_enums: &[],
-    };
-    let parsed = match parse_list_params(&pairs, &opts) {
-        Ok(parsed) => parsed,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
-    };
-    match load_access_codes(&parsed).await {
-        Ok(body) => axum::Json(body).into_response(),
-        Err(err) => {
-            tracing::error!("[admin/access-codes] {err}");
-            hinted_catch_500(&err.to_string(), "Failed to load access codes")
-        }
-    }
-}
-
-async fn access_codes_generate(headers: HeaderMap, raw: Bytes) -> Response {
-    if let Err(deny) = http::require_admin(&headers) {
-        return deny.into_response();
-    }
-    match generate_codes_run(&raw).await {
-        Ok(response) => response,
-        // Statement failures land on the same hinted 500 the TS catch emits.
-        Err(err) => {
-            tracing::error!("[admin/access-codes] {err}");
-            hinted_catch_500(&err.to_string(), "Failed to generate access codes")
-        }
-    }
-}
-
-async fn generate_codes_run(raw: &Bytes) -> ApiResult<Response> {
-    // `let body: { count?: number } = {}; try { body = await request.json() }
-    // catch { body = {} }`: malformed JSON is not an error here, it just means
-    // "count was not given". A parsed non-object body has `.count === undefined`
-    // in JS, which is what `Value::get` on a non-object also yields.
-    let body: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
-    let count = access_code_count(&body);
-    let codes = generate_access_codes(count);
-
-    let owned: Vec<Value> = codes.iter().map(|c| Value::String(c.clone())).collect();
-    let binds = text_binds(&owned);
-    let values: Vec<String> = (1..=codes.len())
-        .map(|i| format!("(CAST(${i} AS text))"))
-        .collect();
-    let rows = sql::fetch(
-        &format!(
-            "INSERT INTO access_codes (code) VALUES {} RETURNING {ACCESS_CODE_COLUMNS}",
-            values.join(", ")
-        ),
-        &binds,
-    )
-    .await?;
-
-    Ok(axum::Json(json!({ "codes": rows })).into_response())
-}
-
-// ---------------------------------------------------------------------------
 // POST /api/admin/banned-wallets
 // ---------------------------------------------------------------------------
-
-/// `requireServiceRoleInProduction()`: runs after the admin deny, in TS order.
-fn service_role_gate() -> Option<Response> {
-    if config().production && config().sqlite_path.is_none() {
-        return Some(error(StatusCode::SERVICE_UNAVAILABLE, SERVICE_ROLE_MISSING));
-    }
-    None
-}
 
 async fn ban_add(headers: HeaderMap, raw: Bytes) -> Response {
     if let Err(deny) = http::require_admin(&headers) {
         return deny.into_response();
     }
-    if let Some(block) = service_role_gate() {
-        return block;
-    }
     match serde_json::from_slice::<Value>(&raw) {
         Err(_) => error(StatusCode::BAD_REQUEST, "Invalid JSON body."),
         Ok(body) => match ban_add_run(body).await {
             Ok(response) => response,
-            Err(text) => supabase_statement_error(&text, "Failed to add ban"),
+            Err(text) => admin_500(&text, "Failed to add ban"),
         },
     }
 }
@@ -272,9 +143,8 @@ async fn ban_add_run(body: Value) -> Result<Response, String> {
     .await
     .map_err(|err| err.to_string())?;
 
-    // `single()` with zero rows is a PostgREST error, not a null body; the
-    // upsert always returns its row, so this only fires on a trigger that
-    // swallowed it — which the TS answered through the same responder.
+    // The upsert always returns its row, so this only fires on a trigger that
+    // swallowed it.
     match rows.into_iter().next() {
         Some(ban) => Ok(axum::Json(json!({ "success": true, "ban": ban })).into_response()),
         None => Err("banned_wallets: upsert returned no rows".to_string()),
@@ -288,9 +158,6 @@ async fn ban_add_run(body: Value) -> Result<Response, String> {
 async fn ban_remove(headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Response {
     if let Err(deny) = http::require_admin(&headers) {
         return deny.into_response();
-    }
-    if let Some(block) = service_role_gate() {
-        return block;
     }
     // `searchParams.get('walletAddress') || ''`, then trim.
     let wallet_address = query
@@ -318,7 +185,7 @@ async fn ban_remove(headers: HeaderMap, Query(query): Query<HashMap<String, Stri
         // `.delete().eq(...)` reports no row-count error: zero rows deleted is
         // still `{ success: true }`, so a wrong spelling simply no-ops.
         Ok(_) => axum::Json(json!({ "success": true })).into_response(),
-        Err(err) => supabase_statement_error(&err.to_string(), "Failed to remove ban"),
+        Err(err) => admin_500(&err.to_string(), "Failed to remove ban"),
     }
 }
 
@@ -925,7 +792,7 @@ async fn reject_run(id: i64) -> ApiResult<Response> {
 
 /// `scanPages()`: page a bounded read 1000 rows at a time and report whether
 /// the hard cap was reached, so the dashboard can warn about under-reporting
-/// instead of silently truncating at PostgREST's old 1000-row default.
+/// instead of silently truncating.
 async fn scan_pages(
     columns: &str,
     table: &str,

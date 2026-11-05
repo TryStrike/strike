@@ -2,13 +2,11 @@
 
 import React, { useCallback, useState } from 'react';
 import { useStore } from '@/lib/store';
-import { useLogin } from '@privy-io/react-auth';
 import { useModal } from 'connectkit';
 import { useConnect, useConnectors, useSwitchChain } from 'wagmi';
 import { useToast } from '@/lib/hooks/useToast';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CaretRight, ClockCounterClockwise, EnvelopeSimple, Wallet, WarningCircle, X } from '@phosphor-icons/react';
-import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
+import { CaretRight, ClockCounterClockwise, Wallet, WarningCircle, X } from '@phosphor-icons/react';
 import { arcChainLabel, arcTargetChainId } from '@/lib/wallet/arcChain';
 import { classifyConnectError, safeConnectErrorMessage } from '@/lib/wallet/connectErrors';
 import { connectCopyForError, isConnectingPhase } from '@/lib/wallet/connectMachine';
@@ -52,33 +50,6 @@ function OptionRow({ icon: Icon, title, description, onClick, busy, disabled }: 
             </span>
             <CaretRight size={16} className="shrink-0 text-faint transition-colors group-hover:text-ink" />
         </button>
-    );
-}
-
-function PrivySocialLoginButton({ onConnected, disabled }: { onConnected: () => void; disabled?: boolean }) {
-    const toast = useToast();
-    // useLogin exposes the onError callback (PrivyInterface.login has none),
-    // so rejected/failed logins surface in the app toast instead of silently.
-    const { login } = useLogin({
-        onError: (error?: unknown) => {
-            const kind = classifyConnectError(error);
-            useStore.getState().dispatchConnectEvent({ type: 'CONNECT_FAILURE', error: kind });
-            toast.error(connectCopyForError(kind)?.title ?? 'Sign-in failed. Please try again.');
-        },
-    });
-
-    return (
-        <OptionRow
-            icon={EnvelopeSimple}
-            title="Email or social"
-            description="Sign in with Google, X or email."
-            disabled={disabled}
-            onClick={() => {
-                useStore.getState().dispatchConnectEvent({ type: 'START_CONNECT' });
-                login();
-                onConnected();
-            }}
-        />
     );
 }
 
@@ -182,7 +153,6 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
 export const WalletConnectModal: React.FC = () => {
     const isOpen = useStore(state => state.isConnectModalOpen);
     const setOpen = useStore(state => state.setConnectModalOpen);
-    const privyEnabled = usePrivyEnabled();
     const { setOpen: openConnectKit } = useModal();
     const connectPhase = useStore((s) => s.connectPhase);
     const recentWallets = useStore((s) => s.recentWallets);
@@ -251,9 +221,6 @@ export const WalletConnectModal: React.FC = () => {
                             disabled={pending}
                             onClick={handleArcConnect}
                         />
-                        {privyEnabled ? (
-                            <PrivySocialLoginButton onConnected={() => setOpen(false)} disabled={pending} />
-                        ) : null}
                     </div>
 
                     <ErrorPanel />

@@ -2,20 +2,15 @@
 //!
 //! The transport half of the admin read family. `strike_core::admin_reads_a`
 //! already owns the parameter parsing, the SQL text, the typed binds and the
-//! response shapes for `stats` and `mode-analytics` (their heavy logic is shared
-//! with the public `/api/stats` aggregate), so this module only adds the
-//! `requireAdminAuth` guard and the wire call. `transactions` mirrors its Next
-//! route — a fixed, unparameterised 50-row read — and `player-ledger` /
-//! `wallet-insights` have no pure counterpart in core (the aggregation was
-//! PostgREST-shaped client code), so the money math lives here as private
-//! helpers, transcribed field-for-field from the TypeScript.
+//! response shapes for `stats` and `mode-analytics`, so this module only adds
+//! the admin guard and the wire call. `player-ledger` and `wallet-insights` have
+//! no pure counterpart in core, so their money math lives here as private
+//! helpers.
 //!
 //! Every handler is `guard → run → Json / err.into_response()`; the guard's
 //! 401/503 and the query's 500 ride on `ApiError`'s `IntoResponse`, which
-//! produces the `{ error }` body the Next routes answer with. The raw DB error
-//! is logged, never echoed (see `crates/core/src/error.rs`): the Next routes
-//! returned `error.message` verbatim, which the migration deliberately replaces
-//! with the leak-safe `ApiError` message while keeping the status and shape.
+//! produces the `{ error }` body. The raw DB error is logged, never echoed (see
+//! `crates/core/src/error.rs`).
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -161,8 +156,7 @@ async fn run_mode_analytics(headers: &HeaderMap) -> ApiResult<Value> {
 // ---------------------------------------------------------------------------
 
 /// The recent deposit/withdrawal feed: server-side filtering + paging over the
-/// audit log, exactly as `app/api/admin/transactions/route.ts` (`parseListParams`
-/// with `statusValues: ['deposit','withdrawal']`, currency/q/from/to filters,
+/// audit log (status `deposit`/`withdrawal`, currency/q/from/to filters,
 /// `created_at DESC, id DESC`, `{transactions,total,limit,offset}` body).
 async fn transactions(headers: HeaderMap, uri: Uri) -> Response {
     if let Err(err) = require_admin(&headers) {
@@ -233,19 +227,7 @@ async fn run_player_ledger(params: &ListParams) -> ApiResult<Value> {
     // Real bet stats, paginated to walk past the old row cap.
     let bets = scan_bets().await?;
 
-    // Display names. `user_profiles` errors are swallowed (the TS destructured
-    // only `data`), degrading to "no usernames" rather than a 500.
-    let profiles = match fetch("SELECT user_address, username FROM user_profiles", &[]).await {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::warn!(
-                "[admin/player-ledger] user_profiles read failed, usernames dropped: {err}"
-            );
-            Vec::new()
-        }
-    };
-
-    let mut players = build_players(&audit, &balances, &bets, &profiles);
+    let mut players = build_players(&audit, &balances, &bets);
     // The range is over the first deposit, so a wallet with none drops out of it.
     players.retain(|row| matches_list_filters_on(row, params, "first_deposit_at"));
     let total = players.len();
@@ -298,12 +280,11 @@ struct LedgerRow {
     total_fees_paid: f64,
     /// True when `platform_fee` rows exist; otherwise fees are estimated.
     has_explicit_fee: bool,
-    username: Value,
     first_deposit_at: Option<String>,
 }
 
 impl LedgerRow {
-    fn new(user_address: Value, currency: Value, username: Value) -> Self {
+    fn new(user_address: Value, currency: Value) -> Self {
         Self {
             user_address,
             currency,
@@ -316,7 +297,6 @@ impl LedgerRow {
             total_payout: 0.0,
             total_fees_paid: 0.0,
             has_explicit_fee: false,
-            username,
             first_deposit_at: None,
         }
     }
@@ -326,20 +306,7 @@ impl LedgerRow {
 /// balances fill `current_balance`, real bets add the wagering columns, a
 /// back-calculation estimates historical fees, then each row gains its P&L and
 /// the list is sorted by earliest deposit.
-fn build_players(
-    audit: &[Value],
-    balances: &[Value],
-    bets: &[Value],
-    profiles: &[Value],
-) -> Vec<Value> {
-    // profileMap[canonical(addr)] = username — last row wins, as the TS forEach.
-    let mut profile_map: HashMap<String, Value> = HashMap::new();
-    for row in profiles {
-        let key = canonical_of(row.get("user_address").unwrap_or(&Value::Null));
-        let username = row.get("username").cloned().unwrap_or(Value::Null);
-        profile_map.insert(key, username);
-    }
-
+fn build_players(audit: &[Value], balances: &[Value], bets: &[Value]) -> Vec<Value> {
     let mut order: Vec<String> = Vec::new();
     let mut map: HashMap<String, LedgerRow> = HashMap::new();
 
@@ -353,10 +320,9 @@ fn build_players(
         let address = canonical_of(&raw_address);
         let currency = row.get("currency").cloned().unwrap_or(Value::Null);
         let key = format!("{}::{}", address, value_to_string(&currency));
-        let username = profile_map.get(&address).cloned().unwrap_or(Value::Null);
         let entry = map.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
-            LedgerRow::new(Value::String(address), currency.clone(), username)
+            LedgerRow::new(Value::String(address), currency.clone())
         });
 
         let amount = number_or_zero(row.get("amount"));
@@ -396,10 +362,9 @@ fn build_players(
         let address = canonical_of(&raw_address);
         let currency = row.get("currency").cloned().unwrap_or(Value::Null);
         let key = format!("{}::{}", address, value_to_string(&currency));
-        let username = profile_map.get(&address).cloned().unwrap_or(Value::Null);
         let entry = map.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
-            LedgerRow::new(Value::String(address), currency.clone(), username)
+            LedgerRow::new(Value::String(address), currency.clone())
         });
         entry.current_balance += number_or_zero(row.get("balance"));
     }
@@ -415,13 +380,11 @@ fn build_players(
         let currency =
             resolve_house_ledger_currency(row.get("asset")).unwrap_or_else(|_| "USDC".to_string());
         let key = format!("{wallet}::{currency}");
-        let username = profile_map.get(&wallet).cloned().unwrap_or(Value::Null);
         let entry = map.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
             LedgerRow::new(
                 Value::String(wallet.clone()),
                 Value::String(currency.clone()),
-                username,
             )
         });
         entry.total_bets += 1;
@@ -487,7 +450,6 @@ fn build_players(
                 "_has_explicit_fee".into(),
                 Value::Bool(row.has_explicit_fee),
             );
-            obj.insert("username".into(), row.username);
             obj.insert("first_deposit_at".into(), first_deposit_at);
             obj.insert("net_pnl".into(), json_number(net_pnl));
             obj.insert("house_pnl".into(), json_number(house_pnl));
@@ -593,15 +555,6 @@ async fn run_wallet_insights(
              status, decided_by, tx_hash, created_at \
              FROM withdrawal_requests WHERE user_address IN ({in_clause}) \
              ORDER BY requested_at DESC LIMIT 500"
-        ),
-        &variant_refs,
-    )
-    .await?;
-
-    let profile_rows = fetch(
-        &format!(
-            "SELECT user_address, username, access_code, updated_at FROM user_profiles \
-             WHERE user_address IN ({in_clause}) LIMIT 1"
         ),
         &variant_refs,
     )
@@ -823,26 +776,7 @@ async fn run_wallet_insights(
     );
     aggregates.insert("summary".into(), Value::Object(summary));
 
-    // --- profile / referral projections (three / three fields) --------------
-    let profile = profile_rows
-        .first()
-        .map(|row| {
-            let mut obj = Map::new();
-            obj.insert(
-                "username".into(),
-                row.get("username").cloned().unwrap_or(Value::Null),
-            );
-            obj.insert(
-                "access_code".into(),
-                row.get("access_code").cloned().unwrap_or(Value::Null),
-            );
-            obj.insert(
-                "updated_at".into(),
-                row.get("updated_at").cloned().unwrap_or(Value::Null),
-            );
-            Value::Object(obj)
-        })
-        .unwrap_or(Value::Null);
+    // --- referral projection --------------------------------------------
 
     let referral = referral_rows
         .first()
@@ -873,7 +807,6 @@ async fn run_wallet_insights(
     body.insert("bannedGlobally".into(), Value::Bool(banned_globally));
     body.insert("balances".into(), Value::Array(balance_rows_out));
     body.insert("aggregates".into(), Value::Object(aggregates));
-    body.insert("profile".into(), profile);
     body.insert("referral".into(), referral);
     body.insert(
         "recentAudit".into(),

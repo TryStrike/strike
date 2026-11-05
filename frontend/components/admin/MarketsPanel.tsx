@@ -7,7 +7,7 @@
  * 40th feed is shareable.
  */
 
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { apiListQuery, type DashFilters } from './dashQuery';
 import { EmptyState, ErrorState, Pagination, Table, THead } from './AdminUi';
 import { useAdminFetch } from './useAdminFetch';

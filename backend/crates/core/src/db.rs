@@ -53,7 +53,10 @@ pub const SCHEMA_SQL: &str = include_str!("../../../schema.sql");
 const SEED_MARKER: &str = "-- SEED";
 /// Changes after version 1, oldest first; entry `n` moves a file to `n + 2`. The
 /// baseline in [`SCHEMA_SQL`] is frozen: a new column goes here.
-const MIGRATIONS: &[&str] = &[];
+const MIGRATIONS: &[&str] = &[
+    // 2: usernames, access codes and the waitlist had no reader or writer left.
+    "DROP TABLE IF EXISTS user_profiles; DROP TABLE IF EXISTS access_codes; DROP TABLE IF EXISTS waitlist;",
+];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 
@@ -808,16 +811,6 @@ pub fn typed_param(type_name: &str, value: &Value) -> ApiResult<Param> {
     }
 }
 
-/// `CAST($idx AS <type>)` when the type is known and safe to write, otherwise a
-/// bare placeholder. Used by the /api/db gateway, where filters must be compared
-/// in the column's own type.
-pub fn typed_placeholder(idx: usize, type_name: Option<&str>) -> String {
-    match type_name.filter(|t| is_safe_type_expression(t)) {
-        Some(t) => format!("CAST(${idx} AS {t})"),
-        None => format!("${idx}"),
-    }
-}
-
 /// Types reach SQL only from `crate::schema`, never from a client. Still: allow
 /// only the characters a real type expression can contain, so a future code path
 /// cannot smuggle SQL through a type name.
@@ -976,13 +969,6 @@ mod tests {
         ] {
             assert!(!is_safe_type_expression(bad), "accepted {bad}");
         }
-    }
-
-    #[test]
-    fn placeholder_casts_only_when_the_type_is_known() {
-        assert_eq!(typed_placeholder(1, Some("numeric")), "CAST($1 AS numeric)");
-        assert_eq!(typed_placeholder(3, None), "$3");
-        assert_eq!(typed_placeholder(2, Some("bad; type")), "$2");
     }
 
     #[test]

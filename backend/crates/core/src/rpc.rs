@@ -1,11 +1,5 @@
-//! The ledger functions, ported line by line from plpgsql.
-//!
-//! Sources: `supabase/migrations/008_ledger_integrity.sql` for `place_bet_locked`,
-//! `002_banned_wallets.sql` for the four balance functions (it overrides 001),
-//! `001_complete_schema.sql` for `increment_referral_count`,
-//! `normalize_ban_address` and `is_wallet_globally_banned`. [`settle_round`] has
-//! no plpgsql source: it replaced `settle_bet_payout`, which paid an amount the
-//! caller named.
+//! The ledger functions: `place_bet_locked`, the four balance functions,
+//! `increment_referral_count`, the ban checks and [`settle_round`].
 //!
 //! Every call is one savepoint in a write batch on the writer connection, so
 //! `SELECT ... FOR UPDATE` has no equivalent here: the write lock is already held

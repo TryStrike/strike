@@ -1,11 +1,8 @@
 //! `/api/admin/*` — the read side of the admin dashboard.
 //!
-//! Transport only, mirroring `app/api/admin/{users,game-history,treasury-balances,
-//! currencies,banned-wallets,withdrawal-requests/pending,export}/route.ts`. The
-//! heavy lifting is `strike_core::admin_reads_a` (users / game-history loaders and
+//! Transport only. The heavy lifting is `strike_core::admin_reads_a` (users / game-history loaders and
 //! the shared list-param parser) and `strike_core::admin_reads_extra_b` (the reads
-//! `admin_reads_a` does not cover). Each handler runs the same steps in the same
-//! order as the TS: `requireAdminAuth` first, then query parsing (a rejected
+//! `admin_reads_a` does not cover). Each handler runs the admin guard first, then query parsing (a rejected
 //! param is a client-safe 400 echoed verbatim), then the read, and finally the
 //! route's own leak-safe 500 text on failure.
 //!
@@ -145,9 +142,7 @@ async fn currencies(headers: HeaderMap) -> Response {
     }
 }
 
-/// `GET /api/admin/banned-wallets`. The Supabase service-key prod guard has no
-/// analog on the direct Postgres pool, so it is not reproduced; the missing-table
-/// (503) vs. failure (500) split is.
+/// `GET /api/admin/banned-wallets`.
 async fn banned_wallets(headers: HeaderMap) -> Response {
     if let Err(err) = require_admin(&headers) {
         return err.into_response();
@@ -200,9 +195,7 @@ async fn export(headers: HeaderMap, uri: Uri) -> Response {
     let dataset = match extra::resolve_dataset(admin_reads_a::param(&params, "dataset")) {
         Some(dataset) => dataset,
         None => {
-            return bad_request(
-                "Unknown dataset. Allowed: transactions, game_history, access_codes.".to_string(),
-            )
+            return bad_request("Unknown dataset. Allowed: transactions, game_history.".to_string())
         }
     };
 
@@ -211,7 +204,6 @@ async fn export(headers: HeaderMap, uri: Uri) -> Response {
             (Some(&admin_reads_a::TRANSACTION_STATUS_VALUES[..]), false)
         }
         extra::ExportDataset::GameHistory => (Some(&admin_reads_a::GAME_STATUS_VALUES[..]), true),
-        extra::ExportDataset::AccessCodes => (Some(&extra::ACCESS_CODE_STATUS_VALUES[..]), false),
     };
     let account_enums: [(&str, &[&str]); 1] = [("account", &admin_reads_a::ACCOUNT_VALUES[..])];
     let no_enums: [(&str, &[&str]); 0] = [];

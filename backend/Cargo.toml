@@ -13,8 +13,6 @@ axum = { version = "0.8", features = ["ws", "macros", "query"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
 rusqlite = { version = "0.37", features = ["bundled", "functions", "hooks"] }
-# Only the Postgres-to-SQLite migration tool still talks to Postgres.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }

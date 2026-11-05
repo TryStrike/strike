@@ -27,9 +27,6 @@ export interface ActiveBet {
   timestamp: number;
   status: 'active' | 'settled';
   network?: string; // Track which network (currency) this bet uses
-  /** Account type (demo/real) frozen at placement time — settlement must use
-   *  this, never the live store value, in case the user toggles mid-round. */
-  accountType?: 'real' | 'demo';
   /** Wallet address captured at placement time — used for settlement even if
    *  the user disconnects their wallet before the round resolves. */
   userAddress?: string;
@@ -431,7 +428,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         multiplier = target.multiplier;
       }
 
-      // Freeze the round clock and account type at CLICK time — not after the
+      // Freeze the round clock at CLICK time — not after the
       // fetch resolves — so strike/endTime honestly reflect when the bet began.
       const clickTime = Date.now();
       const betEndTime =
@@ -440,64 +437,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
           : metadata?.endTime ?? clickTime + durationSeconds * 1000;
       // One id per bet intent; the server dedupes retried POSTs with it.
       const betRequestId = crypto.randomUUID();
-
-      // DEMO MODE: Skip API call for demo mode
-      const { accountType, demoBalance, updateBalance: storeUpdateBalance } = get();
-      const isDemoMode = accountType === 'demo';
-
-      if (isDemoMode) {
-        if (demoBalance < betAmount) {
-          throw new Error("Insufficient demo balance");
-        }
-
-        // Simulate bet placement without API
-        const fakeBetId = `demo-${Date.now()}`;
-
-        const selectedCurrency = (get() as any).selectedCurrency;
-        const currency = resolveHouseLedgerCurrency({
-          selectedCurrency,
-        });
-
-        // Create active bet for tracking
-        const activeBet: ActiveBet = {
-          id: fakeBetId,
-          mode: gameMode,
-          asset: selectedAsset, // Set current asset
-          amount: betAmount,
-          multiplier: multiplier,
-          direction: direction,
-          timestamp: clickTime,
-          status: 'active',
-          network: currency,
-          accountType, // Frozen at placement — settlement uses this, not the live store value
-          userAddress,
-          ...(gameMode === 'binomo' ? {
-            strikePrice: currentPrice,
-            endTime: betEndTime
-          } : {
-            cellId: cellId || targetId,
-            priceTop: metadata?.priceTop,
-            priceBottom: metadata?.priceBottom,
-            startTime: metadata?.startTime,
-            endTime: metadata?.endTime
-          })
-        };
-
-
-        // Update local demo balance immediately
-        storeUpdateBalance(betAmount, 'subtract');
-
-        // Add to active bets
-        addActiveBet(activeBet);
-
-        set({ isPlacingBet: false, error: null });
-
-        return {
-          betId: fakeBetId,
-          remainingBalance: demoBalance - betAmount,
-          bet: activeBet
-        };
-      }
 
       const selectedCurrency = (get() as any).selectedCurrency;
       const currency = resolveHouseLedgerCurrency({
@@ -582,7 +521,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         timestamp: clickTime,
         status: 'active',
         network: currency, // Save the currency identifier used (e.g. XLM, NEAR, PC)
-        accountType, // Frozen at placement — settlement uses this, not the live store value
         userAddress: userAddress, // Capture address at placement time for settlement
         settlementToken: data.settlementToken,
         ...(gameMode === 'binomo' ? {
@@ -776,13 +714,13 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
   /**
    * End a round on screen. For a real bet `won` and `payout` are only the
    * optimistic display: the server decides, and `reconcileRound` replaces them
-   * with its answer. Demo bets have no server, so these are their result.
+   * with its answer.
    * @param betId - The bet ID to resolve
    * @param won - Whether the bet looks won
    * @param payout - The payout it looks like it earned
    */
   resolveBet: (betId: string, won: boolean, payout: number) => {
-    const { activeBets, currentPrice, address, network, accountType, fetchBalance } = get();
+    const { activeBets, currentPrice, address, network, fetchBalance } = get();
     const resolvedBet = activeBets.find((b: ActiveBet) => b.id === betId);
 
     // Cancel the wall-clock watchdog first: whichever path (tick or clock)
@@ -790,9 +728,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
     clearRoundTimer(betId);
 
     if (resolvedBet) {
-      // Use the account type frozen at placement; never the live store value
-      // (the user may have toggled demo/real mid-round).
-      const betAccountType = resolvedBet.accountType ?? accountType;
       const now = Date.now();
 
       // Play sound effects
@@ -820,13 +755,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
       // Falls back to current store address in case of older bets without it.
       const settlementAddress = resolvedBet.userAddress || address;
       const settlementCurrency = resolvedBet.network || network || 'USDC';
-
-      // ── Handle Balance Update ──────────────────────────────────────────────
-      if (won && betAccountType === 'demo') {
-        // Credit the frozen demo account directly (updateBalance branches on
-        // the live accountType, which may have been toggled mid-round).
-        set((state: any) => ({ demoBalance: state.demoBalance + payout }));
-      }
 
       // Also add to persistent local history store
       const anyGet = get() as any;
@@ -892,7 +820,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         return null;
       };
 
-      if (betAccountType === 'real' && settlementAddress) {
+      if (settlementAddress) {
         void (async () => {
           const result = await reconcileRound();
           if (fetchBalance) fetchBalance(settlementAddress);
@@ -919,32 +847,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
             endPrice: result.endPrice ?? historyRecord.endPrice,
           });
         })();
-      }
-
-      // ── Save to Supabase bet_history ──────────────────────────────────────
-      // Demo bets only: a real bet's row is written by the server when it settles.
-      const isDemoBet = String(resolvedBet.id).toLowerCase().startsWith('demo-');
-      if (settlementAddress) {
-        if (betAccountType === 'demo' && isDemoBet) {
-          fetch('/api/bets/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              id: resolvedBet.id,
-              walletAddress: settlementAddress,
-              asset: resolvedBet.asset || 'BNB',
-              direction: resolvedBet.direction,
-              amount: resolvedBet.amount,
-              multiplier: resolvedBet.multiplier,
-              strikePrice: resolvedBet.strikePrice || 0,
-              endPrice: currentPrice,
-              payout: payout,
-              won: won,
-              mode: resolvedBet.mode,
-              network: settlementCurrency,
-            }),
-          }).catch(err => console.error('Failed to save demo bet to Supabase:', err));
-        }
       }
     }
   },

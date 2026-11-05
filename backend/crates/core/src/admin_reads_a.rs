@@ -1,18 +1,13 @@
 //! The admin read family: `/api/admin/{stats,users,transactions,game-history,
 //! mode-analytics}` plus `POST /api/admin/users/status`.
 //!
-//! Port of the six `app/api/admin/**/route.ts` handlers and what they import
-//! (`lib/admin/adminError.ts`, `lib/admin/listParams.ts`,
-//! `lib/admin/walletAddressVariants.ts`, `lib/wallet/canonicalAddress.ts`,
-//! `lib/balance/houseLedgerCurrency.ts`, `lib/admin/computeStats.ts`).
-//!
 //! Split like `crate::platform_stats`: every decision that does not need a
 //! socket is a pure function here (param parsing, clamping, aggregation,
 //! projection, the SQL text + typed binds), and the async half is a thin scan
 //! that only moves rows. The handlers in
 //! `crates/server/src/routes/admin_reads_a.rs` add the guard and the wire shape.
 //!
-//! Wire discipline inherited from the TS, restated because it is load-bearing:
+//! Wire discipline, load-bearing:
 //!   * **Bind typing.** Each placeholder carries the column's logical type as
 //!     `CAST($n AS <type>)` (see [`Binds`] and `crate::db`), which decides how the
 //!     value is stored. The types below are the primitive ones of
@@ -25,15 +20,13 @@
 //!     named key list *after* the SELECT, so widening a column list cannot ship
 //!     a private column — the `routes/withdrawals.rs` discipline.
 //!   * **Numbers.** `NUMERIC(30,10)` reaches us as a JSON number via
-//!     `crate::db`, which is what the TS sent too (`pg.types` parser =
-//!     `parseFloat`), so `balance` / `amount` / `payout` stay numbers on both
-//!     sides. Where the TS *compared* one as a string (`currency`, `network`,
+//!     `crate::db`, so `balance` / `amount` / `payout` stay numbers on the
+//!     wire. Where a TEXT column is compared (`currency`, `network`,
 //!     `asset`, `id` are TEXT and were lowercased/uppercased), that happens here
 //!     on the JSON string column. No column is read as an exact decimal.
-//!   * **Errors.** `adminErrorResponse` logs the cause and echoes
-//!     `sanitizeErrorMessage(err, fallback)`, so a UI-safe message survives and
-//!     anything SQL/connection/stack-shaped becomes the route's own fallback.
-//!     [`sanitize_error_message`] is that function, without a regex engine.
+//!   * **Errors.** Logged, then echoed through [`sanitize_error_message`], so a
+//!     UI-safe message survives and anything SQL/connection/stack-shaped becomes
+//!     the route's own fallback.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -57,7 +50,7 @@ pub const LIST_MAX_LIMIT: i64 = 200;
 pub const LIST_MAX_OFFSET: i64 = 100_000;
 /// `LIST_MAX_QUERY_LENGTH`; the rejection fires at twice this raw length.
 pub const LIST_MAX_QUERY_LENGTH: usize = 100;
-/// `PAGE` / `SCAN_PAGE`: the PostgREST-era row cap every scan walks past.
+/// `PAGE` / `SCAN_PAGE`: rows per scan page.
 pub const SCAN_PAGE: i64 = 1_000;
 /// `SCAN_CAP` from the game-history account filter: the in-memory ceiling.
 pub const SCAN_CAP: usize = 20_000;
@@ -67,9 +60,9 @@ pub const MAX_CLIENT_MESSAGE_LENGTH: usize = 220;
 /// `user_balances` columns the users route reads (and ships).
 const BALANCE_SELECT: &str =
     "user_address, currency, balance, status, user_tier, updated_at, created_at";
-/// The keys one user row may carry: the seven balance columns, then the four
+/// The keys one user row may carry: the seven balance columns, then the three
 /// merged fields the dashboard reads. Nothing else reaches the client.
-pub const USER_ROW_KEYS: [&str; 11] = [
+pub const USER_ROW_KEYS: [&str; 10] = [
     "user_address",
     "currency",
     "balance",
@@ -78,7 +71,6 @@ pub const USER_ROW_KEYS: [&str; 11] = [
     "updated_at",
     "created_at",
     "tier",
-    "username",
     "activity",
     "referral",
 ];
@@ -724,8 +716,6 @@ pub fn looks_like_internal_error(message: &str) -> bool {
         || contains_ci(message, "ECONNRESET")
         || contains_ci(message, "ETIMEDOUT")
         || contains_ci(message, "ENOTFOUND")
-        || contains_ci(message, "DATABASE_URL")
-        || contains_ci(message, "SUPABASE_SERVICE")
         || contains_ci(message, "API_KEY")
         || contains_ci(message, "APIKEY")
         || contains_ci(message, "API KEY")
@@ -1067,7 +1057,6 @@ pub fn build_user_rows(
     balances: &[Value],
     bets: &[Value],
     referrals: &[Value],
-    profiles: &[Value],
     now_iso: &str,
 ) -> ApiResult<Vec<Value>> {
     let activity = aggregate_user_activity(bets);
@@ -1084,17 +1073,6 @@ pub fn build_user_rows(
             row.clone(),
         );
     }
-    let mut profile_map: HashMap<String, String> = HashMap::new();
-    for row in profiles {
-        let username = match row.get("username") {
-            Some(Value::String(s)) => s.clone(),
-            _ => String::new(),
-        };
-        profile_map.insert(
-            canonical_of(row.get("user_address").unwrap_or(&Value::Null)),
-            username,
-        );
-    }
 
     let users: Vec<Value> = merged
         .iter()
@@ -1104,16 +1082,6 @@ pub fn build_user_rows(
             row.insert(
                 "tier".into(),
                 b.get("user_tier").cloned().unwrap_or(Value::Null),
-            );
-            // `profileMap[addr] || null` — an empty username is null on the wire.
-            let username = profile_map.get(&addr).cloned().unwrap_or_default();
-            row.insert(
-                "username".into(),
-                if username.is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(username)
-                },
             );
             row.insert(
                 "activity".into(),
@@ -1213,11 +1181,7 @@ pub fn matches_list_filters_on(row: &Value, p: &ListParams, time_field: &str) ->
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_lowercase();
-        let username = match row.get("username") {
-            Some(Value::String(s)) => s.to_lowercase(),
-            _ => String::new(),
-        };
-        if !address.contains(&needle) && !username.contains(&needle) {
+        if !address.contains(&needle) {
             return false;
         }
     }
@@ -1314,11 +1278,10 @@ pub fn users_page(
     balances: &[Value],
     bets: &[Value],
     referrals: &[Value],
-    profiles: &[Value],
     p: &ListParams,
     now_iso: &str,
 ) -> ApiResult<UsersPage> {
-    let rows = build_user_rows(balances, bets, referrals, profiles, now_iso)?;
+    let rows = build_user_rows(balances, bets, referrals, now_iso)?;
     let filtered: Vec<Value> = rows
         .into_iter()
         .filter(|row| matches_list_filters(row, p))
@@ -1371,7 +1334,6 @@ pub const MISSING_ADDRESS_OR_STATUS: &str = "Missing userAddress or status";
 pub const ADDRESS_TOO_LONG: &str = "userAddress is too long";
 pub const INVALID_STATUS: &str = "Invalid status";
 pub const INVALID_ADDRESS: &str = "Invalid wallet address";
-pub const INVALID_JSON_BODY: &str = "Invalid JSON body.";
 
 /// Validates the JSON body and yields `(variants, status)` to apply.
 ///
@@ -1939,9 +1901,8 @@ pub fn mode_analytics_body(all: &[Value]) -> Value {
 // The thin fetch half
 // ---------------------------------------------------------------------------
 
-/// Walks a statement a `SCAN_PAGE` window at a time. The TS did the same to get
-/// past PostgREST's 1 000-row default; the window is `LIMIT/OFFSET` with typed
-/// binds, so no row is missed and none is counted twice.
+/// Walks a statement a `SCAN_PAGE` window at a time. The window is
+/// `LIMIT/OFFSET` with typed binds, so no row is missed and none is counted twice.
 ///
 /// `statement` is everything *up to* the window clause (it must carry its own
 /// `ORDER BY` if the scan is to be deterministic), and takes no binds — every
@@ -1979,17 +1940,13 @@ async fn run_prepared(prepared: &Prepared) -> ApiResult<(Vec<Value>, i64)> {
 }
 
 /// `computePlatformStats()` + the admin-only sums. The aggregate itself is
-/// `platform_stats::aggregate` — one source of truth shared with `/api/stats/public`.
+/// `platform_stats::aggregate` for the admin dashboard.
 pub async fn load_admin_stats(now_ms: i64) -> ApiResult<Value> {
     let stats = crate::platform_stats::compute(now_ms).await?;
     Ok(admin_stats_body(&stats))
 }
 
-/// The five reads the users route issues.
-///
-/// `user_profiles` errors are swallowed on purpose: the TS destructured only
-/// `data` from that query, so a profile failure degrades to "no usernames"
-/// instead of a 500. Every other failure is fatal, as it was there.
+/// The reads the users route issues. Any failure is fatal.
 pub async fn load_users(p: &ListParams, now_ms: i64) -> ApiResult<UsersPage> {
     let balances = scan_all(&format!(
         "SELECT {BALANCE_SELECT} FROM user_balances ORDER BY updated_at DESC"
@@ -2010,16 +1967,8 @@ pub async fn load_users(p: &ListParams, now_ms: i64) -> ApiResult<UsersPage> {
     )
     .await?;
 
-    let profiles = match db::fetch("SELECT user_address, username FROM user_profiles", &[]).await {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::warn!("[admin/users] user_profiles read failed, usernames dropped: {err}");
-            Vec::new()
-        }
-    };
-
     let now_iso = crate::bets::iso_ms(now_ms);
-    users_page(&balances, &bets, &referrals, &profiles, p, &now_iso)
+    users_page(&balances, &bets, &referrals, p, &now_iso)
 }
 
 pub async fn load_transactions(p: &ListParams) -> ApiResult<Value> {
@@ -2062,13 +2011,6 @@ pub async fn load_mode_analytics() -> ApiResult<Value> {
     ))
     .await?;
     Ok(mode_analytics_body(&rows))
-}
-
-/// `UPDATE … SET status` for the users/status route. Rows affected is returned
-/// but, like the TS, never inspected: the route answers success regardless.
-pub async fn apply_user_status(variants: &[String], status: &str) -> ApiResult<u64> {
-    let prepared = status_update(variants, status);
-    db::execute(&prepared.sql, &prepared.row_refs()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2317,8 +2259,6 @@ mod tests {
             "duplicate key value violates unique constraint \"x_pkey\"",
             "connect ECONNREFUSED 10.0.0.3:5432",
             "connection pool timeout",
-            "Invalid or missing DATABASE_URL",
-            "password authentication failed for user \"neondb_owner\"",
             "{\"severity\":\"ERROR\",\"code\":\"42P01\",\"detail\":\"x\"}",
             "Error: boom\n    at handler (/app/route.ts:10:5)",
             "ERROR: relation pg_class not found — SQL state 42P01",
@@ -2333,7 +2273,6 @@ mod tests {
             "check the WHERE clause again",
             "plpgsql raised something",
             "node_modules/pg/lib/index.js blew up",
-            "missing api_key for neon",
         ];
         for leak in leaks {
             assert!(
@@ -2519,7 +2458,6 @@ mod tests {
             &balances,
             &poisoned,
             &[],
-            &[],
             &ListParams::default(),
             "2026-05-05T00:00:00.000Z",
         )
@@ -2542,15 +2480,8 @@ mod tests {
             "user_address": "0xABC", "referral_code": "ARC2026", "referral_count": 4,
             "referred_by": "0xother",
         })];
-        let profiles = vec![json!({ "user_address": "0xabc", "username": "satoshi" })];
-        let rows = build_user_rows(
-            &balances,
-            &bets,
-            &referrals,
-            &profiles,
-            "2026-05-05T00:00:00.000Z",
-        )
-        .unwrap();
+        let rows =
+            build_user_rows(&balances, &bets, &referrals, "2026-05-05T00:00:00.000Z").unwrap();
         assert_eq!(
             rows.len(),
             1,
@@ -2563,13 +2494,11 @@ mod tests {
             "the stored spelling ships, not the canonical one"
         );
         assert_eq!(row["tier"], json!("free"));
-        assert_eq!(row["username"], json!("satoshi"));
         assert_eq!(row["activity"]["totalBets"], json!(1));
         assert_eq!(row["referral"]["referral_code"], json!("ARC2026"));
         assert_eq!(row["referral"]["referred_by"], json!("0xother"));
 
-        let bare = build_user_rows(&balances, &[], &[], &[], "2026-05-05T00:00:00.000Z").unwrap();
-        assert_eq!(bare[0]["username"], Value::Null);
+        let bare = build_user_rows(&balances, &[], &[], "2026-05-05T00:00:00.000Z").unwrap();
         assert_eq!(bare[0]["referral"]["referral_code"], json!("NONE"));
         assert_eq!(bare[0]["referral"]["referral_count"], json!(0));
         assert_eq!(bare[0]["activity"]["totalVolume"], json!(0));
@@ -2596,17 +2525,17 @@ mod tests {
     fn list_filters_narrow_the_aggregated_rows() {
         let rows: Vec<Value> = vec![
             json!({ "user_address": "0xAbC", "currency": "USDC", "status": "Active",
-                    "username": "Alice", "updated_at": "2026-01-05T00:00:00.000Z" }),
+                    "updated_at": "2026-01-05T00:00:00.000Z" }),
             json!({ "user_address": "0xdef", "currency": "BOT", "status": "banned",
-                    "username": null, "updated_at": "2026-01-02T00:00:00.000Z" }),
+                    "updated_at": "2026-01-02T00:00:00.000Z" }),
             json!({ "user_address": "0xff0", "currency": "USDC", "status": "frozen",
-                    "username": "", "updated_at": "nonsense" }),
+                    "updated_at": "nonsense" }),
         ];
         let referral_enum = [("referrers", &["1"][..])];
         let o = opts(Some(&USER_STATUS_VALUES), &referral_enum);
 
-        let by_q = parsed(&[("q", "ALICE")], &o);
-        // The row address is matched case-insensitively, the username too.
+        let by_q = parsed(&[("q", "ABC")], &o);
+        // The row address is matched case-insensitively.
         let hits: Vec<&Value> = rows
             .iter()
             .filter(|r| matches_list_filters(r, &by_q))
@@ -2674,20 +2603,20 @@ mod tests {
 
     #[test]
     fn users_page_reports_the_filtered_total_and_projects_the_whitelist() {
-        let balances = vec![balance(
+        let mut balances = vec![balance(
             "0xabc",
             "USDC",
             1.0,
             "active",
             "2026-01-02T00:00:00.000Z",
         )];
+        balances[0]["secret_note"] = json!("risk flag");
         let referral_enum = [("referrers", &["1"][..])];
         let o = opts(Some(&USER_STATUS_VALUES), &referral_enum);
         let page = users_page(
             &balances,
             &[],
             &[],
-            &[json!({ "user_address": "0xabc", "username": "", "secret_note": "risk flag" })],
             &parsed(&[], &o),
             "2026-05-05T00:00:00.000Z",
         )
@@ -2696,10 +2625,9 @@ mod tests {
         let body = page.to_value();
         assert_eq!(body["users"].as_array().unwrap().len(), 1);
         let row = &body["users"][0];
-        assert_eq!(row["username"], Value::Null, "an empty username is null");
         // Nothing outside the key list can ride along, even if a SELECT widened.
         let rendered = row.to_string();
-        assert!(!rendered.contains("risk-"), "{rendered}");
+        assert!(!rendered.contains("risk flag"), "{rendered}");
         for key in USER_ROW_KEYS {
             assert!(row.get(key).is_some(), "{key} must always be present");
         }

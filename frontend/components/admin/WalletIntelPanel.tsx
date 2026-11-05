@@ -6,7 +6,7 @@
  * shareable/reloadable and the fetch is driven by the shared polling nonce.
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { isDemoBetHistoryRow } from '@/lib/admin/walletAddressVariants';
 import { type DashFilters } from './dashQuery';
 import { EmptyState, ErrorState } from './AdminUi';
@@ -15,7 +15,6 @@ import { useAdminFetch } from './useAdminFetch';
 interface WalletIntel {
     query: string;
     bannedGlobally?: boolean;
-    profile?: { username?: string | null };
     referral?: { referral_code: string; referral_count: number; referred_by?: string | null };
     balances?: any[];
     timeOnPlatform?: any;
@@ -320,10 +319,7 @@ export default function WalletIntelPanel({
                             </div>
                         </div>
                         <div className="rounded-2xl border border-line bg-surface p-6 space-y-2">
-                            <p className="text-xs font-black uppercase tracking-widest text-subtle">Profile &amp; referrals</p>
-                            <p className="text-sm text-muted">
-                                Username: <span className="text-ink font-mono">{data.profile?.username || '—'}</span>
-                            </p>
+                            <p className="text-xs font-black uppercase tracking-widest text-subtle">Referrals</p>
                             {data.referral && (
                                 <p className="text-xs text-muted font-mono">
                                     Code {data.referral.referral_code} · {data.referral.referral_count} referrals

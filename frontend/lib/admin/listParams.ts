@@ -21,7 +21,7 @@ export const LIST_MAX_CURRENCY_LENGTH = 16;
 export interface ParsedListParams {
     limit: number;
     offset: number;
-    /** Lowercased, trimmed search term (addresses / usernames / ids). */
+    /** Lowercased, trimmed search term (addresses / ids). */
     q: string | null;
     /** Validated enum value for the route's status filter. */
     status: string | null;

@@ -1,19 +1,17 @@
 //! Pure logic behind `/api/bets/*`: query-param parsing, row classification,
-//! aggregation, ranking and JSON formatting. Mirrors
-//! `app/api/bets/history/route.ts`, `stats/statsCore.ts`,
-//! `leaderboard/leaderboardCore.ts`, `[id]/route.ts` and `save/route.ts`.
+//! aggregation and JSON formatting.
 //!
 //! Everything here is side-effect free (no DB, no network, no clock): the
 //! handlers pass `now_ms()` explicitly, and tests can pin the clock through
 //! `CLOCK_OVERRIDE` or by handing the pure functions their own instant.
 //!
-//! Wire-shape rules inherited from the TS routes:
+//! Wire-shape rules:
 //!   * JSON numbers print through `js_num`, so integral floats are `10`, not
 //!     `10.0` (JSON.stringify semantics) and non-finite values become `null`;
 //!   * `round` implements JS `Math.round` (half toward +infinity) at 6
 //!     decimals — Rust's `f64::round` is half-away-from-zero and would drift;
-//!   * demo/play-money rows drop out via `is_demo_bet_row`, the port of
-//!     `isDemoBetHistoryRow`, before any aggregate is computed.
+//!   * demo/play-money rows drop out via `is_demo_bet_row` before any
+//!     aggregate is computed.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
@@ -100,11 +98,6 @@ pub fn parse_float_prefix_str(s: &str) -> Option<f64> {
         }
     }
     s[..end].parse::<f64>().ok()
-}
-
-/// `parseFloat(value)` from the save route: coerces to string, then prefix-parses.
-pub fn parse_float_prefix(value: &Value) -> f64 {
-    parse_float_prefix_str(&value_to_string(value)).unwrap_or(f64::NAN)
 }
 
 /// `toNumber` from statsCore/leaderboardCore: NaN and Infinity collapse to 0.
@@ -213,8 +206,6 @@ pub fn js_num(n: f64) -> Value {
 // Dates
 // ---------------------------------------------------------------------------
 
-pub const MS_PER_DAY: i64 = 86_400_000;
-
 /// `Date.parse` for the shapes these routes accept: `YYYY-MM-DD` (UTC
 /// midnight, per ECMA-262) and full ISO-8601 with `Z` or `±hh:mm`. A naive
 /// zone-less datetime is treated as UTC — JS would read it in the server's
@@ -254,15 +245,6 @@ pub fn iso_ms(ms: i64) -> String {
         .map(|dt| dt.naive_utc())
         .unwrap_or_default();
     format!("{}Z", naive.format("%Y-%m-%dT%H:%M:%S%.3f"))
-}
-
-/// `new Date(ms)` floored to the UTC calendar instant.
-pub fn utc_midnight_ms(ms: i64) -> i64 {
-    let mut day = ms.div_euclid(MS_PER_DAY);
-    if ms < 0 {
-        day -= 1;
-    }
-    day * MS_PER_DAY
 }
 
 // ---------------------------------------------------------------------------
@@ -488,11 +470,7 @@ pub fn decorate_history_row(row: &Value) -> Value {
     Value::Object(map)
 }
 
-// ---------------------------------------------------------------------------
-// /api/bets/save — upsert field coercion
-// ---------------------------------------------------------------------------
-
-/// JS truthiness on a JSON value (`!x` in the TS routes).
+/// JS truthiness on a JSON value.
 pub fn is_truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -500,34 +478,6 @@ pub fn is_truthy(value: Option<&Value>) -> bool {
         Some(Value::Number(n)) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(true),
         Some(Value::String(s)) => !s.is_empty(),
         Some(_) => true,
-    }
-}
-
-/// `asset || 'BNB'` — any falsy value takes the default.
-pub fn save_string_or_default(body: &Value, key: &str, default: &str) -> String {
-    match body.get(key) {
-        Some(v) if is_truthy(Some(v)) => value_to_string(v),
-        _ => default.to_string(),
-    }
-}
-
-/// `parseFloat(x) || fallback` — NaN and 0 both take the fallback.
-pub fn save_float_or(body: &Value, key: &str, fallback: f64) -> f64 {
-    let parsed = parse_float_prefix(body.get(key).unwrap_or(&Value::Null));
-    if parsed.is_finite() && parsed != 0.0 {
-        parsed
-    } else {
-        fallback
-    }
-}
-
-/// `parseFloat(x) || 0` — NaN lands on 0.
-pub fn save_float(body: &Value, key: &str) -> f64 {
-    let parsed = parse_float_prefix(body.get(key).unwrap_or(&Value::Null));
-    if parsed.is_finite() {
-        parsed
-    } else {
-        0.0
     }
 }
 
@@ -792,15 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn save_coercions_match_the_ts_defaults() {
-        let body = json!({"asset": "", "direction": null, "multiplier": 0, "amount": "10.5xyz", "won": "yes"});
-        assert_eq!(save_string_or_default(&body, "asset", "BNB"), "BNB");
-        assert_eq!(save_string_or_default(&body, "direction", "UP"), "UP");
-        assert_eq!(save_string_or_default(&body, "network", "USDC"), "USDC");
-        assert_eq!(save_float_or(&body, "multiplier", 1.9), 1.9); // parseFloat -> 0 is falsy
-        assert_eq!(save_float(&body, "amount"), 10.5);
-        assert_eq!(save_float(&body, "strikePrice"), 0.0);
-        assert_eq!(save_float(&json!({"x": 2}), "x"), 2.0);
+    fn js_truthiness() {
         assert!(is_truthy(Some(&json!("yes"))));
         assert!(!is_truthy(Some(&json!(""))));
         assert!(!is_truthy(Some(&json!(0))));

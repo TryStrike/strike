@@ -1,4 +1,4 @@
-//! Pure logic behind `/api/referral` (`app/api/referral/route.ts`).
+//! Pure logic behind `/api/referral`.
 //!
 //! Everything that decides *what the response says* lives here: code minting,
 //! address truncation, referrer resolution, the demo-row exclusions and the
@@ -20,9 +20,6 @@ use crate::bets::{
     value_to_string,
 };
 
-/// Postgres `unique_violation`: the row we tried to insert already exists.
-pub const UNIQUE_VIOLATION: &str = "23505";
-
 /// 30 symbols, no `I`, `O`, `0` or `1`, so a code cannot be misread. The TS
 /// comment claims 32 and indexes with `b & 31`; see `random_code_suffix`.
 pub const CODE_ALPHABET: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ234567";
@@ -33,13 +30,10 @@ pub const FRIENDS_PAGE_CAP: i64 = 100;
 pub const BET_SCAN_CAP: i64 = 2000;
 /// Rows read for the public top-20, so demo wallets can't crowd it out.
 pub const LEADERBOARD_SCAN_CAP: i64 = 60;
-/// `MAX_LIMIT_ROWS` in the PostgREST-shaped builder (`lib/db/query.ts`): a
-/// `.limit(2000)` still fetches at most this many rows per request. The scan
+/// Rows fetched per request at most, even for a `.limit(2000)`. The scan
 /// below therefore can never report `scanned === BET_SCAN_CAP`, which is why
 /// `qualifiedExact` stays true by construction rather than by luck.
 pub const MAX_ROWS_PER_QUERY: i64 = 1000;
-/// `.range(from, from + SCAN_PAGE - 1)` caps at this many rows too.
-pub const MAX_RANGE_ROWS: i64 = 1000;
 /// `referral_code.trim().slice(0, 64)`.
 pub const REFERRAL_CODE_MAX_LEN: usize = 64;
 
@@ -110,7 +104,7 @@ pub fn referral_code(addr_key: &str) -> String {
 
 // ── Referrer resolution (`resolveReferrer`) ─────────────────────────────────
 
-/// JS truthiness for the JSON shapes a PostgREST row can carry.
+/// JS truthiness for a JSON cell.
 fn js_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -721,7 +715,7 @@ mod tests {
             friends_totals(Some(5), 0, 5, 1, BET_SCAN_CAP as usize)["qualifiedExact"],
             json!(false)
         );
-        // PostgREST clamps a `.limit(2000)` to MAX_ROWS_PER_QUERY rows, so a real
+        // A `.limit(2000)` is clamped to MAX_ROWS_PER_QUERY rows, so a real
         // scan can never reach the cap: `qualifiedExact` is true by construction.
         const _: () = assert!(MAX_ROWS_PER_QUERY < BET_SCAN_CAP);
     }

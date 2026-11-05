@@ -2,7 +2,6 @@
 //! exposes `routes()`; `router()` merges them under the same `/api/...` paths so
 //! the frontend proxy is a 1:1 rewrite with no path translation.
 
-pub mod access_code;
 pub mod admin;
 pub mod admin_reads_a;
 pub mod admin_reads_b;
@@ -11,12 +10,10 @@ pub mod arc;
 pub mod balance;
 pub mod balance_mutations;
 pub mod bets;
-pub mod db_gateway;
 pub mod precheck;
 pub mod prices;
 pub mod referral;
 pub mod session;
-pub mod stats;
 pub mod stream;
 pub mod withdrawals;
 
@@ -30,7 +27,6 @@ use strike_core::error::ApiResult;
 pub fn router() -> Router {
     Router::new()
         .route("/api/health", get(health))
-        .merge(access_code::routes())
         .merge(admin::routes())
         .merge(admin_reads_a::routes())
         .merge(admin_reads_b::routes())
@@ -39,12 +35,10 @@ pub fn router() -> Router {
         .merge(balance::routes())
         .merge(balance_mutations::routes())
         .merge(bets::routes())
-        .merge(db_gateway::routes())
         .merge(precheck::routes())
         .merge(prices::routes())
         .merge(referral::routes())
         .merge(session::routes())
-        .merge(stats::routes())
         .merge(stream::routes())
         .merge(withdrawals::routes())
 }

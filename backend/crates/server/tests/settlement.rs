@@ -363,20 +363,14 @@ async fn client_prices_never_reach_the_outcome() {
     set_price(&feed, 90.0);
     round_over().await;
 
-    // The loser claims with prices that would make it a winner, then tries to
-    // write them into the history row.
-    let mut lying = json!({
+    // The loser claims with prices that would make it a winner.
+    let lying = json!({
         "userAddress": WALLET, "winAmount": 17.5, "currency": "USDC",
         "betId": bet["betId"], "settlementToken": bet["settlementToken"],
         "strikePrice": 1, "endPrice": 1_000_000, "won": true,
     });
-    let _ = s.post("/api/balance/win", lying.clone()).await;
+    let _ = s.post("/api/balance/win", lying).await;
     s.wait_settled(&bet).await;
-    lying["id"] = bet["betId"].clone();
-    lying["walletAddress"] = json!(WALLET);
-    lying["amount"] = json!(10);
-    lying["payout"] = json!(1_000_000);
-    let _ = s.post("/api/bets/save", lying).await;
 
     assert_eq!(s.balance(), 90 * UNIT);
     let row = s.history(&bet).unwrap();
@@ -568,27 +562,6 @@ async fn a_request_cannot_put_a_price_in_the_feed() {
     assert_eq!(reply["code"], "price_moved");
     let bet = s.bet(classic("UP", 100.0)).await;
     assert_eq!(bet["strikePrice"], json!(100.0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_client_cannot_write_a_real_row_only_a_demo_one() {
-    let (s, _feed, _) = Server::start(100.0).await;
-    let invented = json!({
-        "id": "bet_invented", "walletAddress": WALLET, "amount": 10, "payout": 1000,
-        "won": true, "strikePrice": 1, "endPrice": 2,
-    });
-    let (status, _) = s.post("/api/bets/save", invented).await;
-    assert_eq!(status, StatusCode::OK);
-    let (real, demo) = (
-        json!({ "betId": "bet_invented" }),
-        json!({ "betId": "demo-1" }),
-    );
-    assert_eq!(s.history(&real), None);
-
-    let practice = json!({ "id": "demo-1", "walletAddress": WALLET, "amount": 1 });
-    let (status, _) = s.post("/api/bets/save", practice).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(s.history(&demo).is_some());
 }
 
 // -- bands -------------------------------------------------------------------
