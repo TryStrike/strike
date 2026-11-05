@@ -3,16 +3,34 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { List, X } from '@phosphor-icons/react';
+import { List, Sparkle, X } from '@phosphor-icons/react';
 import { BRAND } from '@/lib/brand';
 import { cx } from '@/components/ui/kit';
+import { useAiModeToggle } from '@/lib/useTheme';
 
-// Every href here is a real route under app/ — and each page is reachable
-// from this nav (including /history, which renders SiteNav itself).
 const LINKS = [
   { href: '/trade', label: 'Trade' },
   { href: '/history', label: 'History' },
 ];
+
+function AiModeButton({ className }: { className?: string }) {
+  const { inAi, toggle } = useAiModeToggle();
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      aria-pressed={inAi}
+      className={cx(
+        'inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-sm font-semibold',
+        inAi ? 'bg-ink text-white' : 'bg-up-soft text-up',
+        className
+      )}
+    >
+      <Sparkle size={14} weight="fill" aria-hidden="true" />
+      {inAi ? 'Exit AI' : 'AI mode'}
+    </button>
+  );
+}
 
 /** Exact match or a segment below it (e.g. /trade/… still marks /trade active). */
 function isActive(pathname: string | null, href: string) {
@@ -68,9 +86,8 @@ export function SiteNav({ right, sticky, wide }: { right: ReactNode; sticky?: bo
               </Link>
             );
           })}
+          <AiModeButton />
         </div>
-        {/* Hamburger + right column: the menu ref wraps both so clicking the toggle
-            doesn't count as an "outside" click. */}
         <div ref={menuRef} className="col-start-3 flex items-center justify-self-end gap-2">
           <button
             type="button"
@@ -106,6 +123,7 @@ export function SiteNav({ right, sticky, wide }: { right: ReactNode; sticky?: bo
                 </Link>
               );
             })}
+            <AiModeButton className="mt-2 w-full justify-center" />
           </div>
         )}
       </div>

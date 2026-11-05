@@ -42,7 +42,7 @@ export default function UsersPanel({
                 eyebrow="House ledger"
                 title="Balance rows per wallet + currency, filtered and paged server-side"
                 right={(
-                    <span className="text-[10px] font-bold uppercase tracking-widest text-white/20 border border-white/10 rounded px-2 py-1">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-faint border border-line rounded px-2 py-1">
                         {typeof total === 'number' ? `${total.toLocaleString()} rows` : `${rows.length} rows`}
                     </span>
                 )}
@@ -57,48 +57,48 @@ export default function UsersPanel({
                             <tbody>
                                 {loading && rows.length === 0
                                     ? Array.from({ length: 5 }).map((_, i) => (
-                                        <tr key={i} className="border-b border-white/5 animate-pulse">
+                                        <tr key={i} className="border-b border-line animate-pulse">
                                             {[0, 1, 2, 3, 4].map((j) => (
                                                 <td key={j} className="px-8 py-6">
-                                                    <div className="h-3 rounded bg-white/[0.05]" />
+                                                    <div className="h-3 rounded bg-surface" />
                                                 </td>
                                             ))}
                                         </tr>
                                     ))
                                     : rows.map((u) => (
-                                        <tr key={u.user_address + u.currency} className="hover:bg-white/[0.02] transition-colors border-b border-white/5">
+                                        <tr key={u.user_address + u.currency} className="hover:bg-surface transition-colors border-b border-line">
                                             <td className="px-8 py-6">
                                                 <div className="flex flex-col">
-                                                    <span className="text-white text-sm font-bold">{u.username || 'Anonymous'}</span>
+                                                    <span className="text-ink text-sm font-bold">{u.username || 'Anonymous'}</span>
                                                     <a
                                                         href={explorerAddressUrl(u.user_address)}
                                                         target="_blank"
                                                         rel="noopener noreferrer"
                                                         title={u.user_address}
-                                                        className="font-mono text-white/30 text-xs hover:text-white/70 hover:underline transition-colors"
+                                                        className="font-mono text-subtle text-xs hover:text-muted hover:underline transition-colors"
                                                     >
                                                         {shortenAddress(u.user_address)} ↗
                                                     </a>
                                                 </div>
                                             </td>
                                             <td className="px-8 py-6">
-                                                <span className="text-xs font-black border border-white/10 rounded px-2 py-1 uppercase">{u.currency}</span>
+                                                <span className="text-xs font-black border border-line rounded px-2 py-1 uppercase">{u.currency}</span>
                                             </td>
                                             <td className="px-8 py-6">
                                                 <span className={`text-xs font-black uppercase px-2 py-1 rounded ${
                                                     (u.status ?? 'active') === 'active'
-                                                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                                        ? 'bg-up-soft text-up border border-up/30'
                                                         : (u.status ?? '') === 'frozen'
-                                                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                                            ? 'bg-down-soft text-down border border-down/30'
+                                                            : 'bg-down-soft text-down border border-down/30'
                                                 }`}>
                                                     {u.status || 'active'}
                                                 </span>
                                             </td>
-                                            <td className="px-8 py-6 text-white font-mono font-bold">{Number(u.balance).toFixed(4)}</td>
-                                            <td className="px-8 py-6 text-white font-mono font-black">
+                                            <td className="px-8 py-6 text-ink font-mono font-bold">{Number(u.balance).toFixed(4)}</td>
+                                            <td className="px-8 py-6 text-ink font-mono font-black">
                                                 {(u.activity?.totalVolume ?? 0).toLocaleString()}{' '}
-                                                <span className="text-xs font-bold text-white/30 uppercase">mixed native</span>
+                                                <span className="text-xs font-bold text-subtle uppercase">mixed native</span>
                                             </td>
                                         </tr>
                                     ))}

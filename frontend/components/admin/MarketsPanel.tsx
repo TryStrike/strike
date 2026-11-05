@@ -65,40 +65,40 @@ export default function MarketsPanel({
                             <div className="p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                                 {list.loading && tokens.length === 0
                                     ? Array.from({ length: 5 }).map((_, i) => (
-                                        <div key={i} className="h-36 rounded-[2rem] bg-white/[0.03] animate-pulse" />
+                                        <div key={i} className="h-36 rounded-[2rem] bg-surface animate-pulse" />
                                     ))
                                     : Object.entries(summary).map(([cat, count]) => (
-                                        <div key={cat} className="p-8 bg-white/[0.03] border border-white/10 rounded-[2rem] space-y-4">
-                                            <p className="text-xs font-black uppercase tracking-widest text-white/40">{cat}</p>
+                                        <div key={cat} className="p-8 bg-surface border border-line rounded-[2rem] space-y-4">
+                                            <p className="text-xs font-black uppercase tracking-widest text-subtle">{cat}</p>
                                             <div className="flex items-end justify-between">
-                                                <h4 className="text-5xl font-black text-white tracking-tight tabular-nums">{count}</h4>
-                                                <p className="text-xs font-bold text-white/20 uppercase pb-2">Active Feeds</p>
+                                                <h4 className="text-5xl font-black text-ink tracking-tight tabular-nums">{count}</h4>
+                                                <p className="text-xs font-bold text-faint uppercase pb-2">Active Feeds</p>
                                             </div>
-                                            <div className="w-full h-1 bg-white/5 rounded-full">
+                                            <div className="w-full h-1 bg-surface rounded-full">
                                                 <div
-                                                    className="h-full bg-white/40 rounded-full"
+                                                    className="h-full bg-white rounded-full"
                                                     style={{ width: `${tokens.length ? (count / tokens.length) * 100 : 0}%` }}
                                                 />
                                             </div>
                                         </div>
                                     ))}
-                                <div className="p-8 bg-white/5 border border-white/20 rounded-[2rem] flex flex-col justify-center">
-                                    <p className="text-xs font-bold text-white uppercase tracking-widest text-center mb-1">Total Inventory</p>
-                                    <p className="text-4xl font-black text-white text-center tracking-tight tabular-nums">{tokens.length || '—'}</p>
+                                <div className="p-8 bg-surface border border-line rounded-[2rem] flex flex-col justify-center">
+                                    <p className="text-xs font-bold text-ink uppercase tracking-widest text-center mb-1">Total Inventory</p>
+                                    <p className="text-4xl font-black text-ink text-center tracking-tight tabular-nums">{tokens.length || '—'}</p>
                                 </div>
                             </div>
 
-                            <div className="overflow-x-auto border-t border-white/5">
+                            <div className="overflow-x-auto border-t border-line">
                                 <Table>
                                     <THead labels={['Symbol', 'Category', 'Last Price']} />
                                     <tbody>
                                         {visible.map((t) => (
-                                            <tr key={`${t.symbol}-${t.category}`} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                                                <td className="px-8 py-4 font-mono text-white text-sm">{t.symbol}</td>
+                                            <tr key={`${t.symbol}-${t.category}`} className="border-b border-line hover:bg-surface transition-colors">
+                                                <td className="px-8 py-4 font-mono text-ink text-sm">{t.symbol}</td>
                                                 <td className="px-8 py-4">
-                                                    <span className="text-xs font-black border border-white/10 rounded px-2 py-1 uppercase text-white/50">{t.category}</span>
+                                                    <span className="text-xs font-black border border-line rounded px-2 py-1 uppercase text-muted">{t.category}</span>
                                                 </td>
-                                                <td className="px-8 py-4 text-right font-mono text-white/80 tabular-nums">{fmtPrice(t.price)}</td>
+                                                <td className="px-8 py-4 text-right font-mono text-ink tabular-nums">{fmtPrice(t.price)}</td>
                                             </tr>
                                         ))}
                                     </tbody>

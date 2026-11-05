@@ -5,7 +5,7 @@ import { SiteNav } from './SiteNav';
 import { WalletConnect } from './wallet';
 
 // These routes render their own SiteNav with a custom right column.
-const OWN_NAV = ['/', '/trade', '/history'];
+const OWN_NAV = ['/', '/trade', '/history', '/agent'];
 
 export function Header() {
   const pathname = usePathname();

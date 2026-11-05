@@ -84,7 +84,7 @@ export default function AccessCodesPanel({
                     <>
                         <a
                             href={exportHref}
-                            className="px-4 py-2 bg-blue-500/10 border border-blue-500/30 text-blue-400 font-black uppercase text-[10px] tracking-widest rounded-lg hover:bg-blue-500/20 transition-all"
+                            className="px-4 py-2 bg-up-soft border border-up/30 text-up font-black uppercase text-[10px] tracking-widest rounded-lg hover:bg-up-soft transition-all"
                         >
                             Export CSV
                         </a>
@@ -92,7 +92,7 @@ export default function AccessCodesPanel({
                             type="button"
                             onClick={() => generate(5)}
                             disabled={busy}
-                            className="px-4 py-2 bg-white text-black font-black uppercase text-[10px] tracking-widest rounded-lg hover:bg-gray-200 transition-all disabled:opacity-50"
+                            className="px-4 py-2 bg-ink text-white font-black uppercase text-[10px] tracking-widest rounded-lg transition-all disabled:opacity-50"
                         >
                             {busy ? 'Minting…' : 'Generate 5 Codes'}
                         </button>
@@ -105,10 +105,10 @@ export default function AccessCodesPanel({
             ) : (
                 <>
                     {actionError && (
-                        <p className="px-8 pt-4 text-xs font-mono text-rose-400" role="alert">{actionError}</p>
+                        <p className="px-8 pt-4 text-xs font-mono text-down" role="alert">{actionError}</p>
                     )}
                     {actionOk && !actionError && (
-                        <p className="px-8 pt-4 text-xs font-mono text-emerald-400" role="status">{actionOk}</p>
+                        <p className="px-8 pt-4 text-xs font-mono text-up" role="status">{actionOk}</p>
                     )}
                     <div className="overflow-x-auto">
                         <Table>
@@ -116,24 +116,24 @@ export default function AccessCodesPanel({
                             <tbody>
                                 {list.loading && page.length === 0
                                     ? Array.from({ length: 5 }).map((_, i) => (
-                                        <tr key={i} className="border-b border-white/5 animate-pulse">
+                                        <tr key={i} className="border-b border-line animate-pulse">
                                             {[0, 1, 2, 3].map((j) => (
-                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-white/[0.05]" /></td>
+                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-surface" /></td>
                                             ))}
                                         </tr>
                                     ))
                                     : page.map((c) => (
-                                        <tr key={c.code} className="hover:bg-white/[0.02] transition-colors border-b border-white/5">
-                                            <td className="px-8 py-6 font-mono font-black text-white text-lg tracking-widest uppercase">{c.code}</td>
+                                        <tr key={c.code} className="hover:bg-surface transition-colors border-b border-line">
+                                            <td className="px-8 py-6 font-mono font-black text-ink text-lg tracking-widest uppercase">{c.code}</td>
                                             <td className="px-8 py-6">
-                                                <span className={`px-3 py-1 rounded text-sm font-black uppercase ${c.is_used ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'}`}>
+                                                <span className={`px-3 py-1 rounded text-sm font-black uppercase ${c.is_used ? 'bg-down-soft text-down border border-down/30' : 'bg-up-soft text-up border border-up/30'}`}>
                                                     {c.is_used ? 'Consumed' : 'Ready'}
                                                 </span>
                                             </td>
-                                            <td className="px-8 py-6 font-mono text-xs text-white/40">
+                                            <td className="px-8 py-6 font-mono text-xs text-subtle">
                                                 {c.wallet_address ? shortenAddress(c.wallet_address) : 'UNLINKED'}
                                             </td>
-                                            <td className="px-8 py-6 text-right text-white/20 text-xs font-mono whitespace-nowrap">
+                                            <td className="px-8 py-6 text-right text-faint text-xs font-mono whitespace-nowrap">
                                                 {c.used_at ? new Date(c.used_at).toLocaleString() : '—'}
                                             </td>
                                         </tr>

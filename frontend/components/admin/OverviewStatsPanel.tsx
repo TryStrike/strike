@@ -39,7 +39,7 @@ function tokenSymbolForNetwork(net: string): string {
 function NetworkTokenEconomicsTable({ rows, title }: { rows?: Record<string, NetworkPnLRow>; title: string }) {
     if (!rows || Object.keys(rows).length === 0) {
         return (
-            <div className="rounded-2xl border border-white/10 bg-white/[0.02] px-4 py-6 text-sm text-white/30">
+            <div className="rounded-2xl border border-line bg-surface px-4 py-6 text-sm text-subtle">
                 No per-chain betting data yet.
             </div>
         );
@@ -48,18 +48,18 @@ function NetworkTokenEconomicsTable({ rows, title }: { rows?: Record<string, Net
         (a, b) => Math.abs(b[1].platformPnL) - Math.abs(a[1].platformPnL),
     );
     return (
-        <div className="rounded-2xl border border-white/10 bg-white/[0.02] overflow-hidden">
-            <div className="px-4 py-3 border-b border-white/10 space-y-1">
-                <p className="text-xs font-black uppercase tracking-widest text-white/45">{title}</p>
-                <p className="text-sm text-white/40 leading-relaxed">
-                    Each row is one chain. Amounts are in that row's <span className="text-white/70">native token</span> (not dollars).{' '}
-                    <span className="text-amber-200/80">Do not sum numbers down the column across different tokens.</span>
+        <div className="rounded-2xl border border-line bg-surface overflow-hidden">
+            <div className="px-4 py-3 border-b border-line space-y-1">
+                <p className="text-xs font-black uppercase tracking-widest text-subtle">{title}</p>
+                <p className="text-sm text-subtle leading-relaxed">
+                    Each row is one chain. Amounts are in that row's <span className="text-muted">native token</span> (not dollars).{' '}
+                    <span className="text-down">Do not sum numbers down the column across different tokens.</span>
                 </p>
             </div>
             <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm min-w-[640px]">
                     <thead>
-                        <tr className="text-xs font-black uppercase tracking-wider text-white/35 border-b border-white/10 bg-white/[0.02]">
+                        <tr className="text-xs font-black uppercase tracking-wider text-subtle border-b border-line bg-surface">
                             <th className="px-4 py-3">Chain</th>
                             <th className="px-4 py-3">Token</th>
                             <th className="px-4 py-3 text-right">Staked</th>
@@ -72,17 +72,17 @@ function NetworkTokenEconomicsTable({ rows, title }: { rows?: Record<string, Net
                             const sym = tokenSymbolForNetwork(net);
                             const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 6 });
                             return (
-                                <tr key={net} className="border-b border-white/5 font-mono text-white/85">
+                                <tr key={net} className="border-b border-line font-mono text-ink">
                                     <td className="px-4 py-2.5">{net}</td>
-                                    <td className="px-4 py-2.5 text-white/50">{sym}</td>
+                                    <td className="px-4 py-2.5 text-muted">{sym}</td>
                                     <td className="px-4 py-2.5 text-right tabular-nums">
-                                        {fmt(row.volume)} <span className="text-xs text-white/35">{sym}</span>
+                                        {fmt(row.volume)} <span className="text-xs text-subtle">{sym}</span>
                                     </td>
                                     <td className="px-4 py-2.5 text-right tabular-nums">
-                                        {fmt(row.payout)} <span className="text-xs text-white/35">{sym}</span>
+                                        {fmt(row.payout)} <span className="text-xs text-subtle">{sym}</span>
                                     </td>
                                     <td className="px-4 py-2.5 text-right tabular-nums">
-                                        <span className={row.platformPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                                        <span className={row.platformPnL >= 0 ? 'text-up' : 'text-down'}>
                                             {fmt(row.platformPnL)} <span className="text-xs opacity-70">{sym}</span>
                                         </span>
                                     </td>
@@ -119,7 +119,7 @@ export default function OverviewStatsPanel({
             <div className="space-y-6" aria-busy="true">
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     {Array.from({ length: 4 }).map((_, i) => (
-                        <div key={i} className="h-36 rounded-[2.5rem] bg-white/[0.03] animate-pulse" />
+                        <div key={i} className="h-36 rounded-[2.5rem] bg-surface animate-pulse" />
                     ))}
                 </div>
                 <SkeletonRows rows={3} />
@@ -135,7 +135,7 @@ export default function OverviewStatsPanel({
         const count = (n: number | undefined) => (typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : '—');
         return (
             <div className="space-y-6">
-                <div className="text-xs font-black uppercase tracking-wider text-white/30">{mode === 'real' ? 'Real Mode Stats' : 'Demo Mode Stats'}</div>
+                <div className="text-xs font-black uppercase tracking-wider text-subtle">{mode === 'real' ? 'Real Mode Stats' : 'Demo Mode Stats'}</div>
                 <NetworkTokenEconomicsTable
                     rows={m?.platformPnLByNetwork}
                     title={mode === 'real' ? 'Betting economics by chain (native tokens)' : 'Demo — betting economics by chain (native tokens)'}

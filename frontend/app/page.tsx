@@ -189,7 +189,7 @@ export default function Landing() {
 
           {/* Live round card */}
           <BlurFade delay={0.34} className="mt-16 w-full max-w-[600px]">
-            <div className="rounded-[28px] bg-white p-6 text-left ring-1 ring-[#E3E6EB] shadow-[0_40px_80px_-40px_rgba(10,12,16,0.28)] sm:p-8">
+            <div className="rounded-[28px] bg-white p-6 text-left ring-1 ring-line shadow-2xl sm:p-8">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-[15px] font-semibold">

@@ -12,7 +12,7 @@ import { playWinSound, playLoseSound } from '@/lib/utils/sounds';
 import { useToast } from '@/lib/hooks/useToast';
 import { CaretDown, X, MagnifyingGlass, Star, TrendUp, Waveform, ArrowsDownUp, Pulse } from '@phosphor-icons/react';
 
-const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-[0_20px_50px_-20px_rgba(10,12,16,0.25)] font-tight';
+const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight';
 
 interface LiveChartProps {
   betAmount: string;
@@ -1499,8 +1499,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 top: drawBoxGeometry(drawStart, drawCurrent).y,
                 width: drawBoxGeometry(drawStart, drawCurrent).width,
                 height: drawBoxGeometry(drawStart, drawCurrent).height,
-                border: '1px dashed #2151F5',
-                backgroundColor: 'rgba(33,81,245,0.06)',
+                border: '1px dashed var(--up)',
+                backgroundColor: 'color-mix(in srgb, var(--up) 6%, transparent)',
                 borderRadius: 6,
               }}
             />
@@ -1516,8 +1516,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   top: pendingBox.y,
                   width: pendingBox.width,
                   height: pendingBox.height,
-                  border: '1px dashed #2151F5',
-                  backgroundColor: '#EEF2FF',
+                  border: '1px dashed var(--up)',
+                  backgroundColor: 'var(--up-soft)',
                   borderRadius: 6,
                 }}
               />
@@ -1601,8 +1601,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 if (height <= 0) return null;
 
                 const isWinning = currentPrice <= bet.priceTop && currentPrice >= bet.priceBottom;
-                const fill = isWinning ? '#EEF2FF' : 'rgba(10,12,16,0.03)';
-                const stroke = isWinning ? '#2151F5' : '#9AA1AD';
+                const fill = isWinning ? 'var(--up-soft)' : 'color-mix(in srgb, var(--ink) 3%, transparent)';
+                const stroke = isWinning ? 'var(--up)' : 'var(--faint)';
 
                 return (
                   <g key={bet.id}>
@@ -1619,7 +1619,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                     <text
                       x={clampedStartX + 6}
                       y={tY + 16}
-                      fill={isWinning ? '#2151F5' : '#4A505C'}
+                      fill={isWinning ? 'var(--up)' : 'var(--muted)'}
                       fontSize={10}
                       className="font-jet"
                     >
@@ -1645,7 +1645,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
           if (expirationX < 0) return null;
 
           const isUp = bet.direction === 'UP';
-          const color = isUp ? '#2151F5' : '#C2410C';
+          const color = isUp ? 'var(--up)' : 'var(--down)';
 
           return (
             <g key={bet.id}>
@@ -1667,7 +1667,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   y1={0}
                   x2={expirationX}
                   y2={dimensions.height}
-                  stroke="#0A0C10"
+                  stroke="var(--ink)"
                   strokeWidth="1"
                   strokeOpacity="0.2"
                   strokeDasharray="4 4"
@@ -1716,11 +1716,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 const y = scales.yScale(price);
                 return (
                   <g key={`y-tick-${tick}`}>
-                    <line x1={0} y1={y} x2={dimensions.width} y2={y} stroke="#0A0C10" strokeOpacity="0.05" strokeWidth="1" />
+                    <line x1={0} y1={y} x2={dimensions.width} y2={y} stroke="var(--ink)" strokeOpacity="0.05" strokeWidth="1" />
                     <text
                       x={dimensions.width - 8}
                       y={y - 5}
-                      fill="#9AA1AD"
+                      fill="var(--faint)"
                       fontSize="10"
                       textAnchor="end"
                       className="font-jet"
@@ -1764,11 +1764,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   if (x < 0 || x > dimensions.width) return null;
                   return (
                     <g key={`x-tick-${sec}`}>
-                      <line x1={x} y1={0} x2={x} y2={dimensions.height} stroke="#0A0C10" strokeOpacity="0.05" strokeWidth="1" />
+                      <line x1={x} y1={0} x2={x} y2={dimensions.height} stroke="var(--ink)" strokeOpacity="0.05" strokeWidth="1" />
                       <text
                         x={x + 5}
                         y={dimensions.height - 10}
-                        fill="#9AA1AD"
+                        fill="var(--faint)"
                         fontSize="10"
                         className="font-jet"
                       >
@@ -1786,7 +1786,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 <path
                   d={chartPath}
                   fill="none"
-                  stroke="#2151F5"
+                  stroke="var(--up)"
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -1801,7 +1801,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                     y1={0}
                     x2={dimensions.width - 84}
                     y2={0}
-                    stroke="#2151F5"
+                    stroke="var(--up)"
                     strokeOpacity="0.4"
                     strokeWidth="1"
                     strokeDasharray="3 4"
@@ -1810,12 +1810,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                     cx={scales.tipX}
                     cy={0}
                     r="4"
-                    fill="#2151F5"
-                    stroke="#ffffff"
+                    fill="var(--up)"
+                    stroke="var(--paper)"
                     strokeWidth="2"
                   />
-                  <rect x={dimensions.width - 84} y={-11} width={80} height={22} rx={11} fill="#2151F5" />
-                  <text x={dimensions.width - 44} y={4} fill="#ffffff" fontSize="11" textAnchor="middle" className="font-jet">
+                  <rect x={dimensions.width - 84} y={-11} width={80} height={22} rx={11} fill="var(--up)" />
+                  <text x={dimensions.width - 44} y={4} fill="var(--paper)" fontSize="11" textAnchor="middle" className="font-jet">
                     {currentPrice.toLocaleString('en-US', { minimumFractionDigits: currentAssetConfig.decimals, maximumFractionDigits: currentAssetConfig.decimals })}
                   </text>
                 </g>
@@ -1828,7 +1828,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                       <path
                         d={indicatorPaths.ma as string}
                         fill="none"
-                        stroke="#C2410C"
+                        stroke="var(--down)"
                         strokeWidth="1.5"
                         strokeDasharray="4 2"
                         opacity="0.7"
@@ -1841,21 +1841,21 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                         <path
                           d={(indicatorPaths.bollinger as string[])[0]}
                           fill="none"
-                          stroke="#6B7280"
+                          stroke="var(--subtle)"
                           strokeWidth="1.5"
                           opacity="0.5"
                         />
                         <path
                           d={(indicatorPaths.bollinger as string[])[1]}
                           fill="none"
-                          stroke="#6B7280"
+                          stroke="var(--subtle)"
                           strokeWidth="1.5"
                           opacity="0.5"
                         />
                         <path
                           d={(indicatorPaths.bollinger as string[])[2]}
                           fill="none"
-                          stroke="#6B7280"
+                          stroke="var(--subtle)"
                           strokeWidth="1"
                           strokeDasharray="2 2"
                           opacity="0.3"
@@ -1866,9 +1866,9 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                     {/* Alligator */}
                     {activeIndicators['alligator'] && indicatorPaths.alligator && (
                       <g>
-                        <path d={(indicatorPaths.alligator as string[])[0]} fill="none" stroke="#0A0C10" strokeWidth="1.5" opacity="0.5" />
-                        <path d={(indicatorPaths.alligator as string[])[1]} fill="none" stroke="#6B7280" strokeWidth="1.5" opacity="0.5" />
-                        <path d={(indicatorPaths.alligator as string[])[2]} fill="none" stroke="#9AA1AD" strokeWidth="1.5" opacity="0.6" />
+                        <path d={(indicatorPaths.alligator as string[])[0]} fill="none" stroke="var(--ink)" strokeWidth="1.5" opacity="0.5" />
+                        <path d={(indicatorPaths.alligator as string[])[1]} fill="none" stroke="var(--subtle)" strokeWidth="1.5" opacity="0.5" />
+                        <path d={(indicatorPaths.alligator as string[])[2]} fill="none" stroke="var(--faint)" strokeWidth="1.5" opacity="0.6" />
                       </g>
                     )}
 
@@ -1884,16 +1884,16 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                         return (
                           <g transform={`translate(0, ${panelY})`}>
                             {/* Panel Background */}
-                            <rect x={0} y={0} width={dimensions.width} height={panelHeight} fill="#ffffff" fillOpacity="0.92" />
-                            <line x1={0} y1={0} x2={dimensions.width} y2={0} stroke="#E7E9ED" strokeWidth="1" />
+                            <rect x={0} y={0} width={dimensions.width} height={panelHeight} fill="var(--paper)" fillOpacity="0.92" />
+                            <line x1={0} y1={0} x2={dimensions.width} y2={0} stroke="var(--line)" strokeWidth="1" />
 
                             {/* Zones (70-30) */}
-                            <line x1={0} y1={30} x2={dimensions.width} y2={30} stroke="#E7E9ED" strokeWidth="1" strokeDasharray="4 4" />
-                            <line x1={0} y1={70} x2={dimensions.width} y2={70} stroke="#E7E9ED" strokeWidth="1" strokeDasharray="4 4" />
+                            <line x1={0} y1={30} x2={dimensions.width} y2={30} stroke="var(--line)" strokeWidth="1" strokeDasharray="4 4" />
+                            <line x1={0} y1={70} x2={dimensions.width} y2={70} stroke="var(--line)" strokeWidth="1" strokeDasharray="4 4" />
 
                             {/* Labels */}
-                            <text x={10} y={26} fill="#9AA1AD" fontSize="10" className="font-jet">70</text>
-                            <text x={10} y={66} fill="#9AA1AD" fontSize="10" className="font-jet">30</text>
+                            <text x={10} y={26} fill="var(--faint)" fontSize="10" className="font-jet">70</text>
+                            <text x={10} y={66} fill="var(--faint)" fontSize="10" className="font-jet">30</text>
 
                             {/* RSI Line */}
                             <path
@@ -1902,12 +1902,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                                 .y(d => panelHeight - (d.rsi / 100) * panelHeight)
                                 .curve(curveMonotoneX)(rsiPoints) || ''}
                               fill="none"
-                              stroke="#0A0C10"
+                              stroke="var(--ink)"
                               strokeOpacity="0.7"
                               strokeWidth="1.5"
                             />
 
-                            <text x={dimensions.width - 12} y={16} fill="#6B7280" fontSize="10" textAnchor="end" className="font-jet">RSI 14</text>
+                            <text x={dimensions.width - 12} y={16} fill="var(--subtle)" fontSize="10" textAnchor="end" className="font-jet">RSI 14</text>
                           </g>
                         );
                       } catch (e) { return null; }

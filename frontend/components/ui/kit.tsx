@@ -1,25 +1,22 @@
 /**
- * Minimal light UI kit (landing + trade). Tokens: app/globals.css
- * (ink, muted, subtle, faint, line, surface, up, up-soft, down, down-soft;
- * fonts: font-tight, font-serif, font-jet).
+ * UI kit. Only theme tokens from app/globals.css, so light and AI mode both work.
  */
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
-/** Translucent blue glass for primary actions (replaces solid black). */
-export const glassPrimary =
-  'bg-[linear-gradient(180deg,rgba(33,81,245,0.95),rgba(33,81,245,0.78))] text-white backdrop-blur-xl ring-1 ring-inset ring-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_10px_28px_-12px_rgba(33,81,245,0.7)] transition-all hover:brightness-110 active:scale-[0.98]';
+/** Primary action fill. */
+export const glassPrimary = 'bg-up text-white transition-all hover:brightness-110 active:scale-[0.98]';
 /** Frosted blue tint for a selected chip/pill. */
 export const glassSelected = 'bg-up/[0.08] text-up ring-1 ring-inset ring-up/20 backdrop-blur-xl';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'up' | 'down';
 const VARIANT: Record<Variant, string> = {
   primary: glassPrimary,
-  secondary: 'bg-white/70 backdrop-blur-xl ring-1 ring-ink/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(10,12,16,0.04)] text-ink hover:ring-ink/30',
+  secondary: 'bg-white ring-1 ring-ink/[0.08] text-ink hover:ring-ink/30',
   ghost: 'text-muted hover:text-ink hover:bg-surface',
-  up: 'bg-up text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_8px_20px_-8px_rgba(33,81,245,0.6)] hover:brightness-110 active:scale-[0.98]',
-  down: 'bg-white/70 backdrop-blur-xl ring-1 ring-ink/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(10,12,16,0.04)] text-ink hover:bg-ink hover:text-white active:scale-[0.98]',
+  up: 'bg-up text-white hover:brightness-110 active:scale-[0.98]',
+  down: 'bg-white ring-1 ring-ink/[0.08] text-ink hover:bg-ink hover:text-white active:scale-[0.98]',
 };
 const SIZE = {
   sm: 'h-9 px-3.5 text-sm rounded-full',
@@ -85,7 +82,7 @@ export function Segmented<T extends string | number>({
             onClick={() => onChange(o.value)}
             className={cx(
               'flex flex-col items-center justify-center rounded-full py-2 text-sm font-semibold transition-all disabled:opacity-40',
-              on ? 'bg-white text-ink shadow-[inset_0_1px_0_rgba(255,255,255,1),0_2px_8px_-2px_rgba(10,12,16,0.12)]' : 'text-subtle hover:text-ink'
+              on ? 'bg-white text-ink shadow-sm' : 'text-subtle hover:text-ink'
             )}
           >
             {o.label}
@@ -100,7 +97,7 @@ export function Segmented<T extends string | number>({
 /** Input with an optional trailing unit. */
 export function Field({ unit, className, ...props }: InputHTMLAttributes<HTMLInputElement> & { unit?: ReactNode }) {
   return (
-    <div className={cx('flex h-12 items-center rounded-full px-5 bg-white/70 backdrop-blur-xl ring-1 ring-ink/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(10,12,16,0.04)] focus-within:ring-ink/40', className)}>
+    <div className={cx('flex h-12 items-center rounded-full px-5 bg-white ring-1 ring-ink/[0.08] focus-within:ring-ink/40', className)}>
       <input {...props} className="min-w-0 flex-1 bg-transparent font-jet text-base outline-none placeholder:text-faint" />
       {unit && <span className="ml-2 font-jet text-xs font-medium text-faint">{unit}</span>}
     </div>

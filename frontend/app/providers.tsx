@@ -15,6 +15,7 @@ import { PrivyEnabledContext } from '@/lib/wallet/privy-enabled';
 import { WalletConnectModal } from '@/components/wallet/WalletConnectModal';
 import { ReferralSync } from './ReferralSync';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
+import { useThemeSync } from '@/lib/useTheme';
 
 // Bridges the connected wallet into the Zustand store. Arc is the only
 // network, so this reduces to: adopt the wagmi (or Privy embedded) address,
@@ -143,6 +144,7 @@ function WalletSyncCore({
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
+  useThemeSync();
 
   // Prices and the balance session warm up in the background. Nothing waits on them.
   useEffect(() => {

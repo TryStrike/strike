@@ -1,58 +1,125 @@
 @import "tailwindcss";
 
-:root {
-  --background: #02040A;
-  /* Deep dark blue/black */
-  --foreground: #ededed;
-  --neon-blue: #00F0FF;
-  --neon-green: #00FF9D;
-  --neon-purple: #2D00F7;
-}
-
+/* Every color and font the UI uses comes from these tokens. Light is the
+   default, [data-theme="ai"] swaps them, so AI mode re-skins the same UI. */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-  --color-neon-blue: var(--neon-blue);
-  --color-neon-green: var(--neon-green);
-  --color-neon-purple: var(--neon-purple);
   --breakpoint-xs: 380px;
-
-  /* Minimal light system (landing + trade) */
-  --color-ink: #0A0C10;
-  --color-muted: #4A505C;
-  --color-subtle: #6B7280;
-  --color-faint: #9AA1AD;
-  --color-line: #E7E9ED;
-  --color-surface: #F6F7F9;
-  --color-up: #2151F5;
-  --color-up-soft: #EEF2FF;
-  --color-down: #C2410C;
-  --color-down-soft: #FFF3EC;
+  --color-white: var(--paper);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-surface: var(--surface);
+  --color-up: var(--up);
+  --color-up-soft: var(--up-soft);
+  --color-down: var(--down);
+  --color-down-soft: var(--down-soft);
   --font-tight: var(--font-inter-tight), system-ui, sans-serif;
   --font-serif: var(--font-instrument-serif), Georgia, serif;
   --font-jet: var(--font-jetbrains-mono), ui-monospace, monospace;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-  min-height: 100vh;
-  /* dvh keeps the trade board from being clipped by the mobile URL bar;
-     the vh line above is the fallback for engines without dvh. */
-  height: 100vh;
-  height: 100dvh;
-  min-height: 100dvh;
+:root {
+  --paper: #ffffff;
+  --ink: #0a0c10;
+  --muted: #4a505c;
+  --subtle: #6b7280;
+  --faint: #9aa1ad;
+  --line: #e7e9ed;
+  --surface: #f6f7f9;
+  --up: #2151f5;
+  --up-soft: #eef2ff;
+  --down: #c2410c;
+  --down-soft: #fff3ec;
+  --burst-x: 50vw;
+  --burst-y: 0px;
 }
 
-/* Respect reduced motion globally (also quiets LiveChart cell transitions and
-   the stall-dim fade; JS loops in LiveChart check the same query). */
+:root[data-theme="ai"] {
+  --paper: #fff8ea;
+  --ink: #2a1b4a;
+  --muted: #56467a;
+  --subtle: #76679a;
+  --faint: #a497c0;
+  --line: #ecdfc6;
+  --surface: #fcefd4;
+  --up: #3d8f12;
+  --up-soft: #e6f6d2;
+  --down: #e5484d;
+  --down-soft: #ffe3e1;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 6px;
+  --radius-3xl: 6px;
+}
+
+html,
+body {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-inter-tight), system-ui, sans-serif;
+  /* dvh keeps the trade board clear of the mobile URL bar; vh is the fallback. */
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* AI skin: dotted paper, square pills, hard offset shadows on cards and buttons. */
+:root[data-theme="ai"] body {
+  background-image: radial-gradient(color-mix(in srgb, var(--ink) 9%, transparent) 1px, transparent 1px);
+  background-size: 10px 10px;
+}
+
+:root[data-theme="ai"] :is(h1, h2, h3, button, nav a, [role="tab"], [role="radio"], [role="menuitem"]) {
+  font-family: var(--font-pixelify), var(--font-inter-tight), sans-serif;
+  letter-spacing: 0.01em;
+}
+
+:root[data-theme="ai"] .rounded-full {
+  border-radius: 6px;
+}
+
+:root[data-theme="ai"] .ring-1 {
+  --tw-ring-color: var(--ink);
+  --tw-shadow: 3px 3px 0 0 var(--ink);
+}
+
+:root[data-theme="ai"] ::selection {
+  background: var(--up-soft);
+  color: var(--ink);
+}
+
+/* The burst: the new theme grows out of the clicked point in chunky steps. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-new(root) {
+  animation: by-burst 0.7s steps(14, end);
+}
+
+@keyframes by-burst {
+  from {
+    clip-path: circle(0 at var(--burst-x) var(--burst-y));
+  }
+
+  to {
+    clip-path: circle(150vmax at var(--burst-x) var(--burst-y));
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
-  *::after {
+  *::after,
+  ::view-transition-new(root) {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
@@ -60,41 +127,42 @@ body {
   }
 }
 
-/* Interactive affordance: native controls default to arrow; align with user expectations */
 button:not(:disabled),
 [role="button"]:not([aria-disabled="true"]),
 a[href],
-input[type="submit"]:not(:disabled),
-input[type="button"]:not(:disabled),
-input[type="reset"]:not(:disabled),
 label[for] {
   cursor: pointer;
 }
 
 button:disabled,
-[role="button"][aria-disabled="true"],
-input[type="submit"]:disabled,
-input[type="button"]:disabled,
-input[type="reset"]:disabled {
+[role="button"][aria-disabled="true"] {
   cursor: not-allowed;
 }
 
-/* Custom animations */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+
+:where(a[href], button, input, select, textarea, summary, [role="button"],
+  [role="switch"], [role="tab"], [role="checkbox"], [role="radio"],
+  [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--up);
+  outline-offset: 2px;
+}
+
 @keyframes marquee {
   to {
     transform: translateX(-100%);
-  }
-}
-
-@keyframes slide-in {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-
-  to {
-    transform: translateX(0);
-    opacity: 1;
   }
 }
 
@@ -102,57 +170,18 @@ input[type="reset"]:disabled {
   animation: slide-in 0.3s ease-out;
 }
 
-/* Scrollbar styling for dark theme */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
 }
 
-::-webkit-scrollbar-track {
-  background: #050505;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #222;
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #00F0FF;
-}
-
-/* ── Polish layer (additive only): tokens, focus rings, skeleton, motion damping ── */
-:root {
-  /* Focus + interaction accents for the shared UI primitives. */
-  --ui-focus: #2151F5;
-  --ui-focus-offset: 2px;
-  /* Skeleton shimmer (light surfaces; route fallbacks render on white/surface). */
-  --skeleton-base: rgba(10, 12, 16, 0.06);
-  --skeleton-highlight: rgba(10, 12, 16, 0.10);
-  /* Consistent rhythm/shape tokens for components/ui + components/states. */
-  --ui-gap-xs: 0.5rem;
-  --ui-gap-sm: 0.75rem;
-  --ui-gap-md: 1rem;
-  --ui-gap-lg: 1.5rem;
-  --ui-radius-md: 0.75rem;
-  --ui-radius-lg: 1.5rem;
-}
-
-/* Visible focus ring for every interactive element. Written unlayered so it
-   beats Tailwind's `outline-none` utilities, but only on :focus-visible —
-   pointer users keep the clean look. */
-:where(a[href], button, input, select, textarea, summary, [role="button"],
-  [role="switch"], [role="tab"], [role="checkbox"], [role="radio"],
-  [tabindex]:not([tabindex="-1"])):focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: var(--ui-focus-offset);
-}
-
-/* Skeleton shimmer used by components/states/Skeleton.tsx. */
+/* Skeleton shimmer (components/states/Skeleton.tsx). */
 .by-skeleton {
   position: relative;
   overflow: hidden;
-  background: var(--skeleton-base);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
 }
 
 .by-skeleton::after {
@@ -160,10 +189,7 @@ input[type="reset"]:disabled {
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg,
-      transparent 0%,
-      var(--skeleton-highlight) 55%,
-      transparent 100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ink) 10%, transparent) 55%, transparent);
   animation: by-skeleton-sweep 1.4s ease-in-out infinite;
 }
 
@@ -173,7 +199,6 @@ input[type="reset"]:disabled {
   }
 }
 
-/* Spinner for StateScreen loading variant. */
 .by-spin {
   animation: by-spin 0.9s linear infinite;
 }
@@ -181,19 +206,5 @@ input[type="reset"]:disabled {
 @keyframes by-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-/* Belt-and-braces reduced-motion damping for the newly added animations
-   (the global block near the top already covers most transitions). */
-@media (prefers-reduced-motion: reduce) {
-
-  .by-skeleton::after,
-  .by-spin {
-    animation: none;
-  }
-
-  .animate-slide-in {
-    animation: none;
   }
 }

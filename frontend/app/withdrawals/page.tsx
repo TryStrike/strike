@@ -87,12 +87,12 @@ function TonePill({ view }: { view: WithdrawalViewModel }) {
     : view.tone === 'attention' || view.tone === 'unknown' ? WarningCircle
     : Clock3;
   const TONE_PILL: Record<WithdrawalTone, string> = {
-    waiting: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
-    info: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
-    success: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
-    danger: 'bg-rose-500/10 text-rose-300 border-rose-500/20',
-    attention: 'bg-orange-500/10 text-orange-300 border-orange-500/20',
-    unknown: 'bg-white/5 text-white/50 border-white/15',
+    waiting: 'bg-down-soft text-down border-down/30',
+    info: 'bg-up-soft text-up border-up/30',
+    success: 'bg-up-soft text-up border-up/30',
+    danger: 'bg-down-soft text-down border-down/30',
+    attention: 'bg-down-soft text-down border-down/30',
+    unknown: 'bg-surface text-muted border-line',
   };
   return (
     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] uppercase font-black tracking-widest border ${TONE_PILL[view.tone]}`}>
@@ -118,48 +118,48 @@ function CopyButton({ value, label }: { value: string; label: string }) {
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
-      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-mono text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+      className="inline-flex items-center gap-1 rounded-md border border-line bg-surface px-2 py-1 text-[10px] font-mono text-muted hover:text-ink hover:bg-surface transition-colors"
     >
-      {copied ? <Check className="w-3 h-3 text-emerald-300" weight="bold" /> : <Copy className="w-3 h-3" />}
+      {copied ? <Check className="w-3 h-3 text-up" weight="bold" /> : <Copy className="w-3 h-3" />}
       {copied ? 'copied' : shortHash(value)}
     </button>
   );
 }
 
 const STEP_DOT: Record<string, string> = {
-  done: 'bg-emerald-400 border-emerald-300',
-  active: 'bg-amber-400 border-amber-300 animate-pulse',
-  upcoming: 'bg-white/10 border-white/20',
-  failed: 'bg-rose-500 border-rose-300',
-  attention: 'bg-orange-400 border-orange-300',
+  done: 'bg-up border-up/30',
+  active: 'bg-down border-down/30 animate-pulse',
+  upcoming: 'bg-surface border-line',
+  failed: 'bg-down border-down/30',
+  attention: 'bg-down border-down/30',
 };
 
 function Timeline({ view, requestId }: { view: WithdrawalViewModel; requestId: number }) {
   return (
     <div className="space-y-4">
       <ol className="relative space-y-4 pl-6">
-        <span className="absolute left-[7px] top-2 bottom-2 w-px bg-white/10" aria-hidden />
+        <span className="absolute left-[7px] top-2 bottom-2 w-px bg-surface" aria-hidden />
         {view.steps.map((step) => (
           <li key={step.key} className="relative">
             <span
               aria-hidden
               className={`absolute -left-6 top-1 h-[15px] w-[15px] rounded-full border ${STEP_DOT[step.state] ?? STEP_DOT.upcoming}`}
             />
-            <p className={`text-sm font-bold uppercase tracking-wider ${step.state === 'upcoming' ? 'text-white/25' : step.state === 'failed' ? 'text-rose-300' : step.state === 'attention' ? 'text-orange-300' : step.state === 'active' ? 'text-amber-200' : 'text-emerald-200'}`}>
+            <p className={`text-sm font-bold uppercase tracking-wider ${step.state === 'upcoming' ? 'text-faint' : step.state === 'failed' ? 'text-down' : step.state === 'attention' ? 'text-down' : step.state === 'active' ? 'text-down' : 'text-up'}`}>
               {step.label}
             </p>
-            {step.detail && <p className="text-xs text-white/40 mt-0.5">{step.detail}</p>}
+            {step.detail && <p className="text-xs text-subtle mt-0.5">{step.detail}</p>}
           </li>
         ))}
       </ol>
 
-      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
-        <p className="text-[10px] uppercase tracking-widest text-white/30 font-black">What happens now</p>
-        <p className="text-sm text-white/75 mt-1 leading-relaxed">{view.playerMessage}</p>
+      <div className="rounded-xl border border-line bg-surface p-4">
+        <p className="text-[10px] uppercase tracking-widest text-subtle font-black">What happens now</p>
+        <p className="text-sm text-ink mt-1 leading-relaxed">{view.playerMessage}</p>
         {view.intentExpired && (
           <Link
             href="/trade"
-            className="mt-3 inline-flex px-4 py-2 rounded-lg bg-white text-black text-[10px] font-black uppercase tracking-widest hover:bg-gray-200"
+            className="mt-3 inline-flex px-4 py-2 rounded-lg bg-ink text-white text-[10px] font-black uppercase tracking-widest"
           >
             Request a new withdrawal
           </Link>
@@ -167,7 +167,7 @@ function Timeline({ view, requestId }: { view: WithdrawalViewModel; requestId: n
       </div>
 
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-[10px] uppercase tracking-widest text-white/30 font-black">Request</span>
+        <span className="text-[10px] uppercase tracking-widest text-subtle font-black">Request</span>
         <CopyButton value={String(requestId)} label="request id" />
       </div>
     </div>
@@ -179,7 +179,7 @@ function HashLinks({ view }: { view: WithdrawalViewModel }) {
   const feeLink = explorerLinkForHash(view.feeTxHash);
   if (!view.netTxHash && !view.feeTxHash) {
     return (
-      <p className="text-[11px] text-white/30 font-mono">
+      <p className="text-[11px] text-subtle font-mono">
         {view.kind === 'pending'
           ? view.intentExpired
             ? 'No transaction — the signature window elapsed before anyone could approve, so nothing was ever payable.'
@@ -194,14 +194,14 @@ function HashLinks({ view }: { view: WithdrawalViewModel }) {
     <div className="space-y-2">
       {view.netTxHash && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-white/30 font-black w-16 shrink-0">Payout tx</span>
+          <span className="text-[10px] uppercase tracking-widest text-subtle font-black w-16 shrink-0">Payout tx</span>
           <CopyButton value={view.netTxHash} label="payout transaction hash" />
           {netLink && (
             <a
               href={netLink}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-[10px] font-black uppercase tracking-widest text-blue-300 hover:text-blue-200 inline-flex items-center gap-1"
+              className="text-[10px] font-black uppercase tracking-widest text-up hover:text-up inline-flex items-center gap-1"
             >
               Explorer <ExternalLink className="w-3 h-3" />
             </a>
@@ -210,14 +210,14 @@ function HashLinks({ view }: { view: WithdrawalViewModel }) {
       )}
       {view.feeTxHash && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-white/30 font-black w-16 shrink-0">Fee tx</span>
+          <span className="text-[10px] uppercase tracking-widest text-subtle font-black w-16 shrink-0">Fee tx</span>
           <CopyButton value={view.feeTxHash} label="fee transaction hash" />
           {feeLink && (
             <a
               href={feeLink}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-[10px] font-black uppercase tracking-widest text-white/50 hover:text-white inline-flex items-center gap-1"
+              className="text-[10px] font-black uppercase tracking-widest text-muted hover:text-ink inline-flex items-center gap-1"
             >
               Explorer <ExternalLink className="w-3 h-3" />
             </a>
@@ -434,11 +434,11 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
 
   if (!isConnected || !address) {
     return (
-      <main className="min-h-screen bg-[#02040a] text-white flex items-center justify-center p-6">
+      <main className="min-h-screen bg-white text-ink flex items-center justify-center p-6">
         <div className="text-center space-y-4">
           <h1 className="text-2xl font-black uppercase tracking-widest">Withdrawals</h1>
-          <p className="text-white/40 text-sm">Connect your wallet to track withdrawal requests.</p>
-          <Link href="/trade" className="inline-flex px-4 py-2 rounded-lg bg-white text-black font-bold text-xs uppercase tracking-wider">
+          <p className="text-subtle text-sm">Connect your wallet to track withdrawal requests.</p>
+          <Link href="/trade" className="inline-flex px-4 py-2 rounded-lg bg-ink text-white font-bold text-xs uppercase tracking-wider">
             Go to trade
           </Link>
         </div>
@@ -447,23 +447,23 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
   }
 
   const filterTabs: Array<{ key: FilterKey; label: string; activeClass: string }> = [
-    { key: 'all', label: 'All', activeClass: 'bg-white text-black' },
-    { key: 'open', label: 'In progress', activeClass: 'bg-amber-400 text-black' },
-    { key: 'paid', label: 'Paid', activeClass: 'bg-emerald-400 text-black' },
-    { key: 'rejected', label: 'Rejected', activeClass: 'bg-rose-400 text-black' },
-    { key: 'review', label: 'Needs review', activeClass: 'bg-orange-400 text-black' },
-    { key: 'expired', label: 'Expired', activeClass: 'bg-rose-400 text-black' },
+    { key: 'all', label: 'All', activeClass: 'bg-ink text-white' },
+    { key: 'open', label: 'In progress', activeClass: 'bg-down text-white' },
+    { key: 'paid', label: 'Paid', activeClass: 'bg-up text-white' },
+    { key: 'rejected', label: 'Rejected', activeClass: 'bg-down text-white' },
+    { key: 'review', label: 'Needs review', activeClass: 'bg-down text-white' },
+    { key: 'expired', label: 'Expired', activeClass: 'bg-down text-white' },
   ];
 
   const acceptWindowCopy = `${windowMinutes()}-minute signing window`;
 
   return (
-    <main className="min-h-screen bg-[#02040a] text-white px-6 py-12">
+    <main className="min-h-screen bg-white text-ink px-6 py-12">
       <div className="max-w-6xl mx-auto space-y-8">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
           <div>
             <h1 className="text-4xl font-black tracking-tight uppercase">Withdrawal Status</h1>
-            <p className="text-white/35 text-sm mt-2">
+            <p className="text-subtle text-sm mt-2">
               Every request follows one path: signed intent → manual review → treasury payout on Arc.
             </p>
           </div>
@@ -471,23 +471,23 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
             <button
               onClick={() => void load('refresh')}
               disabled={refreshing}
-              className="px-4 py-2 text-xs font-black uppercase tracking-widest rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-50 inline-flex items-center gap-2"
+              className="px-4 py-2 text-xs font-black uppercase tracking-widest rounded-lg border border-line bg-surface hover:bg-surface disabled:opacity-50 inline-flex items-center gap-2"
             >
               <ArrowsClockwise className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               {refreshing ? 'Refreshing…' : 'Refresh'}
             </button>
             <Link
               href="/trade"
-              className="px-4 py-2 text-xs font-black uppercase tracking-widest rounded-lg border border-white/15 bg-white text-black hover:bg-gray-200"
+              className="px-4 py-2 text-xs font-black uppercase tracking-widest rounded-lg border border-line bg-ink text-white"
             >
               Back to trade
             </Link>
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 text-xs text-white/50 leading-relaxed">
+        <div className="rounded-xl border border-line bg-surface p-4 text-xs text-muted leading-relaxed">
           <p>
-            <span className="text-white/70 font-bold uppercase tracking-widest text-[10px]">How long things stay payable. </span>
+            <span className="text-muted font-bold uppercase tracking-widest text-[10px]">How long things stay payable. </span>
             Your signature is only acceptable for a {acceptWindowCopy}: an operator must approve the request within{' '}
             {windowMinutes()} minutes of you signing, or the intent expires and nothing moves — your balance is
             untouched and you can request again from the trade screen. Review itself is manual with no fixed queue
@@ -497,9 +497,9 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
         </div>
 
         {authIssue && (
-          <div role="alert" className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div role="alert" className="rounded-xl border border-up/30 bg-up-soft px-4 py-3 text-sm text-up flex flex-col sm:flex-row sm:items-center gap-3">
             <div className="flex-1">
-              <p className="font-bold uppercase text-[11px] tracking-widest text-sky-300">Read authorization needed</p>
+              <p className="font-bold uppercase text-[11px] tracking-widest text-up">Read authorization needed</p>
               <p className="mt-1">
                 {authIssue === 'no_signer'
                   ? 'No signer is available for the connected wallet. Reconnect via MetaMask/WalletConnect or log in with Privy, then authorize.'
@@ -515,20 +515,20 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
                 await load('refresh');
               }}
               disabled={signingInProgress}
-              className="px-4 py-2 rounded-lg bg-sky-400 text-black text-[10px] font-black uppercase tracking-widest hover:bg-sky-300 disabled:opacity-50"
+              className="px-4 py-2 rounded-lg bg-up text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-50"
             >
               {signingInProgress ? 'Waiting for signature…' : 'Authorize'}
             </button>
           </div>
         )}
         {loadError && (
-          <p role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          <p role="alert" className="rounded-xl border border-down/30 bg-down-soft px-4 py-3 text-sm text-down">
             {loadError}
           </p>
         )}
         {pollingActive && !authIssue && (
-          <p className="text-xs text-white/35 flex items-center gap-2">
-            <Clock3 className="w-3.5 h-3.5 text-amber-300" />
+          <p className="text-xs text-subtle flex items-center gap-2">
+            <Clock3 className="w-3.5 h-3.5 text-down" />
             Live — you have requests still in progress. This list refreshes while they can change.
           </p>
         )}
@@ -536,11 +536,11 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {(
             [
-              { key: 'open' as const, label: 'In progress', cls: 'border-amber-500/25 bg-amber-500/10 text-amber-200/80' },
-              { key: 'paid' as const, label: 'Paid', cls: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200/80' },
-              { key: 'rejected' as const, label: 'Rejected', cls: 'border-rose-500/25 bg-rose-500/10 text-rose-200/80' },
-              { key: 'review' as const, label: 'Needs review', cls: 'border-orange-500/25 bg-orange-500/10 text-orange-200/80' },
-              { key: 'expired' as const, label: 'Expired', cls: 'border-rose-500/25 bg-rose-500/5 text-rose-200/70' },
+              { key: 'open' as const, label: 'In progress', cls: 'border-down/30 bg-down-soft text-down' },
+              { key: 'paid' as const, label: 'Paid', cls: 'border-up/30 bg-up-soft text-up' },
+              { key: 'rejected' as const, label: 'Rejected', cls: 'border-down/30 bg-down-soft text-down' },
+              { key: 'review' as const, label: 'Needs review', cls: 'border-down/30 bg-down-soft text-down' },
+              { key: 'expired' as const, label: 'Expired', cls: 'border-down/30 bg-down-soft text-down' },
             ]
           ).map((c) => (
             <button
@@ -549,20 +549,20 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
               className={`rounded-xl border p-4 text-left transition-colors ${c.cls} hover:brightness-110`}
             >
               <p className="text-xs uppercase">{c.label}</p>
-              <p className="text-2xl font-black text-white">{counts[c.key]}</p>
+              <p className="text-2xl font-black text-ink">{counts[c.key]}</p>
             </button>
           ))}
         </div>
 
-        <div className="rounded-2xl border border-white/10 bg-black/40 overflow-hidden">
-          <div className="p-4 border-b border-white/10 bg-white/[0.02] flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
-            <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1 w-full md:w-auto flex-wrap">
+        <div className="rounded-2xl border border-line bg-ink/40 overflow-hidden">
+          <div className="p-4 border-b border-line bg-surface flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
+            <div className="inline-flex rounded-xl border border-line bg-ink/40 p-1 w-full md:w-auto flex-wrap">
               {filterTabs.map((t) => (
                 <button
                   key={t.key}
                   onClick={() => setStatusFilter(t.key)}
                   className={`flex-1 md:flex-none px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                    statusFilter === t.key ? t.activeClass : 'text-white/60 hover:text-white'
+                    statusFilter === t.key ? t.activeClass : 'text-muted hover:text-ink'
                   }`}
                 >
                   {t.label} ({counts[t.key]})
@@ -572,12 +572,12 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
 
             <div className="flex flex-col sm:flex-row gap-3 w-full md:flex-1">
               <div className="relative flex-1">
-                <Search className="w-4 h-4 text-white/30 absolute left-3 top-1/2 -translate-y-1/2" />
+                <Search className="w-4 h-4 text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Search request id / tx hash / asset…"
-                  className="w-full bg-black/40 border border-white/10 rounded-xl pl-10 pr-3 py-2.5 text-sm text-white placeholder:text-white/25 outline-none focus:border-white/20"
+                  className="w-full bg-ink/40 border border-line rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-faint outline-none focus:border-line"
                 />
               </div>
             </div>
@@ -585,35 +585,35 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
 
           <div className="p-4 space-y-3">
             {firstLoad && !authIssue ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
-                <p className="text-white/30 text-sm animate-pulse">
+              <div className="rounded-xl border border-line bg-surface p-4">
+                <p className="text-subtle text-sm animate-pulse">
                   {signingInProgress ? 'Waiting for your wallet signature…' : 'Loading withdrawals…'}
                 </p>
               </div>
             ) : authIssue && rows.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6 text-center">
-                <p className="text-white/70 font-bold">History locked until you authorize</p>
-                <p className="text-white/35 text-sm mt-1">
+              <div className="rounded-xl border border-line bg-surface p-6 text-center">
+                <p className="text-muted font-bold">History locked until you authorize</p>
+                <p className="text-subtle text-sm mt-1">
                   Use the Authorize button above — one wallet signature unlocks read access to your own requests.
                 </p>
               </div>
             ) : rows.length === 0 && !loadError ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6 text-center">
-                <p className="text-white/70 font-bold">No withdrawal requests yet</p>
-                <p className="text-white/35 text-sm mt-1">
+              <div className="rounded-xl border border-line bg-surface p-6 text-center">
+                <p className="text-muted font-bold">No withdrawal requests yet</p>
+                <p className="text-subtle text-sm mt-1">
                   Requests you submit from the trade screen appear here with their live status.
                 </p>
               </div>
             ) : filtered.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6 text-center">
-                <p className="text-white/70 font-bold">No matching withdrawals</p>
-                <p className="text-white/35 text-sm mt-1">Try clearing filters or search.</p>
+              <div className="rounded-xl border border-line bg-surface p-6 text-center">
+                <p className="text-muted font-bold">No matching withdrawals</p>
+                <p className="text-subtle text-sm mt-1">Try clearing filters or search.</p>
                 <button
                   onClick={() => {
                     setStatusFilter('all');
                     setQuery('');
                   }}
-                  className="mt-4 inline-flex px-4 py-2 rounded-lg bg-white text-black text-xs font-black uppercase tracking-widest"
+                  className="mt-4 inline-flex px-4 py-2 rounded-lg bg-ink text-white text-xs font-black uppercase tracking-widest"
                 >
                   Clear filters
                 </button>
@@ -623,36 +623,36 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
                 const view = describeWithdrawal(r);
                 const expanded = expandedId === r.id;
                 return (
-                  <div key={r.id} className="rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                  <div key={r.id} className="rounded-xl border border-line bg-ink/30 overflow-hidden">
                     <button
                       type="button"
                       onClick={() => setExpandedId(expanded ? null : r.id)}
                       aria-expanded={expanded}
-                      className="w-full p-4 flex items-center gap-3 text-left hover:bg-white/[0.03] transition-colors"
+                      className="w-full p-4 flex items-center gap-3 text-left hover:bg-surface transition-colors"
                     >
-                      <ChevronRight className={`w-4 h-4 shrink-0 text-white/30 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                      <ChevronRight className={`w-4 h-4 shrink-0 text-subtle transition-transform ${expanded ? 'rotate-90' : ''}`} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <span className="text-sm font-mono text-white/85">
+                          <span className="text-sm font-mono text-ink">
                             {formatUsdc(r.amount)} {String(r.currency).toUpperCase()}
                           </span>
-                          <span className="text-[11px] text-white/35 font-mono">#{r.id}</span>
+                          <span className="text-[11px] text-subtle font-mono">#{r.id}</span>
                         </div>
-                        <p className="text-[11px] text-white/35 font-mono mt-0.5">
+                        <p className="text-[11px] text-subtle font-mono mt-0.5">
                           Requested {formatWhen(r.requested_at)}
                           {r.decided_at ? ` · decided ${formatWhen(r.decided_at)}` : ''}
                         </p>
                         {view.kind === 'pending' && !view.intentExpired && view.intentRemainingMs != null && (
-                          <p className="text-[11px] text-amber-200/60 font-mono mt-0.5">
+                          <p className="text-[11px] text-down font-mono mt-0.5">
                             Signature payable for another {formatRemaining(view.intentRemainingMs)}
                           </p>
                         )}
                       </div>
-                      <span className="hidden sm:block text-[11px] font-mono text-emerald-300/80">
+                      <span className="hidden sm:block text-[11px] font-mono text-up">
                         net {formatUsdc(r.net_amount)}
                       </span>
                       {isChainTxHash(r.tx_hash) && (
-                        <span className="hidden md:block text-[11px] font-mono text-blue-300/70">
+                        <span className="hidden md:block text-[11px] font-mono text-up">
                           {shortHash(String(r.tx_hash))}
                         </span>
                       )}
@@ -660,24 +660,24 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
                     </button>
 
                     {expanded && (
-                      <div className="px-4 pb-5 pt-1 md:grid md:grid-cols-2 md:gap-6 border-t border-white/5">
+                      <div className="px-4 pb-5 pt-1 md:grid md:grid-cols-2 md:gap-6 border-t border-line">
                         <Timeline view={view} requestId={r.id} />
                         <div className="space-y-4 mt-4 md:mt-0">
                           <div className="grid grid-cols-3 gap-2">
-                            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                              <p className="text-[10px] uppercase tracking-widest text-white/25">Amount</p>
+                            <div className="rounded-lg border border-line bg-surface p-2">
+                              <p className="text-[10px] uppercase tracking-widest text-faint">Amount</p>
                               <p className="text-sm font-mono">{formatUsdc(r.amount)}</p>
                             </div>
-                            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                              <p className="text-[10px] uppercase tracking-widest text-white/25">Fee</p>
-                              <p className="text-sm font-mono text-red-300">{formatUsdc(r.fee_amount)}</p>
+                            <div className="rounded-lg border border-line bg-surface p-2">
+                              <p className="text-[10px] uppercase tracking-widest text-faint">Fee</p>
+                              <p className="text-sm font-mono text-down">{formatUsdc(r.fee_amount)}</p>
                             </div>
-                            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                              <p className="text-[10px] uppercase tracking-widest text-white/25">You receive</p>
-                              <p className="text-sm font-mono text-emerald-300">{formatUsdc(r.net_amount)}</p>
+                            <div className="rounded-lg border border-line bg-surface p-2">
+                              <p className="text-[10px] uppercase tracking-widest text-faint">You receive</p>
+                              <p className="text-sm font-mono text-up">{formatUsdc(r.net_amount)}</p>
                             </div>
                           </div>
-                          <p className="text-[10px] text-white/30 leading-relaxed">
+                          <p className="text-[10px] text-subtle leading-relaxed">
                             Fee and net are the platform-tier figures frozen into the ledger when you requested —
                             this is the exact USDC (6 decimals) the treasury pays out.
                           </p>
@@ -694,20 +694,20 @@ function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[
               <button
                 onClick={loadMore}
                 disabled={refreshing}
-                className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-white/70 hover:bg-white/10 disabled:opacity-50"
+                className="w-full rounded-xl border border-line bg-surface px-4 py-3 text-[10px] font-black uppercase tracking-widest text-muted hover:bg-surface disabled:opacity-50"
               >
                 {refreshing ? 'Loading…' : `Load ${PAGE_SIZE} more (${Math.max(0, (paging.total ?? 0) - rows.length)} older requests)`}
               </button>
             )}
             {!firstLoad && !paging?.hasMore && rows.length > 0 && (
-              <p className="text-center text-[10px] uppercase tracking-widest text-white/25 py-2">
+              <p className="text-center text-[10px] uppercase tracking-widest text-faint py-2">
                 End of list — {paging?.total ?? rows.length} requests total
               </p>
             )}
           </div>
         </div>
 
-        <p className="text-[11px] text-white/25 leading-relaxed max-w-3xl">
+        <p className="text-[11px] text-faint leading-relaxed max-w-3xl">
           Withdrawals are signed intents: you sign off-chain, an operator reviews the request within{' '}
           {windowMinutes()} minutes, and the STRIKE treasury contract pays USDC on Arc. Review is manual — the code
           has no fixed payout timer, so we never promise one. A transaction hash and explorer link appear only after

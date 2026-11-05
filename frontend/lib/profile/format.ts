@@ -63,9 +63,9 @@ export function pnlTone(value: unknown): Tone {
 }
 
 const TONE_CLASS: Record<Tone, string> = {
-    positive: 'text-emerald-400',
-    negative: 'text-rose-400',
-    flat: 'text-white/40',
+    positive: 'text-up',
+    negative: 'text-down',
+    flat: 'text-subtle',
 };
 
 export function pnlClass(value: unknown): string {

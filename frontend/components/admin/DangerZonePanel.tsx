@@ -67,9 +67,9 @@ const fmt = (n: unknown, dec = 6) => {
     return v.toFixed(dec).replace(/\.?0+$/, '') || '0';
 };
 
-const btnDanger = 'px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded text-xs font-bold text-rose-400 uppercase transition-all disabled:opacity-40';
-const btnWarn = 'px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded text-xs font-bold text-amber-500 uppercase transition-all disabled:opacity-40';
-const btnNeutral = 'px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded text-xs font-bold text-white uppercase transition-all disabled:opacity-40';
+const btnDanger = 'px-3 py-1.5 bg-down-soft hover:bg-down-soft border border-down/30 rounded text-xs font-bold text-down uppercase transition-all disabled:opacity-40';
+const btnWarn = 'px-3 py-1.5 bg-down-soft hover:bg-down-soft border border-down/30 rounded text-xs font-bold text-down uppercase transition-all disabled:opacity-40';
+const btnNeutral = 'px-3 py-1.5 bg-surface hover:bg-surface border border-line rounded text-xs font-bold text-ink uppercase transition-all disabled:opacity-40';
 
 export default function DangerZonePanel({
     filters, nonce, onUnauthorized, onQueueChanged,
@@ -183,9 +183,9 @@ export default function DangerZonePanel({
             {(actionError || actionOk) && (
                 <div className="px-8 pt-6">
                     {actionError ? (
-                        <p className="text-xs font-mono text-rose-400" role="alert">{actionError}</p>
+                        <p className="text-xs font-mono text-down" role="alert">{actionError}</p>
                     ) : (
-                        <p className="text-xs font-mono text-emerald-400" role="status">{actionOk}</p>
+                        <p className="text-xs font-mono text-up" role="status">{actionOk}</p>
                     )}
                 </div>
             )}
@@ -193,28 +193,28 @@ export default function DangerZonePanel({
             {/* High-frequency withdrawal review */}
             <section className="space-y-4" aria-labelledby="freq-queue-heading">
                 <div className="flex items-center gap-3 px-1">
-                    <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                    <h3 id="freq-queue-heading" className="text-xs font-black uppercase tracking-widest text-amber-400">
+                    <div className="w-2 h-2 rounded-full bg-down animate-pulse" />
+                    <h3 id="freq-queue-heading" className="text-xs font-black uppercase tracking-widest text-down">
                         Manual Review Queue — High Withdrawal Frequency
                     </h3>
                     {frequencyUsers.length > 0 && (
-                        <span className="px-2 py-0.5 rounded bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-black">
+                        <span className="px-2 py-0.5 rounded bg-down-soft border border-down/30 text-down text-xs font-black">
                             {frequencyUsers.length}
                         </span>
                     )}
                 </div>
-                <p className="text-xs text-white/30 px-1 leading-relaxed">
-                    Wallets with <strong className="text-white/50">10+ total withdrawals</strong>. From withdrawal #11 onwards every
+                <p className="text-xs text-subtle px-1 leading-relaxed">
+                    Wallets with <strong className="text-muted">10+ total withdrawals</strong>. From withdrawal #11 onwards every
                     request is queued for manual approval regardless of amount — review the full financial profile first.
                     {(danger.data?.scans?.auditTruncated || danger.data?.scans?.pendingTruncated || danger.data?.scans?.betsTruncated) && (
-                        <span className="text-amber-400/90"> Scan hit its row cap — counts below may be under-reported.</span>
+                        <span className="text-down"> Scan hit its row cap — counts below may be under-reported.</span>
                     )}
                 </p>
 
                 {danger.error ? (
                     <ErrorState message={danger.error} onRetry={danger.reload} retrying={danger.loading} />
                 ) : danger.loading && frequencyUsers.length === 0 ? (
-                    <SkeletonRows rows={3} className="border border-white/5 rounded-2xl" />
+                    <SkeletonRows rows={3} className="border border-line rounded-2xl" />
                 ) : frequencyUsers.length === 0 ? (
                     <EmptyState title="No frequency-flagged wallets" hint="Nothing has crossed the 10-withdrawal review threshold yet." />
                 ) : (
@@ -223,7 +223,7 @@ export default function DangerZonePanel({
                             const isWinner = u.net_pnl > 0;
                             const requests = u.pending_requests ?? [];
                             return (
-                                <div key={u.user_address} className="border border-amber-400/20 bg-amber-400/[0.03] rounded-2xl p-6 space-y-5">
+                                <div key={u.user_address} className="border border-down/30 bg-down-soft rounded-2xl p-6 space-y-5">
                                     <div className="flex flex-wrap items-start justify-between gap-4">
                                         <div className="space-y-1">
                                             <div className="flex items-center gap-2 flex-wrap">
@@ -232,20 +232,20 @@ export default function DangerZonePanel({
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     title={u.user_address}
-                                                    className="font-mono text-white text-sm hover:underline hover:text-amber-300 transition-colors"
+                                                    className="font-mono text-ink text-sm hover:underline hover:text-down transition-colors"
                                                 >
                                                     {shortenAddress(u.user_address)} ↗
                                                 </a>
                                                 {u.has_frequency_flag && (
-                                                    <span className="px-2 py-0.5 text-xs font-black uppercase rounded bg-amber-400/20 border border-amber-400/40 text-amber-300 tracking-wider">
+                                                    <span className="px-2 py-0.5 text-xs font-black uppercase rounded bg-down-soft border border-down/30 text-down tracking-wider">
                                                         Frequency Flag
                                                     </span>
                                                 )}
                                                 {(u.currencies ?? []).map((c) => (
-                                                    <span key={c} className="px-2 py-0.5 text-xs font-black border border-white/10 rounded uppercase">{c}</span>
+                                                    <span key={c} className="px-2 py-0.5 text-xs font-black border border-line rounded uppercase">{c}</span>
                                                 ))}
                                             </div>
-                                            <p className="text-xs text-white/30">Full wallet: <span className="font-mono">{u.user_address}</span></p>
+                                            <p className="text-xs text-subtle">Full wallet: <span className="font-mono">{u.user_address}</span></p>
                                         </div>
                                         <div className="flex gap-2">
                                             <button
@@ -255,7 +255,7 @@ export default function DangerZonePanel({
                                                     setBanReason('High-frequency withdrawal — automated flag');
                                                     setActionOk('Ban form pre-filled — confirm the wallet address, then type the address tail to submit.');
                                                 }}
-                                                className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded text-xs font-bold text-rose-400 uppercase tracking-wide transition-all"
+                                                className="px-3 py-1.5 bg-down-soft hover:bg-down-soft border border-down/30 rounded text-xs font-bold text-down uppercase tracking-wide transition-all"
                                             >
                                                 Pre-fill Ban
                                             </button>
@@ -264,23 +264,23 @@ export default function DangerZonePanel({
 
                                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                                         {[
-                                            { label: 'Total Withdrawals', value: String(u.total_withdrawals), color: 'text-amber-400', big: true },
-                                            { label: 'Completed', value: String(u.completed_withdrawals), color: 'text-white', big: false },
-                                            { label: 'Pending Review', value: String(u.pending_withdrawals), color: u.pending_withdrawals > 0 ? 'text-amber-300' : 'text-white/30', big: false },
-                                            { label: 'Total Deposited', value: fmt(u.total_deposited), color: 'text-white', big: false },
-                                            { label: 'Total Withdrawn', value: fmt(u.total_withdrawn), color: 'text-white/70', big: false },
-                                            { label: 'Avail. Balance', value: fmt(u.total_available_balance), color: u.total_available_balance > 0 ? 'text-amber-300' : 'text-white/30', big: false },
+                                            { label: 'Total Withdrawals', value: String(u.total_withdrawals), color: 'text-down', big: true },
+                                            { label: 'Completed', value: String(u.completed_withdrawals), color: 'text-ink', big: false },
+                                            { label: 'Pending Review', value: String(u.pending_withdrawals), color: u.pending_withdrawals > 0 ? 'text-down' : 'text-subtle', big: false },
+                                            { label: 'Total Deposited', value: fmt(u.total_deposited), color: 'text-ink', big: false },
+                                            { label: 'Total Withdrawn', value: fmt(u.total_withdrawn), color: 'text-muted', big: false },
+                                            { label: 'Avail. Balance', value: fmt(u.total_available_balance), color: u.total_available_balance > 0 ? 'text-down' : 'text-subtle', big: false },
                                         ].map((s) => (
-                                            <div key={s.label} className="bg-black/30 border border-white/5 rounded-xl px-4 py-3 space-y-1">
-                                                <p className="text-white/30 text-xs uppercase tracking-wider">{s.label}</p>
+                                            <div key={s.label} className="bg-ink/30 border border-line rounded-xl px-4 py-3 space-y-1">
+                                                <p className="text-subtle text-xs uppercase tracking-wider">{s.label}</p>
                                                 <p className={`font-mono font-black tabular-nums ${s.color} ${s.big ? 'text-xl' : 'text-sm'}`}>{s.value}</p>
                                             </div>
                                         ))}
                                     </div>
 
                                     <div className="flex items-center gap-3 flex-wrap">
-                                        <span className="text-xs text-white/30 uppercase tracking-widest">Player P&amp;L</span>
-                                        <span className={`font-mono font-black text-lg tabular-nums ${isWinner ? 'text-rose-400' : 'text-emerald-400'}`}>
+                                        <span className="text-xs text-subtle uppercase tracking-widest">Player P&amp;L</span>
+                                        <span className={`font-mono font-black text-lg tabular-nums ${isWinner ? 'text-down' : 'text-up'}`}>
                                             {isWinner ? '+' : ''}{fmt(u.net_pnl)}
                                             <span className="text-xs ml-1 font-normal">
                                                 {isWinner ? '(user is net-UP — house lost)' : '(user is net-DOWN — house won)'}
@@ -290,10 +290,10 @@ export default function DangerZonePanel({
 
                                     {requests.length > 0 && (
                                         <div className="space-y-2">
-                                            <p className="text-xs font-black uppercase tracking-widest text-white/40">
+                                            <p className="text-xs font-black uppercase tracking-widest text-subtle">
                                                 Pending Withdrawal Requests ({requests.length})
                                             </p>
-                                            <div className="rounded-xl border border-white/5 bg-black/20">
+                                            <div className="rounded-xl border border-line bg-ink/20">
                                                 <WithdrawalQueue
                                                     requests={requests}
                                                     onAccept={accept}
@@ -312,32 +312,32 @@ export default function DangerZonePanel({
             </section>
 
             {/* Global ban list */}
-            <section className="p-8 bg-rose-500/5 border border-rose-500/20 rounded-[2rem] space-y-4" aria-labelledby="ban-list-heading">
-                <p id="ban-list-heading" className="text-xs font-black uppercase tracking-wider text-rose-400/80">Global wallet ban list</p>
-                <p className="text-sm text-white/40 leading-relaxed max-w-2xl">
+            <section className="p-8 bg-down-soft border border-down/30 rounded-[2rem] space-y-4" aria-labelledby="ban-list-heading">
+                <p id="ban-list-heading" className="text-xs font-black uppercase tracking-wider text-down">Global wallet ban list</p>
+                <p className="text-sm text-subtle leading-relaxed max-w-2xl">
                     Blocks deposits, bets, payouts, and withdrawals for an address across every currency.
                     Addresses are matched case-insensitively. Adding or lifting a ban requires typing the address tail.
                 </p>
                 <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-end">
                     <div className="flex-1 space-y-1">
-                        <label htmlFor="ban-addr" className="text-sm font-black uppercase tracking-wider text-white/50">Wallet address</label>
+                        <label htmlFor="ban-addr" className="text-sm font-black uppercase tracking-wider text-muted">Wallet address</label>
                         <input
                             id="ban-addr"
                             value={banAddress}
                             onChange={(e) => setBanAddress(e.target.value)}
                             placeholder="0x…"
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white text-sm font-mono placeholder:text-white/20"
+                            className="w-full px-4 py-2.5 rounded-xl bg-ink/40 border border-line text-ink text-sm font-mono placeholder:text-faint"
                         />
                     </div>
                     <div className="flex-[2] space-y-1">
-                        <label htmlFor="ban-reason" className="text-xs font-black uppercase tracking-widest text-white/30">Reason (optional)</label>
+                        <label htmlFor="ban-reason" className="text-xs font-black uppercase tracking-widest text-subtle">Reason (optional)</label>
                         <input
                             id="ban-reason"
                             value={banReason}
                             onChange={(e) => setBanReason(e.target.value)}
                             maxLength={500}
                             placeholder="e.g. manipulation / abuse"
-                            className="w-full px-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white text-sm placeholder:text-white/20"
+                            className="w-full px-4 py-2.5 rounded-xl bg-ink/40 border border-line text-ink text-sm placeholder:text-faint"
                         />
                     </div>
                     <TypedConfirmButton
@@ -346,7 +346,7 @@ export default function DangerZonePanel({
                         busy={busy === `ban-${banAddress.trim()}`}
                         disabled={!banAddress.trim()}
                         onConfirm={addBan}
-                        buttonClassName="px-6 py-2.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-300 font-black uppercase text-xs tracking-widest rounded-xl transition-all disabled:opacity-40"
+                        buttonClassName="px-6 py-2.5 bg-down-soft hover:bg-down-soft border border-down/30 text-down font-black uppercase text-xs tracking-widest rounded-xl transition-all disabled:opacity-40"
                     />
                 </div>
 
@@ -359,17 +359,17 @@ export default function DangerZonePanel({
                             <tbody>
                                 {bans.loading && banRows.length === 0
                                     ? Array.from({ length: 3 }).map((_, i) => (
-                                        <tr key={i} className="border-b border-white/5 animate-pulse">
+                                        <tr key={i} className="border-b border-line animate-pulse">
                                             {[0, 1, 2, 3].map((j) => (
-                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-white/[0.05]" /></td>
+                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-surface" /></td>
                                             ))}
                                         </tr>
                                     ))
                                     : banRows.map((b) => (
-                                        <tr key={b.wallet_address} className="border-b border-white/5">
-                                            <td className="px-8 py-4 font-mono text-xs text-white break-all">{b.wallet_address}</td>
-                                            <td className="px-8 py-4 text-white/50 text-xs max-w-xs">{b.reason || '—'}</td>
-                                            <td className="px-8 py-4 text-white/30 text-xs font-mono whitespace-nowrap">
+                                        <tr key={b.wallet_address} className="border-b border-line">
+                                            <td className="px-8 py-4 font-mono text-xs text-ink break-all">{b.wallet_address}</td>
+                                            <td className="px-8 py-4 text-muted text-xs max-w-xs">{b.reason || '—'}</td>
+                                            <td className="px-8 py-4 text-subtle text-xs font-mono whitespace-nowrap">
                                                 {new Date(b.created_at).toLocaleString()}
                                             </td>
                                             <td className="px-8 py-4 text-right">
@@ -378,7 +378,7 @@ export default function DangerZonePanel({
                                                     label="Remove"
                                                     busy={busy === `unban-${b.wallet_address}`}
                                                     onConfirm={() => removeBan(b.wallet_address)}
-                                                    buttonClassName="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded text-xs font-bold text-white/70 uppercase"
+                                                    buttonClassName="px-3 py-1.5 bg-surface hover:bg-surface border border-line rounded text-xs font-bold text-muted uppercase"
                                                 />
                                             </td>
                                         </tr>
@@ -394,7 +394,7 @@ export default function DangerZonePanel({
 
             {/* Win-streak suspicion */}
             <section aria-labelledby="streak-heading">
-                <p id="streak-heading" className="px-1 pb-3 text-xs font-black uppercase tracking-widest text-white/30">
+                <p id="streak-heading" className="px-1 pb-3 text-xs font-black uppercase tracking-widest text-subtle">
                     Win-streak anomalies (10+ consecutive wins)
                 </p>
                 {danger.error ? (
@@ -406,16 +406,16 @@ export default function DangerZonePanel({
                             <tbody>
                                 {danger.loading && suspiciousUsers.length === 0
                                     ? Array.from({ length: 3 }).map((_, i) => (
-                                        <tr key={i} className="border-b border-white/5 animate-pulse">
+                                        <tr key={i} className="border-b border-line animate-pulse">
                                             {[0, 1, 2, 3, 4].map((j) => (
-                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-white/[0.05]" /></td>
+                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-surface" /></td>
                                             ))}
                                         </tr>
                                     ))
                                     : suspiciousUsers.map((u) => {
                                         const status = String(u.status || 'active');
                                         return (
-                                            <tr key={u.user_address} className="hover:bg-white/[0.02] transition-colors border-b border-white/5 last:border-0">
+                                            <tr key={u.user_address} className="hover:bg-surface transition-colors border-b border-line last:border-0">
                                                 <td className="px-8 py-6">
                                                     <div className="flex flex-col">
                                                         <a
@@ -423,28 +423,28 @@ export default function DangerZonePanel({
                                                             target="_blank"
                                                             rel="noopener noreferrer"
                                                             title={u.user_address}
-                                                            className="font-mono text-white text-sm hover:underline"
+                                                            className="font-mono text-ink text-sm hover:underline"
                                                         >
                                                             {shortenAddress(u.user_address)} ↗
                                                         </a>
-                                                        <span className="text-xs text-white/20">Balance: {fmt(u.balance)}</span>
+                                                        <span className="text-xs text-faint">Balance: {fmt(u.balance)}</span>
                                                     </div>
                                                 </td>
                                                 <td className="px-8 py-6">
-                                                    <span className="text-rose-500 font-black text-2xl tabular-nums">{u.maxStreak} wins</span>
+                                                    <span className="text-down font-black text-2xl tabular-nums">{u.maxStreak} wins</span>
                                                 </td>
                                                 <td className="px-8 py-6">
                                                     <div className="flex gap-1">
                                                         {(u.latestBets ?? []).map((won, i) => (
-                                                            <div key={i} className={`w-1.5 h-4 rounded-full ${won ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]' : 'bg-rose-500/20'}`} />
+                                                            <div key={i} className={`w-1.5 h-4 rounded-full ${won ? 'bg-up' : 'bg-down'}`} />
                                                         ))}
                                                     </div>
                                                 </td>
                                                 <td className="px-8 py-6">
                                                     <span className={`text-xs font-black uppercase px-2 py-1 rounded ${
-                                                        status === 'banned' ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30'
-                                                            : status === 'frozen' ? 'bg-amber-500/20 text-amber-500 border border-amber-500/30'
-                                                                : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+                                                        status === 'banned' ? 'bg-down-soft text-down border border-down/30'
+                                                            : status === 'frozen' ? 'bg-down-soft text-down border border-down/30'
+                                                                : 'bg-up-soft text-up border border-up/30'
                                                     }`}>
                                                         {status}
                                                     </span>

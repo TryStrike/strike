@@ -25,7 +25,7 @@ export const Table = ({ children }: { children: React.ReactNode }) => (
 
 export const THead = ({ labels }: { labels: string[] }) => (
     <thead>
-        <tr className="border-b border-white/10 text-xs font-black uppercase tracking-wide text-white/30">
+        <tr className="border-b border-line text-xs font-black uppercase tracking-wide text-subtle">
             {labels.map((l, i) => (
                 <th key={l} className={`px-8 py-6 ${i === labels.length - 1 ? 'text-right' : ''}`}>{l}</th>
             ))}
@@ -34,11 +34,11 @@ export const THead = ({ labels }: { labels: string[] }) => (
 );
 
 export const StatBox = ({ title, value, label }: { title: string; value: React.ReactNode; label?: string }) => (
-    <div className="p-8 bg-white/[0.02] border border-white/5 rounded-[2.5rem] space-y-4">
-        <p className="text-xs font-black uppercase tracking-wider text-white/30">{title}</p>
+    <div className="p-8 bg-surface border border-line rounded-[2.5rem] space-y-4">
+        <p className="text-xs font-black uppercase tracking-wider text-subtle">{title}</p>
         <div>
-            <h3 className="text-4xl font-black text-white tracking-tight">{value}</h3>
-            {label && <p className="text-xs font-bold text-white/20 uppercase tracking-widest">{label}</p>}
+            <h3 className="text-4xl font-black text-ink tracking-tight">{value}</h3>
+            {label && <p className="text-xs font-bold text-faint uppercase tracking-widest">{label}</p>}
         </div>
     </div>
 );
@@ -48,7 +48,7 @@ export const TabBtn = ({ active, onClick, label }: { active: boolean; onClick: (
         onClick={onClick}
         aria-pressed={active}
         className={`pb-4 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${
-            active ? 'text-white border-white' : 'text-white/20 border-transparent hover:text-white/40'
+            active ? 'text-ink border-ink/20' : 'text-faint border-transparent hover:text-subtle'
         }`}
     >
         {label}
@@ -61,10 +61,10 @@ export function SkeletonRows({ rows = 6, className = '' }: { rows?: number; clas
         <div className={`space-y-3 ${className}`} role="status" aria-label="Loading">
             {Array.from({ length: rows }).map((_, i) => (
                 <div key={i} className="animate-pulse flex items-center gap-4 px-8 py-4">
-                    <div className="h-3 w-24 rounded bg-white/[0.06]" />
-                    <div className="h-3 flex-1 rounded bg-white/[0.05]" />
-                    <div className="h-3 w-16 rounded bg-white/[0.06]" />
-                    <div className="h-3 w-20 rounded bg-white/[0.04]" />
+                    <div className="h-3 w-24 rounded bg-surface" />
+                    <div className="h-3 flex-1 rounded bg-surface" />
+                    <div className="h-3 w-16 rounded bg-surface" />
+                    <div className="h-3 w-20 rounded bg-surface" />
                 </div>
             ))}
         </div>
@@ -74,8 +74,8 @@ export function SkeletonRows({ rows = 6, className = '' }: { rows?: number; clas
 export function EmptyState({ title, hint, action }: { title: string; hint?: string; action?: React.ReactNode }) {
     return (
         <div className="px-8 py-16 text-center space-y-2">
-            <p className="text-xs font-black uppercase tracking-widest text-white/25">{title}</p>
-            {hint && <p className="text-xs text-white/20 max-w-xl mx-auto leading-relaxed">{hint}</p>}
+            <p className="text-xs font-black uppercase tracking-widest text-faint">{title}</p>
+            {hint && <p className="text-xs text-faint max-w-xl mx-auto leading-relaxed">{hint}</p>}
             {action}
         </div>
     );
@@ -85,13 +85,13 @@ export function EmptyState({ title, hint, action }: { title: string; hint?: stri
 export function ErrorState({ message, onRetry, retrying }: { message: string; onRetry: () => void; retrying?: boolean }) {
     return (
         <div className="px-8 py-10 text-center space-y-3" role="alert">
-            <p className="text-xs font-black uppercase tracking-widest text-rose-400/80">Request failed</p>
-            <p className="text-xs text-white/40 font-mono max-w-xl mx-auto break-words">{message}</p>
+            <p className="text-xs font-black uppercase tracking-widest text-down">Request failed</p>
+            <p className="text-xs text-subtle font-mono max-w-xl mx-auto break-words">{message}</p>
             <button
                 type="button"
                 onClick={onRetry}
                 disabled={retrying}
-                className="px-5 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-[10px] font-black uppercase tracking-widest text-white transition-all disabled:opacity-50"
+                className="px-5 py-2 rounded-full bg-surface hover:bg-surface border border-line text-[10px] font-black uppercase tracking-widest text-ink transition-all disabled:opacity-50"
             >
                 {retrying ? 'Retrying…' : 'Retry'}
             </button>
@@ -107,10 +107,10 @@ export function PanelHeader({
     right?: React.ReactNode;
 }) {
     return (
-        <div className="p-6 border-b border-white/5 flex flex-wrap gap-4 items-center justify-between bg-white/[0.01]">
+        <div className="p-6 border-b border-line flex flex-wrap gap-4 items-center justify-between bg-surface">
             <div>
-                {eyebrow && <p className="text-xs font-black uppercase tracking-wider text-white/30">{eyebrow}</p>}
-                {title && <p className="text-sm text-white/50">{title}</p>}
+                {eyebrow && <p className="text-xs font-black uppercase tracking-wider text-subtle">{eyebrow}</p>}
+                {title && <p className="text-sm text-muted">{title}</p>}
             </div>
             <div className="flex gap-3 items-center flex-wrap justify-end">{right}</div>
         </div>
@@ -136,8 +136,8 @@ export function Pagination({
     const from = t === null || t === 0 ? 0 : Math.min(offset + 1, t);
     const to = t === null ? offset + limit : Math.min(offset + limit, t);
     return (
-        <div className="flex flex-wrap items-center justify-between gap-3 px-8 py-4 border-t border-white/5">
-            <p className="text-[11px] font-mono text-white/35">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-8 py-4 border-t border-line">
+            <p className="text-[11px] font-mono text-subtle">
                 {t === null ? '—' : `${from}–${to} of ${t.toLocaleString()}`} rows
             </p>
             <div className="flex gap-2">
@@ -145,7 +145,7 @@ export function Pagination({
                     type="button"
                     onClick={() => onPage(Math.max(0, offset - limit))}
                     disabled={!hasPrev || loading}
-                    className="px-4 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                    className="px-4 py-1.5 rounded-lg bg-surface hover:bg-surface border border-line text-[10px] font-black uppercase tracking-widest text-ink disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                 >
                     ← Prev
                 </button>
@@ -153,7 +153,7 @@ export function Pagination({
                     type="button"
                     onClick={() => onPage(offset + limit)}
                     disabled={!hasNext || loading}
-                    className="px-4 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                    className="px-4 py-1.5 rounded-lg bg-surface hover:bg-surface border border-line text-[10px] font-black uppercase tracking-widest text-ink disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                 >
                     Next →
                 </button>
@@ -195,8 +195,8 @@ export function TypedConfirmButton({
                 </button>
             ) : (
                 <span className="flex flex-col gap-1.5 items-end">
-                    <span className="text-[10px] font-mono text-white/40 whitespace-nowrap">
-                        Type <span className="text-white font-black">{phrase}</span> to confirm
+                    <span className="text-[10px] font-mono text-subtle whitespace-nowrap">
+                        Type <span className="text-ink font-black">{phrase}</span> to confirm
                     </span>
                     <span className="flex gap-1.5 items-center">
                         <input
@@ -215,7 +215,7 @@ export function TypedConfirmButton({
                             }}
                             placeholder={phrase}
                             aria-label={`Confirm by typing ${phrase}`}
-                            className="w-28 px-2 py-1 rounded bg-black/60 border border-white/15 text-white text-xs font-mono placeholder:text-white/20 focus:outline-none focus:border-white/40"
+                            className="w-28 px-2 py-1 rounded bg-ink/60 border border-line text-ink text-xs font-mono placeholder:text-faint focus:outline-none focus:border-ink/20"
                         />
                         <button
                             type="button"
@@ -230,14 +230,14 @@ export function TypedConfirmButton({
                                     setWorking(false);
                                 }
                             }}
-                            className="px-2.5 py-1 rounded bg-white text-black text-[10px] font-black uppercase tracking-wider disabled:opacity-30"
+                            className="px-2.5 py-1 rounded bg-ink text-white text-[10px] font-black uppercase tracking-wider disabled:opacity-30"
                         >
                             {working ? '…' : 'Go'}
                         </button>
                         <button
                             type="button"
                             onClick={() => { setOpen(false); setTyped(''); }}
-                            className="px-2 py-1 rounded text-[10px] font-bold uppercase text-white/40 hover:text-white/70"
+                            className="px-2 py-1 rounded text-[10px] font-bold uppercase text-subtle hover:text-muted"
                         >
                             Cancel
                         </button>

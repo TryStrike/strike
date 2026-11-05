@@ -36,14 +36,14 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
 
     if (requests.length === 0) {
         return (
-            <p className="px-8 py-10 text-center text-xs text-white/20 font-mono">
+            <p className="px-8 py-10 text-center text-xs text-faint font-mono">
                 {emptyHint ?? 'No pending withdrawal requests.'}
             </p>
         );
     }
 
     return (
-        <div className="divide-y divide-white/5">
+        <div className="divide-y divide-line">
             {requests.map((w) => {
                 const remaining = intentRemainingMs(w.signed_at, now);
                 const expired = remaining === null || remaining <= 0;
@@ -51,12 +51,12 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                 return (
                     <div
                         key={w.id}
-                        className={`flex flex-wrap items-center gap-x-6 gap-y-2 px-8 py-5 hover:bg-white/[0.02] transition-colors ${
+                        className={`flex flex-wrap items-center gap-x-6 gap-y-2 px-8 py-5 hover:bg-surface transition-colors ${
                             expired ? 'opacity-55' : ''
                         }`}
                     >
                         <div className="min-w-[180px]">
-                            <p className="text-xs font-mono text-white/40">
+                            <p className="text-xs font-mono text-subtle">
                                 {w.requested_at ? new Date(w.requested_at).toLocaleString() : '—'}
                             </p>
                             <a
@@ -64,15 +64,15 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 title={w.user_address}
-                                className="font-mono text-xs text-white/70 hover:text-white hover:underline"
+                                className="font-mono text-xs text-muted hover:text-ink hover:underline"
                             >
                                 {shortenAddress(w.user_address)} ↗
                             </a>
                         </div>
-                        <span className="text-xs font-black border border-white/10 rounded px-2 py-1 uppercase">
+                        <span className="text-xs font-black border border-line rounded px-2 py-1 uppercase">
                             {w.currency}
                         </span>
-                        <span className="font-mono text-white font-bold tabular-nums min-w-[120px]">
+                        <span className="font-mono text-ink font-bold tabular-nums min-w-[120px]">
                             −{Number(w.amount).toFixed(4)}
                         </span>
 
@@ -80,10 +80,10 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                         <span
                             className={`px-2.5 py-1 rounded font-mono text-xs font-bold tabular-nums border ${
                                 expired
-                                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-400'
+                                    ? 'border-down/30 bg-down-soft text-down'
                                     : remaining !== null && remaining < 120_000
-                                        ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
-                                        : 'border-white/10 bg-white/5 text-white/50'
+                                        ? 'border-down/30 bg-down-soft text-down'
+                                        : 'border-line bg-surface text-muted'
                             }`}
                             title={
                                 expired
@@ -95,7 +95,7 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                             {expired ? 'expired' : formatCountdown(remaining)}
                         </span>
                         {!w.signed_at && (
-                            <span className="text-[10px] text-white/25 uppercase font-black">unsigned</span>
+                            <span className="text-[10px] text-faint uppercase font-black">unsigned</span>
                         )}
 
                         <span className="ml-auto flex gap-2">
@@ -104,7 +104,7 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                                 onClick={() => onAccept(w.id)}
                                 disabled={expired || busy}
                                 title={expired ? 'Intent window expired — Accept is disabled. Reject and ask the user to re-request.' : undefined}
-                                className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 rounded text-xs font-black uppercase hover:bg-emerald-500/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-emerald-500/10"
+                                className="px-3 py-1.5 bg-up-soft border border-up/30 text-up rounded text-xs font-black uppercase hover:bg-up-soft transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-up-soft"
                             >
                                 {busy ? '…' : 'Accept'}
                             </button>
@@ -112,7 +112,7 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                                 type="button"
                                 onClick={() => onReject(w.id)}
                                 disabled={busy}
-                                className="px-3 py-1.5 bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded text-xs font-black uppercase hover:bg-rose-500/20 transition-colors disabled:opacity-30"
+                                className="px-3 py-1.5 bg-down-soft border border-down/30 text-down rounded text-xs font-black uppercase hover:bg-down-soft transition-colors disabled:opacity-30"
                             >
                                 Reject
                             </button>

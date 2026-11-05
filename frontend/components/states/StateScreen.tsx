@@ -163,8 +163,8 @@ export const StateScreen: React.FC<StateScreenProps> = ({
           onClick={handleRetry}
           className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] ${
             defaults.tone === 'error'
-              ? 'bg-[#2151F5] text-white shadow-[0_8px_20px_-8px_rgba(33,81,245,0.6)] hover:brightness-110'
-              : 'bg-white text-ink ring-1 ring-ink/[0.08] shadow-[0_1px_2px_rgba(10,12,16,0.04)] hover:ring-ink/30'
+              ? 'bg-up text-white hover:brightness-110'
+              : 'bg-white text-ink ring-1 ring-ink/[0.08] hover:ring-ink/30'
           }`}
         >
           <ArrowCounterClockwise size={15} weight="bold" aria-hidden="true" />

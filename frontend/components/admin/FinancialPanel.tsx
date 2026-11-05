@@ -131,13 +131,13 @@ export default function FinancialPanel({
                 title={
                     <>
                         House withdrawals. Each request carries the user&apos;s signed intent — valid for{' '}
-                        <span className="text-amber-300/90 font-mono">10:00</span> from signing, then Accept locks out.
+                        <span className="text-down font-mono">10:00</span> from signing, then Accept locks out.
                     </>
                 }
                 right={(
                     <a
                         href={exportHref}
-                        className="px-4 py-2 bg-blue-500/10 border border-blue-500/30 text-blue-400 font-black uppercase text-[10px] tracking-widest rounded-lg hover:bg-blue-500/20 transition-all"
+                        className="px-4 py-2 bg-up-soft border border-up/30 text-up font-black uppercase text-[10px] tracking-widest rounded-lg hover:bg-up-soft transition-all"
                     >
                         Export CSV
                     </a>
@@ -145,7 +145,7 @@ export default function FinancialPanel({
             />
 
             {/* Pending queue */}
-            <div className="border-b border-white/5">
+            <div className="border-b border-line">
                 {pending.error ? (
                     <ErrorState message={pending.error} onRetry={pending.reload} retrying={pending.loading} />
                 ) : (
@@ -158,29 +158,29 @@ export default function FinancialPanel({
                     />
                 )}
                 {actionError && (
-                    <p className="px-8 pb-4 text-xs font-mono text-rose-400" role="alert">{actionError}</p>
+                    <p className="px-8 pb-4 text-xs font-mono text-down" role="alert">{actionError}</p>
                 )}
                 {settledNotice && (
-                    <p className="px-8 pb-4 text-xs font-mono text-emerald-300" role="status">{settledNotice}</p>
+                    <p className="px-8 pb-4 text-xs font-mono text-up" role="status">{settledNotice}</p>
                 )}
                 {unresolved.length > 0 && (
-                    <div className="divide-y divide-white/5 border-t border-white/5">
+                    <div className="divide-y divide-line border-t border-line">
                         {unresolved.map((w) => (
                             <div key={w.id} className="flex flex-wrap items-center gap-x-6 gap-y-2 px-8 py-4">
-                                <span className="font-mono text-xs text-white/70">#{w.id} {shortenAddress(w.user_address)}</span>
-                                <span className="font-mono text-white font-bold tabular-nums">
+                                <span className="font-mono text-xs text-muted">#{w.id} {shortenAddress(w.user_address)}</span>
+                                <span className="font-mono text-ink font-bold tabular-nums">
                                     −{Number(w.amount).toFixed(4)} {w.currency}
                                 </span>
                                 {w.status === 'accepted' ? (
-                                    <span className="px-2.5 py-1 rounded font-mono text-xs font-bold border border-amber-500/40 bg-amber-500/10 text-amber-300">
+                                    <span className="px-2.5 py-1 rounded font-mono text-xs font-bold border border-down/30 bg-down-soft text-down">
                                         paying
                                     </span>
                                 ) : (
-                                    <span className="px-2.5 py-1 rounded font-mono text-xs font-bold border border-rose-500/40 bg-rose-500/10 text-rose-400">
+                                    <span className="px-2.5 py-1 rounded font-mono text-xs font-bold border border-down/30 bg-down-soft text-down">
                                         needs reconciliation
                                     </span>
                                 )}
-                                {w.notes && <span className="font-mono text-xs text-white/40 break-all">{w.notes}</span>}
+                                {w.notes && <span className="font-mono text-xs text-subtle break-all">{w.notes}</span>}
                             </div>
                         ))}
                     </div>
@@ -198,9 +198,9 @@ export default function FinancialPanel({
                             <tbody>
                                 {txs.loading && rows.length === 0
                                     ? Array.from({ length: 4 }).map((_, i) => (
-                                        <tr key={i} className="border-b border-white/5 animate-pulse">
+                                        <tr key={i} className="border-b border-line animate-pulse">
                                             {[0, 1, 2, 3, 4].map((j) => (
-                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-white/[0.05]" /></td>
+                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-surface" /></td>
                                             ))}
                                         </tr>
                                     ))
@@ -209,15 +209,15 @@ export default function FinancialPanel({
                                             ? explorerTxUrl(t.transaction_hash)
                                             : null;
                                         return (
-                                            <tr key={t.id} className="hover:bg-white/[0.02] transition-colors border-b border-white/5 last:border-0">
+                                            <tr key={t.id} className="hover:bg-surface transition-colors border-b border-line last:border-0">
                                                 <td className="px-8 py-6 text-xs font-mono whitespace-nowrap">{new Date(t.created_at).toLocaleString()}</td>
                                                 <td className="px-8 py-6 font-mono text-xs">{shortenAddress(t.user_address)}</td>
                                                 <td className="px-8 py-6">
-                                                    <span className={`${t.operation_type === 'deposit' ? 'text-emerald-400 bg-emerald-400/10' : 'text-rose-400 bg-rose-400/10'} px-2 py-0.5 rounded uppercase text-xs font-black`}>
+                                                    <span className={`${t.operation_type === 'deposit' ? 'text-up bg-up-soft' : 'text-down bg-down-soft'} px-2 py-0.5 rounded uppercase text-xs font-black`}>
                                                         {t.operation_type}
                                                     </span>
                                                 </td>
-                                                <td className="px-8 py-6 text-white font-mono font-bold tabular-nums">
+                                                <td className="px-8 py-6 text-ink font-mono font-bold tabular-nums">
                                                     {t.operation_type === 'deposit' ? '+' : '-'}{Number(t.amount).toFixed(4)} {t.currency}
                                                 </td>
                                                 <td className="px-8 py-6 text-right">
@@ -226,12 +226,12 @@ export default function FinancialPanel({
                                                             href={explorerUrl}
                                                             target="_blank"
                                                             rel="noopener noreferrer"
-                                                            className="font-mono text-xs text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-400/30"
+                                                            className="font-mono text-xs text-up hover:text-up underline underline-offset-4 decoration-up"
                                                         >
                                                             {String(t.transaction_hash).slice(0, 10)}...
                                                         </a>
                                                     ) : (
-                                                        <span className="font-mono text-xs text-white/20">{t.transaction_hash || 'INTERNAL'}</span>
+                                                        <span className="font-mono text-xs text-faint">{t.transaction_hash || 'INTERNAL'}</span>
                                                     )}
                                                 </td>
                                             </tr>

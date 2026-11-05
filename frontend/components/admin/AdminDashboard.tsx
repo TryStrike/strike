@@ -233,21 +233,21 @@ export default function AdminDashboard() {
     // ── Login gate ───────────────────────────────────────────────────────────
     if (probing) {
         return (
-            <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4">
-                <p className="text-xs font-mono text-white/30 animate-pulse">Checking session…</p>
+            <div className="min-h-screen bg-white flex items-center justify-center p-4">
+                <p className="text-xs font-mono text-subtle animate-pulse">Checking session…</p>
             </div>
         );
     }
 
     if (!isAuthorized) {
         return (
-            <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4">
-                <div className="w-full max-w-sm bg-white/[0.02] border border-white/10 rounded-3xl p-8 backdrop-blur-xl">
+            <div className="min-h-screen bg-white flex items-center justify-center p-4">
+                <div className="w-full max-w-sm bg-surface border border-line rounded-3xl p-8 backdrop-blur-xl">
                     <div className="text-center mb-8">
-                        <h2 className="text-xl font-black text-white uppercase tracking-tight">Neural Access</h2>
-                        <p className="text-xs text-white/30 uppercase tracking-wide font-bold mt-2">Restricted Area</p>
+                        <h2 className="text-xl font-black text-ink uppercase tracking-tight">Neural Access</h2>
+                        <p className="text-xs text-subtle uppercase tracking-wide font-bold mt-2">Restricted Area</p>
                         {sessionExpired && (
-                            <p className="mt-3 text-xs text-amber-400/80 font-mono">Session expired — please log in again.</p>
+                            <p className="mt-3 text-xs text-down font-mono">Session expired — please log in again.</p>
                         )}
                     </div>
                     <form onSubmit={handleLogin} className="space-y-4">
@@ -257,16 +257,16 @@ export default function AdminDashboard() {
                             onChange={(e) => setPassword(e.target.value)}
                             placeholder="ACCESS KEY"
                             aria-label="Access key"
-                            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-center text-white font-mono text-sm tracking-[0.5em] placeholder:tracking-normal placeholder:text-white/20 focus:outline-none focus:border-white/20 transition-all"
+                            className="w-full bg-surface border border-line rounded-xl px-4 py-3 text-center text-ink font-mono text-sm tracking-[0.5em] placeholder:tracking-normal placeholder:text-faint focus:outline-none focus:border-line transition-all"
                             autoFocus
                         />
                         {loginError && (
-                            <p role="alert" className="text-center text-xs font-mono text-rose-400">{loginError}</p>
+                            <p role="alert" className="text-center text-xs font-mono text-down">{loginError}</p>
                         )}
                         <button
                             type="submit"
                             disabled={loggingIn || password.length === 0}
-                            className="w-full bg-white text-black font-bold uppercase tracking-widest text-xs py-3 rounded-xl hover:bg-white/90 transition-colors disabled:opacity-50"
+                            className="w-full bg-ink text-white font-bold uppercase tracking-widest text-xs py-3 rounded-xl transition-colors disabled:opacity-50"
                         >
                             {loggingIn ? 'Checking…' : 'Authorize'}
                         </button>
@@ -282,20 +282,20 @@ export default function AdminDashboard() {
     const pnlFilters: DashFilters = filters.status ? { ...filters, status: '' } : filters;
 
     return (
-        <div className="min-h-screen bg-[#050505] text-[#a0a0a0] p-6 lg:p-12 font-sans selection:bg-white selection:text-black">
+        <div className="min-h-screen bg-white text-subtle p-6 lg:p-12">
             <div className="max-w-[1400px] mx-auto space-y-12">
                 {/* Header */}
-                <header className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-white/5 pb-8">
+                <header className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-line pb-8">
                     <div className="space-y-2">
                         <div className="flex items-center gap-3">
-                            <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
-                            <h1 className="text-sm font-bold tracking-wider text-white uppercase">System Terminal v3.1</h1>
+                            <div className="w-2 h-2 bg-ink rounded-full animate-pulse" />
+                            <h1 className="text-sm font-bold tracking-wider text-ink uppercase">System Terminal v3.1</h1>
                         </div>
-                        <p className="text-4xl md:text-5xl font-black text-white tracking-tight">Core Operations</p>
-                        <p className="text-[11px] font-mono text-white/25">
+                        <p className="text-4xl md:text-5xl font-black text-ink tracking-tight">Core Operations</p>
+                        <p className="text-[11px] font-mono text-faint">
                             Auto-sync {autoSync ? `every ${AUTO_REFRESH_MS / 1000}s` : 'off'} · paused while this tab is hidden ·{' '}
                             {lastSync ? `last pulse ${new Date(lastSync).toLocaleTimeString()}` : 'idle'} ·{' '}
-                            <span className="text-white/35">shortcuts: 1–{DASHBOARD_TABS.length} tabs, r re-sync</span>
+                            <span className="text-subtle">shortcuts: 1–{DASHBOARD_TABS.length} tabs, r re-sync</span>
                         </p>
                     </div>
                     <div className="flex flex-wrap gap-3">
@@ -305,8 +305,8 @@ export default function AdminDashboard() {
                             aria-pressed={autoSync}
                             className={`px-6 py-3 border rounded-full text-xs font-black uppercase tracking-widest transition-all ${
                                 autoSync
-                                    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200 hover:bg-emerald-500/20'
-                                    : 'bg-white/5 border-white/10 text-white/40 hover:text-white'
+                                    ? 'bg-up-soft border-up/30 text-up hover:bg-up-soft'
+                                    : 'bg-surface border-line text-subtle hover:text-ink'
                             }`}
                         >
                             {autoSync ? 'Live sync' : 'Sync paused'}
@@ -314,14 +314,14 @@ export default function AdminDashboard() {
                         <button
                             type="button"
                             onClick={bumpSync}
-                            className="px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full text-xs font-black text-white uppercase tracking-widest transition-all"
+                            className="px-6 py-3 bg-surface hover:bg-surface border border-line rounded-full text-xs font-black text-ink uppercase tracking-widest transition-all"
                         >
                             Sync Terminal
                         </button>
                         <button
                             type="button"
                             onClick={handleLogout}
-                            className="px-6 py-3 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 rounded-full text-xs font-black text-rose-300 uppercase tracking-widest transition-all"
+                            className="px-6 py-3 bg-down-soft hover:bg-down-soft border border-down/30 rounded-full text-xs font-black text-down uppercase tracking-widest transition-all"
                         >
                             Log out
                         </button>
@@ -334,7 +334,7 @@ export default function AdminDashboard() {
 
                 {/* Navigation & global filters */}
                 <div className="space-y-6">
-                    <div className="flex flex-col gap-6 border-b border-white/5 pb-6">
+                    <div className="flex flex-col gap-6 border-b border-line pb-6">
                         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
                             <nav className="flex flex-wrap gap-8" role="tablist" aria-label="Dashboard sections">
                                 {DASHBOARD_TABS.map((tab, i) => (
@@ -344,7 +344,7 @@ export default function AdminDashboard() {
                                             onClick={() => onPatch({ tab, offset: 0, status: '' })}
                                             label={TAB_LABELS[tab]}
                                         />
-                                        <span className="absolute -top-1 -right-4 text-[9px] font-mono text-white/15">{i + 1}</span>
+                                        <span className="absolute -top-1 -right-4 text-[9px] font-mono text-faint">{i + 1}</span>
                                     </span>
                                 ))}
                             </nav>
@@ -363,7 +363,7 @@ export default function AdminDashboard() {
                                         if (e.key === 'Escape') { setQDraft(''); onPatch({ q: '' }); }
                                     }}
                                     aria-label="Global search"
-                                    className="w-full bg-white/[0.03] border border-white/10 rounded-2xl px-6 py-4 text-xs text-white focus:outline-none focus:border-white/30 transition-all"
+                                    className="w-full bg-surface border border-line rounded-2xl px-6 py-4 text-xs text-ink focus:outline-none focus:border-ink/20 transition-all"
                                 />
                             </div>
                         </div>
@@ -372,11 +372,11 @@ export default function AdminDashboard() {
                         <div className="flex flex-wrap gap-3 items-end">
                             {statusOptions && statusOptions.length > 0 && (
                                 <label className="flex flex-col gap-1">
-                                    <span className="text-[10px] font-black uppercase tracking-widest text-white/25">Status</span>
+                                    <span className="text-[10px] font-black uppercase tracking-widest text-faint">Status</span>
                                     <select
                                         value={filters.status}
                                         onChange={(e) => onPatch({ status: e.target.value })}
-                                        className="bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-white/30"
+                                        className="bg-ink/40 border border-line rounded-xl px-3 py-2 text-xs text-ink focus:outline-none focus:border-ink/20"
                                     >
                                         <option value="">Any</option>
                                         {statusOptions.map((o) => (
@@ -386,38 +386,38 @@ export default function AdminDashboard() {
                                 </label>
                             )}
                             <label className="flex flex-col gap-1">
-                                <span className="text-[10px] font-black uppercase tracking-widest text-white/25">Currency</span>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-faint">Currency</span>
                                 <input
                                     value={filters.currency}
                                     onChange={(e) => onPatch({ currency: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 16) })}
                                     placeholder="ANY"
-                                    className="w-28 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-white/30"
+                                    className="w-28 bg-ink/40 border border-line rounded-xl px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-ink/20"
                                 />
                             </label>
                             <label className="flex flex-col gap-1">
-                                <span className="text-[10px] font-black uppercase tracking-widest text-white/25">From</span>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-faint">From</span>
                                 <input
                                     type="date"
                                     value={/^\d{4}-\d{2}-\d{2}/.test(filters.from) ? filters.from.slice(0, 10) : ''}
                                     onChange={(e) => onPatch({ from: e.target.value ? `${e.target.value}T00:00:00Z` : '' })}
-                                    className="bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-white/30"
+                                    className="bg-ink/40 border border-line rounded-xl px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-ink/20"
                                 />
                             </label>
                             <label className="flex flex-col gap-1">
-                                <span className="text-[10px] font-black uppercase tracking-widest text-white/25">To</span>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-faint">To</span>
                                 <input
                                     type="date"
                                     value={/^\d{4}-\d{2}-\d{2}/.test(filters.to) ? filters.to.slice(0, 10) : ''}
                                     onChange={(e) => onPatch({ to: e.target.value ? `${e.target.value}T23:59:59Z` : '' })}
-                                    className="bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-white/30"
+                                    className="bg-ink/40 border border-line rounded-xl px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-ink/20"
                                 />
                             </label>
                             <label className="flex flex-col gap-1">
-                                <span className="text-[10px] font-black uppercase tracking-widest text-white/25">Page size</span>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-faint">Page size</span>
                                 <select
                                     value={String(filters.limit)}
                                     onChange={(e) => onPatch({ limit: Number(e.target.value) })}
-                                    className="bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-white/30"
+                                    className="bg-ink/40 border border-line rounded-xl px-3 py-2 text-xs font-mono text-ink focus:outline-none focus:border-ink/20"
                                 >
                                     {[25, 50, 100, LIST_MAX_LIMIT].map((n) => (
                                         <option key={n} value={n}>{n}</option>
@@ -432,19 +432,19 @@ export default function AdminDashboard() {
                                         setQDraft('');
                                         onPatch({ q: '', status: '', currency: '', from: '', to: '', offset: 0 });
                                     }}
-                                    className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-white/60 hover:text-white transition-all"
+                                    className="px-4 py-2 rounded-xl bg-surface hover:bg-surface border border-line text-[10px] font-black uppercase tracking-widest text-muted hover:text-ink transition-all"
                                 >
                                     Clear filters
                                 </button>
                             )}
-                            <span className="ml-auto text-[10px] font-mono text-white/20 self-center">
+                            <span className="ml-auto text-[10px] font-mono text-faint self-center">
                                 URL is the state — this view is shareable as-is.
                             </span>
                         </div>
                     </div>
 
                     {/* Active panel */}
-                    <div className="bg-white/[0.01] border border-white/5 rounded-[2.5rem] overflow-hidden">
+                    <div className="bg-surface border border-line rounded-[2.5rem] overflow-hidden">
                         <div className="overflow-x-auto">
                             {filters.tab === 'wallet_intel' && (
                                 <WalletIntelPanel filters={filters} nonce={nonce} onUnauthorized={handleUnauthorized} onPatch={onPatch} />

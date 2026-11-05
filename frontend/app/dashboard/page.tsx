@@ -15,15 +15,15 @@ import AdminDashboard from '@/components/admin/AdminDashboard';
 
 function DashboardFallback() {
     return (
-        <div className="min-h-screen bg-[#050505] p-6 lg:p-12">
+        <div className="min-h-screen bg-white p-6 lg:p-12">
             <div className="max-w-[1400px] mx-auto space-y-8">
-                <div className="h-24 w-72 rounded-2xl bg-white/[0.03] animate-pulse" />
+                <div className="h-24 w-72 rounded-2xl bg-surface animate-pulse" />
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     {Array.from({ length: 4 }).map((_, i) => (
-                        <div key={i} className="h-40 rounded-[2.5rem] bg-white/[0.02] animate-pulse" />
+                        <div key={i} className="h-40 rounded-[2.5rem] bg-surface animate-pulse" />
                     ))}
                 </div>
-                <div className="h-96 rounded-[2.5rem] bg-white/[0.02] animate-pulse" />
+                <div className="h-96 rounded-[2.5rem] bg-surface animate-pulse" />
             </div>
         </div>
     );

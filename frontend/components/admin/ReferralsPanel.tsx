@@ -19,9 +19,9 @@ interface UsersApi {
 }
 
 function tierFor(count: number): { label: string; cls: string } {
-    if (count > 10) return { label: 'Ambassador', cls: 'text-purple-400 bg-purple-400/10' };
-    if (count > 0) return { label: 'Pro', cls: 'text-emerald-400 bg-emerald-400/10' };
-    return { label: 'Starter', cls: 'text-white/20 bg-white/5' };
+    if (count > 10) return { label: 'Ambassador', cls: 'text-up bg-up-soft' };
+    if (count > 0) return { label: 'Pro', cls: 'text-up bg-up-soft' };
+    return { label: 'Starter', cls: 'text-faint bg-surface' };
 }
 
 export default function ReferralsPanel({
@@ -58,9 +58,9 @@ export default function ReferralsPanel({
                             <tbody>
                                 {list.loading && rows.length === 0
                                     ? Array.from({ length: 4 }).map((_, i) => (
-                                        <tr key={i} className="border-b border-white/5 animate-pulse">
+                                        <tr key={i} className="border-b border-line animate-pulse">
                                             {[0, 1, 2, 3, 4].map((j) => (
-                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-white/[0.05]" /></td>
+                                                <td key={j} className="px-8 py-6"><div className="h-3 rounded bg-surface" /></td>
                                             ))}
                                         </tr>
                                     ))
@@ -68,25 +68,25 @@ export default function ReferralsPanel({
                                         const count = u.referral?.referral_count || 0;
                                         const tier = tierFor(count);
                                         return (
-                                            <tr key={u.user_address + u.currency} className="hover:bg-white/[0.02] transition-colors border-b border-white/5">
+                                            <tr key={u.user_address + u.currency} className="hover:bg-surface transition-colors border-b border-line">
                                                 <td className="px-8 py-6">
                                                     <a
                                                         href={explorerAddressUrl(u.user_address)}
                                                         target="_blank"
                                                         rel="noopener noreferrer"
                                                         title={u.user_address}
-                                                        className="font-mono text-white text-sm hover:text-white/70 hover:underline transition-colors"
+                                                        className="font-mono text-ink text-sm hover:text-muted hover:underline transition-colors"
                                                     >
                                                         {shortenAddress(u.user_address)} ↗
                                                     </a>
-                                                    <span className="block text-[11px] text-white/25">{u.username || 'Anonymous'}</span>
+                                                    <span className="block text-[11px] text-faint">{u.username || 'Anonymous'}</span>
                                                 </td>
-                                                <td className="px-8 py-6 font-black text-white uppercase tracking-widest">{u.referral?.referral_code}</td>
-                                                <td className="px-8 py-6 text-white/40 font-mono text-xs">
+                                                <td className="px-8 py-6 font-black text-ink uppercase tracking-widest">{u.referral?.referral_code}</td>
+                                                <td className="px-8 py-6 text-subtle font-mono text-xs">
                                                     {u.referral?.referred_by ? shortenAddress(String(u.referral.referred_by)) : 'DIRECT'}
                                                 </td>
                                                 <td className="px-8 py-6">
-                                                    <span className="text-xl font-black text-white tabular-nums">{count}</span>
+                                                    <span className="text-xl font-black text-ink tabular-nums">{count}</span>
                                                 </td>
                                                 <td className="px-8 py-6 text-right">
                                                     <span className={`px-3 py-1 rounded text-sm font-black uppercase ${tier.cls}`}>
