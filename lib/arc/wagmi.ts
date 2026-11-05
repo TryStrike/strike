@@ -2,6 +2,7 @@ import { getDefaultConfig } from 'connectkit';
 import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { getArcConfig } from './config';
+import { BRAND } from '@/lib/brand';
 
 const arcConfig = getArcConfig();
 
@@ -30,14 +31,11 @@ export const config = createConfig(
     walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'dummy-id',
 
     // Required App Info
-    appName: 'STRIKE',
+    appName: BRAND.name,
 
     // Optional App Info
-    appDescription: 'Binary Options on Arc',
+    appDescription: BRAND.tagline,
     appUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
-    appIcon:
-      typeof window !== 'undefined'
-        ? `${window.location.origin}/overflowlogo.png`
-        : '/overflowlogo.png',
+    appIcon: typeof window !== 'undefined' ? `${window.location.origin}/favicon.ico` : '/favicon.ico',
   })
 );

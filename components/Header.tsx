@@ -7,6 +7,7 @@ import { HeaderMenu } from './game/HeaderMenu';
 import { WalletConnect } from './wallet';
 import { useStore } from '@/lib/store';
 import { motion } from 'framer-motion';
+import { BRAND } from '@/lib/brand';
 
 export function Header() {
     const [demoActivated, setDemoActivated] = useState(false);
@@ -52,7 +53,7 @@ export function Header() {
                         className="text-xl sm:text-2xl font-black tracking-tighter sm:tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-white via-purple-400 to-white cursor-pointer select-none"
                         style={{ fontFamily: 'var(--font-orbitron)' }}
                     >
-                        STRIKE
+                        {BRAND.name.toUpperCase()}
                     </motion.span>
                 </Link>
                 {demoActivated && (
@@ -63,11 +64,6 @@ export function Header() {
             </div>
 
             <div className="flex items-center gap-2 sm:gap-4">
-                {pathname === '/' && (
-                    <div className="hidden xl:flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-white/55">
-                    </div>
-                )}
-
                 {pathname !== '/' && accessCode !== null && (
                     <button
                         onClick={activateDemoMode}

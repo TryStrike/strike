@@ -3,6 +3,7 @@ import { Geist, Geist_Mono, Orbitron, Inter_Tight, Instrument_Serif, JetBrains_M
 import "./globals.css";
 import { Providers } from "./providers";
 import { PostHogProvider } from "@/lib/posthog/PostHogProvider";
+import { BRAND } from "@/lib/brand";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,36 +26,10 @@ const orbitron = Orbitron({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://ethglobalmumbai.vercel.app'),
-  title: "Strike — 5-second binary rounds, settled in USDC on Arc",
-  description:
-    "Call higher or lower on crypto, forex, stocks and metals in 5-second to 1-minute rounds. Deposit and withdraw USDC on Arc.",
-  keywords: [
-    "binary options",
-    "crypto trading",
-    "price feeds",
-    "Arc",
-    "USDC",
-    "Web3",
-    "prediction",
-  ],
-  icons: {
-    icon: "/overflowlogo.ico",
-    shortcut: "/overflowlogo.ico",
-    apple: "/overflowlogo.ico",
-  },
-  openGraph: {
-    title: "Strike — 5-second binary rounds, settled in USDC on Arc",
-    description:
-      "Call higher or lower in 5-second to 1-minute rounds. Deposit and withdraw USDC on Arc.",
-    images: [{ url: '/overflowlogo.png', width: 512, height: 512, alt: 'Strike' }],
-  },
-  twitter: {
-    card: 'summary_large_image',
-    title: "Strike — 5-second binary rounds, settled in USDC on Arc",
-    description: "Call higher or lower in 5-second rounds. USDC on Arc.",
-    images: ['/overflowlogo.png'],
-  },
+  metadataBase: new URL(BRAND.url),
+  title: `${BRAND.name} — ${BRAND.tagline}`,
+  description: BRAND.description,
+  openGraph: { title: BRAND.name, description: BRAND.description },
 };
 
 import { Header } from "@/components/Header";
