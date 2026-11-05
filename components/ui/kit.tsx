@@ -7,9 +7,15 @@ import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
+/** Translucent blue glass for primary actions (replaces solid black). */
+export const glassPrimary =
+  'bg-[linear-gradient(180deg,rgba(33,81,245,0.95),rgba(33,81,245,0.78))] text-white backdrop-blur-xl ring-1 ring-inset ring-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_10px_28px_-12px_rgba(33,81,245,0.7)] transition-all hover:brightness-110 active:scale-[0.98]';
+/** Frosted blue tint for a selected chip/pill. */
+export const glassSelected = 'bg-up/[0.08] text-up ring-1 ring-inset ring-up/20 backdrop-blur-xl';
+
 type Variant = 'primary' | 'secondary' | 'ghost' | 'up' | 'down';
 const VARIANT: Record<Variant, string> = {
-  primary: 'bg-ink text-white hover:bg-up',
+  primary: glassPrimary,
   secondary: 'bg-white/70 backdrop-blur-xl ring-1 ring-ink/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(10,12,16,0.04)] text-ink hover:ring-ink/30',
   ghost: 'text-muted hover:text-ink hover:bg-surface',
   up: 'bg-up text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_8px_20px_-8px_rgba(33,81,245,0.6)] hover:brightness-110 active:scale-[0.98]',

@@ -3,7 +3,8 @@
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { Modal } from '@/components/ui/Modal';
-import { Button, Segmented } from '@/components/ui/kit';
+import { Button, Segmented, glassSelected } from '@/components/ui/kit';
+import { ArrowUpRight } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
@@ -208,7 +209,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const chip = (on: boolean) =>
     `h-9 rounded-full font-jet text-[13px] transition-colors disabled:opacity-40 ${
-      on ? 'bg-ink text-white' : 'bg-surface text-muted hover:text-ink'
+      on ? glassSelected : 'bg-ink/[0.04] text-muted hover:text-ink'
     }`;
 
   return (
@@ -221,6 +222,16 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       <p className="-mt-4 mb-6 text-[15px] text-muted">
         Move USDC from your wallet to your trading balance.
       </p>
+      {config.chainId === 5042002 && (
+        <a
+          href="https://faucet.circle.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="-mt-3 mb-6 inline-flex items-center gap-1 text-sm font-medium text-up hover:underline"
+        >
+          Need test USDC? Get it free from Circle&apos;s faucet <ArrowUpRight size={14} />
+        </a>
+      )}
 
       {ARC_ASSETS.length > 1 && (
         <Segmented

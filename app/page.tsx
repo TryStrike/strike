@@ -6,6 +6,8 @@ import { BlurFade, CountdownRing, Marquee, SlidingNumber, WordRotate } from '@/c
 import { explorerAddressUrl, getArcConfig } from '@/lib/arc/config';
 import { BRAND } from '@/lib/brand';
 import { SiteNav } from '@/components/SiteNav';
+import { ArcProof } from '@/components/landing/ArcProof';
+import { glassPrimary } from '@/components/ui/kit';
 import { ArrowDown, ArrowUp, ArrowUpRight } from '@phosphor-icons/react';
 
 const HERO_ASSETS = [
@@ -15,7 +17,6 @@ const HERO_ASSETS = [
   { symbol: 'NVDA', name: 'Nvidia', pair: 'NVDA / USD' },
 ];
 const TICKER = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'GOLD', 'SILVER', 'EUR', 'GBP', 'JPY', 'AAPL', 'NVDA', 'TSLA', 'SPX', 'WTI'];
-const ASSETS = Array.from(new Set([...HERO_ASSETS.map((a) => a.symbol), ...TICKER]));
 
 function fmt(v: number) {
   const dp = v >= 100 ? 2 : v >= 1 ? 4 : 6;
@@ -32,11 +33,8 @@ function usePrices(ms = 1500) {
     let live = true;
     const tick = async () => {
       try {
-        const res = await fetch('/api/prices/latest', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ assets: ASSETS }),
-        });
+        // GET of all assets: CDN-cached and shared with the trade screen.
+        const res = await fetch('/api/prices/latest');
         const { prices: next } = await res.json();
         if (!live || !next) return;
         setState((cur) => ({ prev: cur.prices, prices: { ...cur.prices, ...next } }));
@@ -72,7 +70,7 @@ export default function Landing() {
       <SiteNav
         sticky
         right={
-          <Link href="/trade" className="rounded-full bg-[#0A0C10] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#2151F5]">
+          <Link href="/trade" className={`rounded-full px-4 py-2 text-sm font-semibold ${glassPrimary}`}>
             Launch app
           </Link>
         }
@@ -108,7 +106,7 @@ export default function Landing() {
 
           <BlurFade delay={0.24}>
             <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
-              <Link href="/trade" className="inline-flex h-12 items-center rounded-full bg-[#0A0C10] px-6 font-semibold text-white transition-colors hover:bg-[#2151F5]">
+              <Link href="/trade" className={`inline-flex h-12 items-center rounded-full px-6 font-semibold ${glassPrimary}`}>
                 Start trading
               </Link>
               <a href="#how" className="inline-flex h-12 items-center rounded-full bg-white px-6 font-semibold ring-1 ring-[#E3E6EB] transition-colors hover:ring-[#0A0C10]">
@@ -234,6 +232,8 @@ export default function Landing() {
         </div>
       </section>
 
+      <ArcProof />
+
       {/* Closing */}
       <section className="border-t border-[#0A0C10]/[0.06]">
         <BlurFade className="mx-auto flex max-w-[720px] flex-col items-center px-5 py-28 text-center sm:px-8">
@@ -241,7 +241,7 @@ export default function Landing() {
             Make the <span className="italic text-[#2151F5]">call.</span>
           </h2>
           <p className="mt-5 text-[17px] text-[#6B7280]">Free test USDC at faucet.circle.com.</p>
-          <Link href="/trade" className="mt-8 inline-flex h-12 items-center rounded-full bg-[#0A0C10] px-6 font-semibold text-white transition-colors hover:bg-[#2151F5]">
+          <Link href="/trade" className={`mt-8 inline-flex h-12 items-center rounded-full px-6 font-semibold ${glassPrimary}`}>
             Start trading
           </Link>
         </BlurFade>

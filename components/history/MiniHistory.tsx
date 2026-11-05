@@ -1,7 +1,8 @@
 'use client';
 
 import React from 'react';
-import { ChartLineUp } from '@phosphor-icons/react';
+import { ChartLineUp, ShareNetwork } from '@phosphor-icons/react';
+import { shareWinUrl } from '@/components/game/WinBurst';
 import { useStore } from '@/lib/store';
 import { Label, cx } from '@/components/ui/kit';
 
@@ -23,8 +24,21 @@ export const MiniHistory: React.FC = () => {
                   {new Date(bet.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </div>
               </div>
-              <span className={cx('font-jet font-medium', bet.won ? 'text-up' : 'text-down')}>
-                {bet.won ? `+${parseFloat(bet.payout).toFixed(2)}` : `−${parseFloat(bet.amount).toFixed(2)}`}
+              <span className="flex items-center gap-2">
+                <span className={cx('font-jet font-medium', bet.won ? 'text-up' : 'text-down')}>
+                  {bet.won ? `+${parseFloat(bet.payout).toFixed(2)}` : `−${parseFloat(bet.amount).toFixed(2)}`}
+                </span>
+                {bet.won && (
+                  <a
+                    href={shareWinUrl(parseFloat(bet.payout) || 0, bet.target.label)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="Share this win on X"
+                    className="text-faint hover:text-ink"
+                  >
+                    <ShareNetwork size={14} />
+                  </a>
+                )}
               </span>
             </li>
           ))}
@@ -51,7 +65,7 @@ export const IndicatorsToggle: React.FC = () => {
       aria-pressed={isIndicatorsOpen}
       className={cx(
         'inline-flex h-9 items-center gap-2 rounded-full px-3.5 font-tight text-sm font-medium ring-1 transition-colors',
-        on ? 'bg-ink text-white ring-ink' : 'bg-white text-muted ring-line hover:text-ink'
+        on ? 'bg-up/[0.08] text-up ring-up/20 backdrop-blur-xl' : 'bg-white/70 text-muted ring-ink/[0.06] backdrop-blur-xl hover:text-ink'
       )}
     >
       <ChartLineUp size={16} />

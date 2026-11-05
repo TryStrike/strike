@@ -10,8 +10,11 @@ import { ethers } from 'ethers';
 import { useToast } from '@/lib/hooks/useToast';
 import { useAccount } from 'wagmi';
 import { ArrowDown, ArrowUp, Check, X } from '@phosphor-icons/react';
-import { Button, Field, Label, Segmented } from '@/components/ui/kit';
+import { Button, Field, Label, Segmented, glassSelected } from '@/components/ui/kit';
 import { IndicatorsToggle, MiniHistory } from '@/components/history/MiniHistory';
+import { WinBurst } from './WinBurst';
+import { explorerAddressUrl } from '@/lib/arc/config';
+import { ArrowUpRight } from '@phosphor-icons/react';
 import posthog from 'posthog-js';
 
 
@@ -41,7 +44,8 @@ export const GameBoard: React.FC = () => {
     selectedCurrency,
     accessCode,
     setConnectModalOpen,
-  } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, network: s.network, walletBalance: s.walletBalance, gameMode: s.gameMode, setGameMode: s.setGameMode, setTimeframeSeconds: s.setTimeframeSeconds, selectedAsset: s.selectedAsset, placeBetFromHouseBalance: s.placeBetFromHouseBalance, isPlacingBet: s.isPlacingBet, isBlitzActive: s.isBlitzActive, blitzEndTime: s.blitzEndTime, nextBlitzTime: s.nextBlitzTime, hasBlitzAccess: s.hasBlitzAccess, updateBlitzTimer: s.updateBlitzTimer, enableBlitzAccess: s.enableBlitzAccess, error: s.error, clearError: s.clearError, isLoading: s.isLoading, userTier: s.userTier, refreshWalletBalance: s.refreshWalletBalance, selectedCurrency: s.selectedCurrency, accessCode: s.accessCode, setConnectModalOpen: s.setConnectModalOpen })));
+    bets,
+  } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, network: s.network, walletBalance: s.walletBalance, gameMode: s.gameMode, setGameMode: s.setGameMode, setTimeframeSeconds: s.setTimeframeSeconds, selectedAsset: s.selectedAsset, placeBetFromHouseBalance: s.placeBetFromHouseBalance, isPlacingBet: s.isPlacingBet, isBlitzActive: s.isBlitzActive, blitzEndTime: s.blitzEndTime, nextBlitzTime: s.nextBlitzTime, hasBlitzAccess: s.hasBlitzAccess, updateBlitzTimer: s.updateBlitzTimer, enableBlitzAccess: s.enableBlitzAccess, error: s.error, clearError: s.clearError, isLoading: s.isLoading, userTier: s.userTier, refreshWalletBalance: s.refreshWalletBalance, selectedCurrency: s.selectedCurrency, accessCode: s.accessCode, setConnectModalOpen: s.setConnectModalOpen, bets: s.bets })));
 
   const { connector } = useAccount();
 
@@ -275,11 +279,44 @@ export const GameBoard: React.FC = () => {
       error.includes('Insufficient house') ||
       error.includes('balance'));
 
+  // Session strip: rounds settled since this page opened.
+  const [sessionStart] = useState(() => Date.now());
+  const sessionBets = bets.filter((b) => b.timestamp >= sessionStart);
+  const sessionPnl = sessionBets.reduce((sum, b) => sum + (b.won ? parseFloat(b.payout) - parseFloat(b.amount) : -parseFloat(b.amount)), 0);
+  let streak = 0;
+  while (streak < sessionBets.length && sessionBets[streak].won) streak++;
+
+  // Keyboard trading: ↑ / ↓ place Higher / Lower, 1–5 pick an amount preset.
+  const betRef = React.useRef(handleStrikeBet);
+  useEffect(() => {
+    betRef.current = handleStrikeBet;
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const preset = ['0.1', '0.5', '1', '5', '10'][Number(e.key) - 1];
+      if (preset) {
+        setBetAmount(preset);
+        return;
+      }
+      if (gameMode !== 'binomo' || !isWalletConnected || isPlacingBet) return;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        void betRef.current(e.key === 'ArrowUp' ? 'UP' : 'DOWN');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [gameMode, isWalletConnected, isPlacingBet]);
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col lg:flex-row">
       {/* Chart */}
       <div className="relative min-h-[420px] flex-1 lg:min-h-0">
         <LiveChart betAmount={betAmount} />
+        <WinBurst />
         <div className="absolute right-4 top-4 z-30">
           <IndicatorsToggle />
         </div>
@@ -288,6 +325,25 @@ export const GameBoard: React.FC = () => {
       {/* Trade sidebar */}
       <aside className="w-full shrink-0 overflow-y-auto border-t border-line bg-gradient-to-b from-white to-surface/60 lg:w-[380px] lg:border-l lg:border-t-0">
         <div className="flex flex-col gap-7 p-6">
+          {sessionBets.length > 0 && (
+            <div className="grid grid-cols-3 gap-2 rounded-3xl bg-ink/[0.03] px-4 py-3 text-center">
+              <div>
+                <div className={`font-jet text-[15px] font-medium ${sessionPnl > 0 ? 'text-up' : sessionPnl < 0 ? 'text-down' : 'text-ink'}`}>
+                  {sessionPnl > 0 ? '+' : ''}{sessionPnl.toFixed(2)}
+                </div>
+                <div className="text-[11px] text-subtle">Session P&amp;L</div>
+              </div>
+              <div>
+                <div className="font-jet text-[15px] font-medium">{streak}</div>
+                <div className="text-[11px] text-subtle">Win streak</div>
+              </div>
+              <div>
+                <div className="font-jet text-[15px] font-medium">{sessionBets.length}</div>
+                <div className="text-[11px] text-subtle">Rounds</div>
+              </div>
+            </div>
+          )}
+
           <Segmented
             className="[&>button]:py-1.5"
             value={gameMode}
@@ -318,7 +374,7 @@ export const GameBoard: React.FC = () => {
                   type="button"
                   onClick={() => setBetAmount(amt.toString())}
                   className={`h-9 rounded-full font-jet text-sm font-medium transition-all ${
-                    betAmount === amt.toString() ? 'bg-ink text-white shadow-[0_6px_16px_-8px_rgba(10,12,16,0.6)]' : 'bg-ink/[0.04] text-muted hover:bg-ink/[0.07] hover:text-ink'
+                    betAmount === amt.toString() ? glassSelected : 'bg-ink/[0.04] text-muted hover:bg-ink/[0.07] hover:text-ink'
                   }`}
                 >
                   {amt}
@@ -350,14 +406,19 @@ export const GameBoard: React.FC = () => {
                 </span>
               </div>
               {isWalletConnected ? (
-                <div className="grid grid-cols-2 gap-2">
-                  <Button variant="up" size="lg" onClick={() => handleStrikeBet('UP')} disabled={isPlacingBet}>
-                    <ArrowUp size={18} weight="bold" /> Higher
-                  </Button>
-                  <Button variant="down" size="lg" onClick={() => handleStrikeBet('DOWN')} disabled={isPlacingBet}>
-                    <ArrowDown size={18} weight="bold" /> Lower
-                  </Button>
-                </div>
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button variant="up" size="lg" onClick={() => handleStrikeBet('UP')} disabled={isPlacingBet} aria-keyshortcuts="ArrowUp">
+                      <ArrowUp size={18} weight="bold" /> Higher
+                    </Button>
+                    <Button variant="down" size="lg" onClick={() => handleStrikeBet('DOWN')} disabled={isPlacingBet} aria-keyshortcuts="ArrowDown">
+                      <ArrowDown size={18} weight="bold" /> Lower
+                    </Button>
+                  </div>
+                  <p className="text-center text-xs text-faint">
+                    <kbd className="font-jet">↑</kbd> / <kbd className="font-jet">↓</kbd> to trade · <kbd className="font-jet">1</kbd>–<kbd className="font-jet">5</kbd> for amount
+                  </p>
+                </>
               ) : (
                 <Button size="lg" onClick={() => setConnectModalOpen(true)}>
                   Connect wallet to trade
@@ -429,6 +490,15 @@ export const GameBoard: React.FC = () => {
           </div>
 
           <MiniHistory />
+
+          <a
+            href={explorerAddressUrl(getArcConfig().treasuryAddress)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-auto inline-flex items-center gap-1 self-start text-xs text-faint hover:text-ink"
+          >
+            Settled in USDC on Arc · Treasury contract <ArrowUpRight size={12} />
+          </a>
         </div>
       </aside>
     </div>

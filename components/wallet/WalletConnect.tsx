@@ -5,6 +5,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import { useStore } from '@/lib/store';
 import { useShallow } from 'zustand/react/shallow';
 import { SignOut, Wallet } from '@phosphor-icons/react';
+import { glassPrimary } from '@/components/ui/kit';
 import { useDisconnect as useWagmiDisconnect } from 'wagmi';
 import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
 
@@ -36,7 +37,7 @@ function WalletConnectButton({
         type="button"
         onClick={() => setConnectModalOpen(true)}
         data-tour="connect-button"
-        className="inline-flex h-9 items-center gap-2 rounded-full bg-ink px-4 font-tight text-sm font-semibold text-white transition-colors hover:bg-up"
+        className={`inline-flex h-9 items-center gap-2 rounded-full px-4 font-tight text-sm font-semibold ${glassPrimary}`}
       >
         <Wallet size={16} />
         Connect wallet
