@@ -41,6 +41,7 @@ export interface Decision {
 
 export interface StartLimits {
   asset: string;
+  mode: 'normal' | 'yolo';
   budget: number;
   maxPerTrade: number;
   stopLoss: number;
@@ -57,7 +58,7 @@ function startMessage(wallet: string, limits: StartLimits, expires: number, nonc
     `Wallet: ${wallet}`,
     `Chain: ${getArcConfig().chainId}`,
     `Asset: ${limits.asset}`,
-    'Mode: yolo',
+    `Mode: ${limits.mode}`,
     `Budget: ${limits.budget} USDC`,
     `Max per trade: ${limits.maxPerTrade} USDC`,
     `Stop-loss: ${limits.stopLoss} USDC`,
@@ -151,5 +152,17 @@ export function useAgent() {
     }
   }, []);
 
-  return { session, decisions, error, busy, start, stop };
+  /** Approve or reject a proposal. The feed carries the result to every tab. */
+  const answer = useCallback(async (id: string, action: 'approve' | 'reject') => {
+    setError(null);
+    const res = await fetch(`/api/agent/decisions/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+    if (!res.ok) {
+      setError(await errorOf(res));
+      return;
+    }
+    const { decision } = (await res.json()) as { decision: Decision };
+    setDecisions((all) => all.map((d) => (d.id === decision.id ? decision : d)));
+  }, []);
+
+  return { session, decisions, error, busy, start, stop, answer };
 }

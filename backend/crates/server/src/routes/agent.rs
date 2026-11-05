@@ -4,6 +4,7 @@
 use std::convert::Infallible;
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -36,6 +37,8 @@ pub fn routes() -> Router {
         .route("/api/agent/start", post(start))
         .route("/api/agent/stop", post(stop))
         .route("/api/agent/decisions", get(decisions))
+        .route("/api/agent/decisions/{id}/approve", post(approve))
+        .route("/api/agent/decisions/{id}/reject", post(reject_proposal))
 }
 
 fn reject((status, body): Rejection) -> Response {
@@ -109,12 +112,7 @@ async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     {
         return Err(no_session());
     }
-    if let Some(stopped) =
-        agent::stop_session(database, &claims.session_id, agent::USER_STOPPED).await?
-    {
-        live::publish(&stopped.id, live::session_frame(&stopped));
-    }
-    live::halt(&claims.session_id);
+    live::stop(database, &claims.session_id, agent::USER_STOPPED).await;
     let session = agent::session_for(database, &claims.session_id, &claims.wallet)
         .await?
         .ok_or_else(no_session)?;
@@ -123,6 +121,98 @@ async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
 
 fn no_session() -> ApiError {
     ApiError::json(StatusCode::NOT_FOUND, "No agent session for this wallet")
+}
+
+fn decision_reply(decision: &agent::Decision) -> Response {
+    if decision.verdict == "skipped" && decision.reason == agent::PROPOSAL_EXPIRED {
+        return ApiError::conflict("proposal expired").into_response();
+    }
+    Json(json!({ "decision": decision.to_json() })).into_response()
+}
+
+/// Places a waiting proposal after re-running the signal and every limit. The
+/// session's approval lock makes a repeat wait for the first answer and get it.
+async fn approve(Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
+    answer_proposal(&id, &headers, true).await
+}
+
+async fn reject_proposal(Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
+    answer_proposal(&id, &headers, false).await
+}
+
+async fn answer_proposal(
+    id: &str,
+    headers: &HeaderMap,
+    approve: bool,
+) -> Result<Response, ApiError> {
+    let claims = claims(headers)?;
+    let database = db::db().await?;
+    let mine = agent::decision_for(database, id, &claims.session_id, &claims.wallet).await?;
+    let Some(decision) = mine else {
+        return Err(ApiError::json(
+            StatusCode::NOT_FOUND,
+            "No such proposal for this wallet",
+        ));
+    };
+    let Some(approval) = live::approval(&claims.session_id) else {
+        return Ok(decision_reply(&decision));
+    };
+    let answered = {
+        let _answering = approval.lock.lock().await;
+        settle_proposal(database, &claims, id, approve).await?
+    };
+    approval.answered.notify_one();
+    Ok(decision_reply(&answered))
+}
+
+/// Runs under the approval lock. Returns the decision as it now stands.
+async fn settle_proposal(
+    database: &db::Db,
+    claims: &AgentClaims,
+    id: &str,
+    approve: bool,
+) -> Result<agent::Decision, ApiError> {
+    let current = agent::decision(database, id).await?;
+    if current.verdict != "awaiting" {
+        return Ok(current);
+    }
+    let mut session = agent::session_for(database, &claims.session_id, &claims.wallet)
+        .await?
+        .ok_or_else(no_session)?;
+    let now = now_ms();
+    if current.expires_at_ms.is_some_and(|at| now >= at) {
+        live::answer(database, &session, id, "skipped", agent::PROPOSAL_EXPIRED).await?;
+    } else if !approve {
+        live::answer(database, &session, id, "rejected", "You rejected it").await?;
+    } else {
+        match agent::signal(strike_core::ticks::buffer(), &session.asset, now) {
+            agent::Signal::Trade {
+                direction,
+                strike,
+                reason,
+            } if current.direction.as_deref() == Some(direction) => {
+                let trade = live::Trade {
+                    decision_id: id,
+                    direction,
+                    strike,
+                    reason: &reason,
+                    proposal: true,
+                };
+                if let live::Placement::Stop(why) =
+                    live::place(database, &mut session, trade).await?
+                {
+                    live::stop(database, &session.id, &why).await;
+                }
+            }
+            agent::Signal::Trade { .. } => {
+                live::answer(database, &session, id, "skipped", "The move reversed").await?;
+            }
+            agent::Signal::Skip(why) => {
+                live::answer(database, &session, id, "skipped", why).await?;
+            }
+        }
+    }
+    agent::decision(database, id).await
 }
 
 /// Replays the session and its recent decisions, then streams changes. Frames

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { useAccount } from 'wagmi';
-import { Play, Stop } from '@phosphor-icons/react';
+import { Lightning, Play, Stop } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
 import { Badge, Button, Field, Label, Segmented, cx } from '@/components/ui/kit';
 import { useAgent, type AgentSession, type Decision, type StartLimits } from '@/lib/agent/useAgent';
@@ -21,11 +21,17 @@ type Limits = Omit<StartLimits, 'asset'>;
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
-  const { session, decisions, error, busy, start, stop } = useAgent();
-  const [limits, setLimits] = useState<Limits>({ budget: 20, maxPerTrade: 2, stopLoss: 5, minutes: 15 });
+  const { session, decisions, error, busy, start, stop, answer } = useAgent();
+  const [limits, setLimits] = useState<Limits>({ mode: 'normal', budget: 20, maxPerTrade: 2, stopLoss: 5, minutes: 15 });
   const running = session?.status === 'running';
   const shown: Limits = running
-    ? { budget: session.budget, maxPerTrade: session.maxPerTrade, stopLoss: session.stopLoss, minutes: Math.round((session.endsAt - session.startsAt) / 60_000) }
+    ? {
+        mode: session.mode,
+        budget: session.budget,
+        maxPerTrade: session.maxPerTrade,
+        stopLoss: session.stopLoss,
+        minutes: Math.round((session.endsAt - session.startsAt) / 60_000),
+      }
     : limits;
   const set = <K extends keyof Limits>(k: K, v: Limits[K]) => setLimits((l) => ({ ...l, [k]: v }));
   const num = (k: 'budget' | 'maxPerTrade' | 'stopLoss') => ({
@@ -57,13 +63,30 @@ export function AgentPanel() {
         </div>
       </section>
 
-      <section>
-        <Label>Session</Label>
-        <Segmented options={MINUTES} value={shown.minutes} onChange={(v) => set('minutes', v)} disabled={running} />
+      <section className="flex items-end gap-3">
+        <div className="flex-1">
+          <Label>Session</Label>
+          <Segmented options={MINUTES} value={shown.minutes} onChange={(v) => set('minutes', v)} disabled={running} />
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={shown.mode === 'yolo'}
+          disabled={running}
+          onClick={() => set('mode', limits.mode === 'yolo' ? 'normal' : 'yolo')}
+          className={cx(
+            'flex h-[44px] items-center gap-2 rounded-full px-4 text-sm font-semibold disabled:opacity-40',
+            shown.mode === 'yolo' ? 'bg-down text-white' : 'bg-surface text-muted'
+          )}
+        >
+          <Lightning size={16} weight="fill" />
+          YOLO {shown.mode === 'yolo' ? 'on' : 'off'}
+        </button>
       </section>
       <p className="-mt-3 text-xs text-faint">
-        YOLO: one signature approves the budget. The agent trades {running ? session.asset : asset} on its own at up to your
-        per trade cap. Limits stay on.
+        {shown.mode === 'yolo'
+          ? `One signature approves the budget. The agent trades ${running ? session.asset : asset} on its own at up to your per trade cap. Limits stay on.`
+          : `You approve every trade on ${running ? session.asset : asset}. 1 USDC each, and a proposal you don't answer in 5 seconds is skipped.`}
       </p>
 
       {running ? (
@@ -101,7 +124,7 @@ export function AgentPanel() {
         ) : (
           <ol className="space-y-2">
             {decisions.map((d) => (
-              <DecisionRow key={d.id} d={d} session={session} />
+              <DecisionRow key={d.id} d={d} session={session} onAnswer={answer} />
             ))}
           </ol>
         )}
@@ -148,7 +171,15 @@ const RESULT: Record<string, string> = {
   withheld: 'withheld',
 };
 
-function DecisionRow({ d, session }: { d: Decision; session: AgentSession | null }) {
+function DecisionRow({
+  d,
+  session,
+  onAnswer,
+}: {
+  d: Decision;
+  session: AgentSession | null;
+  onAnswer: (id: string, action: 'approve' | 'reject') => void;
+}) {
   const v = VERDICT[d.verdict];
   return (
     <li className="rounded-2xl px-4 py-3 ring-1 ring-ink/[0.06]">
@@ -170,6 +201,16 @@ function DecisionRow({ d, session }: { d: Decision; session: AgentSession | null
         {d.result && `${RESULT[d.result] ?? d.result} · `}
         {new Date(d.createdAt).toLocaleTimeString()}
       </p>
+      {d.verdict === 'awaiting' && (
+        <div className="mt-2 flex gap-2">
+          <Button size="sm" onClick={() => onAnswer(d.id, 'approve')}>
+            Approve
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => onAnswer(d.id, 'reject')}>
+            Reject
+          </Button>
+        </div>
+      )}
       {d.betId && (
         <div className="mt-2">
           <SettlementProof

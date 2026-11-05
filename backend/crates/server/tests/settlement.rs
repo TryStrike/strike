@@ -1095,3 +1095,94 @@ async fn the_house_cap_holds_across_agents() {
     };
     assert_eq!(blocked["reason"], "House agent limit reached", "{blocked}");
 }
+
+/// Normal mode on BTC, 1 USDC a trade out of 5.
+fn normal(signer: &SigningKey) -> StartTerms {
+    StartTerms {
+        mode: "normal".into(),
+        max_per_trade: usdc(1),
+        ..yolo(signer)
+    }
+}
+
+/// A funded trader in normal mode with a proposal waiting on the feed.
+async fn awaiting_proposal(
+    s: &Server,
+    feed: &Feed,
+    trader: &SigningKey,
+) -> (String, SseFeed, Value) {
+    s.fund(&address_of(trader), 100);
+    let (_, _, cookie) = s.start_agent(trader, &normal(trader)).await;
+    let cookie = cookie.unwrap();
+    let mut decisions = s.feed(&cookie).await;
+    jump_after_history(feed).await;
+    let proposal = first_verdict(&mut decisions, &["awaiting", "placed"], 15).await;
+    assert_eq!(proposal["verdict"], "awaiting", "{proposal}");
+    assert!(proposal["expiresAt"].is_i64(), "{proposal}");
+    (cookie, decisions, proposal)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_double_approve_places_one_bet() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let trader = key(17);
+    let (cookie, _, proposal) = awaiting_proposal(&s, &feed, &trader).await;
+    let path = format!(
+        "/api/agent/decisions/{}/approve",
+        proposal["id"].as_str().unwrap()
+    );
+
+    let (first, second) = tokio::join!(
+        s.agent_post(&path, Some(&cookie)),
+        s.agent_post(&path, Some(&cookie)),
+    );
+    for (status, reply) in [&first, &second] {
+        assert_eq!(*status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["decision"]["verdict"], "placed", "{reply}");
+    }
+    assert_eq!(first.1["decision"]["betId"], second.1["decision"]["betId"]);
+    assert_eq!(s.balance_of(&address_of(&trader)), 99 * UNIT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_approve_is_refused_and_the_proposal_skipped() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let trader = key(18);
+    let (cookie, mut decisions, proposal) = awaiting_proposal(&s, &feed, &trader).await;
+    let skipped = decisions
+        .until("decision", 8, |d| {
+            d["id"] == proposal["id"] && d["verdict"] != "awaiting"
+        })
+        .await;
+    assert_eq!(skipped["verdict"], "skipped", "{skipped}");
+
+    let path = format!(
+        "/api/agent/decisions/{}/approve",
+        proposal["id"].as_str().unwrap()
+    );
+    for _ in 0..2 {
+        let (status, reply) = s.agent_post(&path, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+        assert_eq!(reply["error"], "proposal expired");
+    }
+    assert_eq!(s.balance_of(&address_of(&trader)), 100 * UNIT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_wallet_cannot_approve_or_reject_a_proposal() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let (alice, bob) = (key(19), key(20));
+    let (_, bob_reply, bob_cookie) = s.start_agent(&bob, &normal(&bob)).await;
+    assert!(bob_reply["session"].is_object(), "{bob_reply}");
+    let (_, _, proposal) = awaiting_proposal(&s, &feed, &alice).await;
+    let id = proposal["id"].as_str().unwrap();
+
+    for action in ["approve", "reject"] {
+        let path = format!("/api/agent/decisions/{id}/{action}");
+        let (status, reply) = s.agent_post(&path, bob_cookie.as_deref()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{action}: {reply}");
+        let (status, reply) = s.agent_post(&path, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action}: {reply}");
+    }
+    assert_eq!(s.balance_of(&address_of(&alice)), 100 * UNIT);
+}

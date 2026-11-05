@@ -16,6 +16,9 @@ use crate::settlement::binomo_multiplier;
 use crate::ticks::TickBuffer;
 
 pub const CHECK_EVERY_MS: u64 = 5_000;
+/// How long a normal mode proposal waits for the trader's tap.
+pub const PROPOSAL_MS: i64 = 5_000;
+pub const PROPOSAL_EXPIRED: &str = "Proposal expired";
 pub const ROUND_SECONDS: i64 = 30;
 const LOOKBACK_MS: i64 = 15_000;
 const RANGE_MS: i64 = 120_000;
@@ -321,6 +324,7 @@ pub struct Decision {
     pub bet_id: Option<String>,
     pub result: Option<String>,
     pub pnl: Option<Decimal>,
+    pub expires_at_ms: Option<i64>,
 }
 
 fn money_json(value: Decimal) -> Value {
@@ -362,7 +366,7 @@ impl Decision {
             "betId": self.bet_id,
             "result": self.result,
             "pnl": self.pnl.map(money_json),
-            "expiresAt": Value::Null,
+            "expiresAt": self.expires_at_ms,
         })
     }
 }
@@ -370,7 +374,7 @@ impl Decision {
 const SESSION_COLUMNS: &str = "id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
      starts_at, ends_at, status, stopped_reason, spent, realized_pnl";
 const DECISION_COLUMNS: &str =
-    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl";
+    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at";
 
 fn money(fixed: i64) -> Decimal {
     from_fixed(fixed, MONEY_SCALE)
@@ -411,6 +415,7 @@ fn decision_row(row: &Row) -> rusqlite::Result<Decision> {
         bet_id: row.get(8)?,
         result: row.get(9)?,
         pnl: row.get::<_, Option<i64>>(10)?.map(money),
+        expires_at_ms: row.get::<_, Option<i64>>(11)?.map(|us| us / 1_000),
     })
 }
 
@@ -526,6 +531,11 @@ pub async fn stop_session(db: &Db, id: &str, reason: &str) -> ApiResult<Option<S
              WHERE id = ?1 AND status = 'running'",
             [&id, &reason],
         )?;
+        conn.execute(
+            "UPDATE agent_decisions SET verdict = 'skipped', reason = ?2 \
+             WHERE session_id = ?1 AND verdict = 'awaiting'",
+            [&id, &reason],
+        )?;
         Ok(match changed {
             0 => None,
             _ => Some(load_session(conn, &id)?),
@@ -555,6 +565,10 @@ pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
         conn.execute(
             "UPDATE agent_decisions SET verdict = 'rejected', reason = ?1 \
              WHERE verdict = 'placed' AND bet_id IS NULL",
+            [SERVER_RESTART],
+        )?;
+        conn.execute(
+            "UPDATE agent_decisions SET verdict = 'skipped', reason = ?1 WHERE verdict = 'awaiting'",
             [SERVER_RESTART],
         )?;
         Ok(conn.execute(
@@ -608,6 +622,8 @@ pub enum Reserve {
     Held(Decimal),
     Blocked,
     Stop(&'static str),
+    /// The proposal was answered or expired before this approve got to it.
+    Gone,
 }
 
 /// Placed stakes whose round hasn't settled, for one session or every agent.
@@ -632,6 +648,7 @@ pub async fn reserve(
     decision_id: &str,
     direction: &str,
     reason: &str,
+    proposal: bool,
     now_ms: i64,
 ) -> ApiResult<Reserve> {
     let (session_id, id, direction, reason) = (
@@ -651,16 +668,120 @@ pub async fn reserve(
             return Ok(Reserve::Blocked);
         }
         let held = fixed(stake)?;
-        conn.execute(
-            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6)",
-            params![id, session_id, now_ms * 1_000, direction, held, reason],
-        )?;
+        if proposal {
+            let taken = conn.execute(
+                "UPDATE agent_decisions SET verdict = 'placed', direction = ?2, stake = ?3, reason = ?4 \
+                 WHERE id = ?1 AND verdict = 'awaiting'",
+                params![id, direction, held, reason],
+            )?;
+            if taken == 0 {
+                return Ok(Reserve::Gone);
+            }
+        } else {
+            conn.execute(
+                "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6)",
+                params![id, session_id, now_ms * 1_000, direction, held, reason],
+            )?;
+        }
         conn.execute(
             "UPDATE agent_sessions SET spent = spent + ?2 WHERE id = ?1",
             params![session_id, held],
         )?;
         Ok(Reserve::Held(stake))
+    })
+    .await
+}
+
+/// A normal mode proposal, waiting for the trader until `expires_ms`.
+pub async fn record_proposal(
+    db: &Db,
+    session_id: &str,
+    direction: &str,
+    stake: Decimal,
+    reason: &str,
+    now_ms: i64,
+) -> ApiResult<Decision> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (session_id, direction, reason) = (
+        session_id.to_string(),
+        direction.to_string(),
+        reason.to_string(),
+    );
+    let stake = fixed(stake)?;
+    db.write(move |conn| {
+        conn.execute(
+            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, expires_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting', ?6, ?7)",
+            params![
+                id,
+                session_id,
+                now_ms * 1_000,
+                direction,
+                stake,
+                reason,
+                (now_ms + PROPOSAL_MS) * 1_000
+            ],
+        )?;
+        load_decision(conn, &id)
+    })
+    .await
+}
+
+/// Answers a proposal that is still waiting. `None` when it already wasn't.
+pub async fn resolve(
+    db: &Db,
+    decision_id: &str,
+    verdict: &'static str,
+    reason: &str,
+) -> ApiResult<Option<Decision>> {
+    let (id, reason) = (decision_id.to_string(), reason.to_string());
+    db.write(move |conn| {
+        let changed = conn.execute(
+            "UPDATE agent_decisions SET verdict = ?2, reason = ?3 WHERE id = ?1 AND verdict = 'awaiting'",
+            params![id, verdict, reason],
+        )?;
+        Ok(match changed {
+            0 => None,
+            _ => Some(load_decision(conn, &id)?),
+        })
+    })
+    .await
+}
+
+pub async fn decision(db: &Db, decision_id: &str) -> ApiResult<Decision> {
+    let id = decision_id.to_string();
+    db.read(move |conn| load_decision(conn, &id)).await
+}
+
+/// The decision when it belongs to this wallet's session, `None` otherwise.
+pub async fn decision_for(
+    db: &Db,
+    decision_id: &str,
+    session_id: &str,
+    wallet: &str,
+) -> ApiResult<Option<Decision>> {
+    let (id, session_id, wallet) = (
+        decision_id.to_string(),
+        session_id.to_string(),
+        wallet.to_string(),
+    );
+    db.read(move |conn| {
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM agent_decisions d JOIN agent_sessions s ON s.id = d.session_id \
+                     WHERE d.id = ?1 AND d.session_id = ?2 AND s.wallet = ?3",
+                    DECISION_COLUMNS
+                        .split(", ")
+                        .map(|c| format!("d.{c}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                [&id, &session_id, &wallet],
+                decision_row,
+            )
+            .optional()?)
     })
     .await
 }
@@ -680,29 +801,35 @@ pub async fn confirm(db: &Db, decision_id: &str, bet_id: &str) -> ApiResult<(Dec
     .await
 }
 
-/// The bet path refused the held stake. `Some(reason)` keeps the row as a
-/// rejection, `None` drops it so the skip that follows can fold as usual.
+pub enum Release {
+    /// Forget the row, so the skip that follows folds as usual.
+    Drop,
+    /// Keep the row with this verdict and reason.
+    Mark(&'static str, String),
+}
+
+/// The bet path refused the held stake: give it back to the budget.
 pub async fn release(
     db: &Db,
     decision_id: &str,
-    rejection: Option<&str>,
+    how: Release,
 ) -> ApiResult<(Option<Decision>, Session)> {
-    let (id, rejection) = (decision_id.to_string(), rejection.map(str::to_string));
+    let id = decision_id.to_string();
     db.write(move |conn| {
         let held = load_decision(conn, &id)?;
         conn.execute(
             "UPDATE agent_sessions SET spent = spent - ?2 WHERE id = ?1",
             params![held.session_id, held.stake.map(fixed).transpose()?],
         )?;
-        let decision = match rejection {
-            Some(reason) => {
+        let decision = match how {
+            Release::Mark(verdict, reason) => {
                 conn.execute(
-                    "UPDATE agent_decisions SET verdict = 'rejected', reason = ?2 WHERE id = ?1",
-                    [&id, &reason],
+                    "UPDATE agent_decisions SET verdict = ?2, reason = ?3 WHERE id = ?1",
+                    params![id, verdict, reason],
                 )?;
                 Some(load_decision(conn, &id)?)
             }
-            None => {
+            Release::Drop => {
                 conn.execute("DELETE FROM agent_decisions WHERE id = ?1", [&id])?;
                 None
             }
