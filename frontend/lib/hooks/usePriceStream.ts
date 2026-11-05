@@ -1,18 +1,5 @@
 'use client';
 
-/**
- * Server-pushed price ticks via /api/prices/stream (SSE), with the existing
- * 1s poll of /api/prices/latest as an automatic fallback.
- *
- * The hook never removes the poller's role: until the stream has actually
- * delivered a parseable tick, ticks keep flowing through
- * startMultiPythPriceFeed — the exact poller the app has always used. A
- * missing EventSource, a proxy that strips/buffers text/event-stream, a 404
- * or a stream that opens but stays silent all degrade to polling, while a
- * backoff reconnect keeps probing the stream in the background. Feed state is
- * surfaced for the stall indicator: "live" (SSE), "polling" (fallback), or
- * "stale" (nothing fresh — decided by the consumer from lastTickAt).
- */
 
 import { useEffect, useRef, useState } from 'react';
 import { startMultiPythPriceFeed } from '@/lib/utils/priceFeed';
@@ -20,16 +7,8 @@ import { startMultiPythPriceFeed } from '@/lib/utils/priceFeed';
 export type PriceFeedMode = 'stream' | 'poll';
 
 export interface UsePriceStreamOptions {
-  /** SSE endpoint path. */
   streamPath?: string;
-  /**
-   * How long to wait for the first tick on a fresh connection before
-   * concluding SSE cannot deliver through this network path. The route primes
-   * every connection with a snapshot frame, so silence here means "broken",
-   * never "quiet market".
-   */
   firstTickTimeoutMs?: number;
-  /** Cap for the exponential reconnect backoff. */
   maxReconnectBackoffMs?: number;
 }
 
@@ -37,7 +16,6 @@ const DEFAULT_STREAM_PATH = '/api/prices/stream';
 const DEFAULT_FIRST_TICK_TIMEOUT_MS = 4000;
 const DEFAULT_MAX_RECONNECT_BACKOFF_MS = 15_000;
 
-/** Every asset's price over one SSE connection. Mount it once, in the app shell. */
 export function usePriceStream(
   onTick: (prices: Record<string, number>) => void,
   options: UsePriceStreamOptions = {}
@@ -55,8 +33,6 @@ export function usePriceStream(
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    // Each (re)connect starts pessimistically: polling owns the feed until the
-    // stream proves it can deliver.
     setMode('poll');
     setConnected(false);
 
@@ -88,7 +64,6 @@ export function usePriceStream(
       stopPoll = null;
     };
 
-    // Environment without EventSource at all: polling is the feed.
     if (typeof window.EventSource !== 'function') {
       startPollFallback();
       return () => {
@@ -118,8 +93,6 @@ export function usePriceStream(
     };
 
     const degrade = () => {
-      // Stream died or never delivered: hand the chart to the poller and keep
-      // probing SSE in the background with backoff.
       if (!stopPoll) console.warn('[prices] stream unavailable, polling until it reconnects');
       startPollFallback();
       closeEventSource();
@@ -153,8 +126,6 @@ export function usePriceStream(
         }
         const key = tick.asset;
 
-        // The stream demonstrably delivers — retire the poll fallback and
-        // feed the tick through the same ingest path the poll result uses.
         stopPollFallback();
         reconnectTimer = clearTimer(reconnectTimer);
         setMode('stream');

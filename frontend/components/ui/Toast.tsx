@@ -16,9 +16,7 @@ interface ToastProps {
   onClose: () => void;
   duration?: number;
   links?: Array<{ label: string; href: string }>;
-  /** Optional single action button (e.g. "Undo"). */
   action?: ToastActionView;
-  /** Error variant shorthand: renders a Retry button wired to this callback. */
   onRetry?: () => void;
 }
 
@@ -37,11 +35,6 @@ interface DismissTimer {
   handle: ReturnType<typeof setTimeout> | null;
 }
 
-/**
- * A single toast. Auto-dismiss pauses while the pointer or keyboard focus is
- * inside the toast and resumes on leave, tracking elapsed time so a paused
- * toast never dismisses early. duration <= 0 pins it open.
- */
 const Toast: React.FC<ToastProps> = ({
   message,
   type,
@@ -51,9 +44,6 @@ const Toast: React.FC<ToastProps> = ({
   action,
   onRetry
 }) => {
-  // Keep onClose in a ref: the container passes an inline closure, so putting
-  // it in the deps below would restart the dismissal timer on every parent
-  // rerender — toasts could then live forever.
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -88,17 +78,14 @@ const Toast: React.FC<ToastProps> = ({
     timerRef.current.remaining = duration;
     startTimer();
     return clearTimer;
-    // Only restart when the configured duration changes.
   }, [duration, startTimer, clearTimer]);
 
-  // Hover / focus pause handlers on the toast root.
   const interactiveProps = duration > 0
     ? {
         onMouseEnter: pauseTimer,
         onMouseLeave: startTimer,
         onFocus: pauseTimer,
         onBlur: (e: React.FocusEvent<HTMLDivElement>) => {
-          // Resume only when focus left the toast entirely.
           if (!e.currentTarget.contains(e.relatedTarget as Node | null)) startTimer();
         }
       }
@@ -158,7 +145,6 @@ const Toast: React.FC<ToastProps> = ({
   );
 };
 
-// Toast Container Component
 interface ToastContainerProps {
   toasts: Array<{
     id: string;
@@ -169,21 +155,11 @@ interface ToastContainerProps {
     duration?: number;
   }>;
   onRemove: (id: string) => void;
-  /** Max toasts rendered before older ones collapse. */
   maxVisible?: number;
 }
 
 export const DEFAULT_MAX_VISIBLE = 3;
 
-/**
- * Fixed stack in the top-right. Bounded: the newest `maxVisible` toasts are
- * rendered; anything older collapses into a "+N earlier" chip that expands
- * back on click (never silently swallowing notifications).
- * The container is a plain labelled region — each toast carries its own
- * severity role (alert for error/warning, status for success/info), which
- * makes every toast its own live region at the right politeness level and
- * avoids double announcements from a nested polite region.
- */
 export const ToastContainer: React.FC<ToastContainerProps> = ({
   toasts,
   onRemove,
@@ -191,7 +167,6 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({
 }) => {
   const [expanded, setExpanded] = useState(false);
 
-  // Collapse again automatically once the backlog shrinks below the cap.
   useEffect(() => {
     if (toasts.length <= maxVisible) setExpanded(false);
   }, [toasts.length, maxVisible]);

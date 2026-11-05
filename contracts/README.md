@@ -1,42 +1,31 @@
 # StrikeTreasury on Arc
 
-House treasury holding **USDC** through Arc's ERC-20 interface
-(`0x3600000000000000000000000000000000000000`, 6 decimals). Players deposit
-here; the owner key pays winnings and withdrawals out with `withdrawTokenTo`
-after settling off-chain.
+House treasury settling in **USDC** (`0x3600…0000`) and **EURC** (`0x89B5…D72a`),
+both 6 decimals on Arc. Deposits are plain token transfers to the treasury; the
+backend credits them from the Transfer log.
 
-On Arc the native gas token and the ERC-20 are the same USDC balance (18 vs 6
-decimals), so the contract has no payable entry points and refuses native
-value.
+`StrikeTreasury.sol` is **v2**. Arc Testnet still runs **v1** at
+`0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A` (see `deployments/`) until v2 is
+deployed from Arc Studio and v1's balance is moved over.
 
-## Why a contract rather than an EOA
+## v2
 
-A plain wallet means one leaked key drains everything. This contract adds:
+- **Two keys.** The owner (cold) sets the operator and caps, sweeps, and unpauses.
+  The operator (the backend's hot key) can only pay out and commit round proofs.
+- **Caps.** Every payout is checked against a per-transaction and a per-day cap
+  for its token. A leaked operator key can move at most one day's cap. No cap set
+  means nothing can be paid.
+- **Payouts.** `payout` and `payoutBatch` pay USDC or EURC with a `ref` (bet or
+  withdrawal id) in the event. A withdrawal fee is simply not sent and stays here.
+- **Cross-chain.** `payoutCrossChain` pays USDC to another chain through CCTP V2
+  (`TokenMessengerV2` `0x8FE6…2DAA`, Arc domain 26), with an exact approval per burn.
+- **Round proofs.** `commitRounds` stores a write-once Merkle root per epoch of
+  settled rounds; `verifyRound` checks a round against it (sorted-pair tree).
+- **Pause.** Either key pauses at once, only the owner resumes.
 
-- **pause()** halts deposits and payouts immediately, without an upgrade.
-- **Two-step ownership transfer** - the nominee must call `acceptOwnership()`,
-  so a mistyped address cannot lock the treasury out of reach.
-- **Events** (`Deposited`, `Withdrawn`) to reconcile the off-chain ledger.
+Constructor: `(usdc, eurc, tokenMessenger, operator)`.
 
-## Commands
+## v1 (deployed)
 
-Both scripts read `.env.local` then `.env` (`ARC_TREASURY_SECRET_KEY`,
-`NEXT_PUBLIC_ARC_CHAIN_ID`, `NEXT_PUBLIC_ARC_RPC_ENDPOINT`, `NEXT_PUBLIC_ARC_EXPLORER`). `NEXT_PUBLIC_ARC_CHAIN_ID`
-is required — there is no implicit default, so a script can never quietly act on
-mainnet (`5042`) when the testnet (`5042002`) was meant.
-
-`deploy.mjs` refuses to overwrite an existing `deployments/arc-<chainId>.json`
-unless `--force` is given: redeploying orphans the previous treasury and the
-funds tracked against it.
-
-```bash
-(cd contracts && npm install && npm run deploy)   # writes deployments/arc-<chainId>.json + ABI
-```
-
-
-## Configuration
-
-```bash
-NEXT_PUBLIC_TREASURY_ADDRESS=<deployed StrikeTreasury>
-ARC_TREASURY_SECRET_KEY=<owner key>
-```
+`withdrawTokenTo`, `withdrawBatch` (fee and net in one transaction), `pause`,
+two-step ownership. One key owns and pays.

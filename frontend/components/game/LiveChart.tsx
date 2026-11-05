@@ -12,9 +12,7 @@ import { useToast } from '@/lib/hooks/useToast';
 import { CaretDown, X, MagnifyingGlass, Star, TrendUp, Waveform, ArrowsDownUp, Pulse } from '@phosphor-icons/react';
 
 
-/** React refresh rate for the chart; motion between renders runs at full frame rate. */
 const RENDER_MS = 100;
-/** How fast the tip catches up to a new tick. */
 const TIP_EASE_MS = 90;
 const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight';
 
@@ -22,7 +20,6 @@ interface LiveChartProps {
   betAmount: string;
 }
 
-// Track which cells have active bets
 interface CellBet {
   cellId: string;
   betId: string;
@@ -31,7 +28,6 @@ interface CellBet {
   direction: 'UP' | 'DOWN';
 }
 
-// Component to safely display asset logos with fallback
 const ASSET_CONFIG: Record<AssetType, { name: string; symbol: string; pair: string; logo: string; category: 'Crypto' | 'Metals' | 'Forex' | 'Stocks' | 'Commodities'; decimals: number }> = {
   BTC: { name: 'Bitcoin', symbol: 'BTC', pair: 'BTC/USD', logo: '/logos/bitcoin-btc-logo.png', category: 'Crypto', decimals: 2 },
   ETH: { name: 'Ethereum', symbol: 'ETH', pair: 'ETH/USD', logo: '/logos/ethereum-eth-logo.png', category: 'Crypto', decimals: 2 },
@@ -48,18 +44,15 @@ const ASSET_CONFIG: Record<AssetType, { name: string; symbol: string; pair: stri
   NEAR: { name: 'Near Protocol', symbol: 'NEAR', pair: 'NEAR/USD', logo: '/logos/near.png', category: 'Crypto', decimals: 3 },
   APT: { name: 'Aptos', symbol: 'APT', pair: 'APT/USD', logo: '/logos/aptos-logo.png', category: 'Crypto', decimals: 2 },
   
-  // Metals
   GOLD: { name: 'Gold', symbol: 'GOLD', pair: 'XAU/USD', logo: '/logos/gold.jpg', category: 'Metals', decimals: 2 },
   SILVER: { name: 'Silver', symbol: 'SILVER', pair: 'XAG/USD', logo: '/logos/silver.avif', category: 'Metals', decimals: 3 },
   
-  // Forex
   EUR: { name: 'Euro', symbol: 'EUR', pair: 'EUR/USD', logo: '/logos/euro.png', category: 'Forex', decimals: 4 },
   GBP: { name: 'British Pound', symbol: 'GBP', pair: 'GBP/USD', logo: '/logos/uk.png', category: 'Forex', decimals: 4 },
   JPY: { name: 'Japanese Yen', symbol: 'JPY', pair: 'USD/JPY', logo: '/logos/japan.jpg', category: 'Forex', decimals: 2 },
   AUD: { name: 'Australian Dollar', symbol: 'AUD', pair: 'AUD/USD', logo: '/logos/australia.png', category: 'Forex', decimals: 4 },
   CAD: { name: 'Canadian Dollar', symbol: 'CAD', pair: 'USD/CAD', logo: '/logos/canada.png', category: 'Forex', decimals: 4 },
   
-  // Stocks
   AAPL: { name: 'Apple Inc.', symbol: 'AAPL', pair: 'AAPL/USD', logo: '/logos/stock-AAPL-logo.png', category: 'Stocks', decimals: 2 },
   GOOGL: { name: 'Alphabet Inc.', symbol: 'GOOGL', pair: 'GOOGL/USD', logo: '/logos/stock-GOOGL-logo.png', category: 'Stocks', decimals: 2 },
   AMZN: { name: 'Amazon.com', symbol: 'AMZN', pair: 'AMZN/USD', logo: '/logos/stock-AMZN-logo.png', category: 'Stocks', decimals: 2 },
@@ -86,9 +79,7 @@ const ASSET_CONFIG: Record<AssetType, { name: string; symbol: string; pair: stri
   NDX: { name: 'Nasdaq 100', symbol: 'NDX', pair: 'NDX/USD', logo: '/logos/stock-NDX-logo.png', category: 'Stocks', decimals: 2 },
   DJI: { name: 'Dow Jones', symbol: 'DJI', pair: 'DJI/USD', logo: '/logos/stock-DJI-logo.png', category: 'Stocks', decimals: 2 },
   
-  // Custom
 
-  // Added Assets — all using local files, no external CDN dependencies
   LINK: { name: 'Chainlink', symbol: 'LINK', pair: 'LINK/USD', logo: '/logos/chainlink-link-logo.png', category: 'Crypto', decimals: 3 },
   AVAX: { name: 'Avalanche', symbol: 'AVAX', pair: 'AVAX/USD', logo: '/logos/avalanche-avax-logo.png', category: 'Crypto', decimals: 2 },
   DOT: { name: 'Polkadot', symbol: 'DOT', pair: 'DOT/USD', logo: '/logos/polkadot-dot-logo.png', category: 'Crypto', decimals: 2 },
@@ -119,33 +110,24 @@ const ASSET_CONFIG: Record<AssetType, { name: string; symbol: string; pair: stri
   EGLD: { name: 'MultiversX', symbol: 'EGLD', pair: 'EGLD/USD', logo: '/logos/multiversx-egld-egld-logo.png', category: 'Crypto', decimals: 2 },
   FLOW: { name: 'Flow', symbol: 'FLOW', pair: 'FLOW/USD', logo: '/logos/flow-logo.png', category: 'Crypto', decimals: 3 },
   
-  // Commodities
   WTI: { name: 'Crude Oil WTI', symbol: 'WTI', pair: 'WTI/USD', logo: 'OIL', category: 'Commodities', decimals: 2 },
   BRENT: { name: 'Crude Oil Brent', symbol: 'BRENT', pair: 'BRENT/USD', logo: 'OIL', category: 'Commodities', decimals: 2 },
 };
 
 
-// Stock logo sources with fallback order
 const LOGO_SOURCES = {
-  // Clearbit API (primary - high quality company logos)
   CLEARBIT: (domain: string) => `https://logo.clearbit.com/${domain}`,
   
-  // Google Favicon service (reliable fallback)
   GOOGLE: (domain: string) => `https://www.google.com/s2/favicons?domain=${domain}&sz=128`,
   
-  // CoinCap CDN (Very stable for crypto)
   COINCAP: (symbol: string) => `https://assets.coincap.io/assets/icons/${symbol.toLowerCase()}@2x.png`,
 
-  // Binance CDN
   BINANCE: (symbol: string) => `https://bin.bnbstatic.com/static/images/coins/icon/${symbol.toLowerCase()}.png`,
 
-  // Local logos
   LOCAL: (symbol: string) => `/logos/${symbol.toLowerCase()}.png`,
 };
 
-// Enhanced stock domain mapping
 const STOCK_DOMAIN_MAP: Record<string, string> = {
-  // Individual Stocks
   AAPL: 'apple.com',
   GOOGL: 'abc.xyz',
   AMZN: 'amazon.com',
@@ -169,31 +151,23 @@ const STOCK_DOMAIN_MAP: Record<string, string> = {
   INTC: 'intel.com',
   TSM: 'tsmc.com',
   
-  // Market Indices
-  SPX: 'spglobal.com',           // S&P 500 - managed by S&P Global
-  NDX: 'nasdaq.com',             // NASDAQ 100 - managed by NASDAQ
-  DJI: 'spglobal.com',           // Dow Jones - managed by S&P Global (CME Group also)
-  VIX: 'spglobal.com',           // VIX Volatility Index
-  DAX: 'deutsche-boerse.com',    // German DAX Index
-  N225: 'nikkei.com',            // Nikkei 225
-  HSI: 'hkex.com.hk',            // Hang Seng Index
-  FTSE: 'ftserussell.com',       // FTSE 100
-  CAC: 'euronext.com',           // CAC 40
+  SPX: 'spglobal.com',
+  NDX: 'nasdaq.com',
+  DJI: 'spglobal.com',
+  VIX: 'spglobal.com',
+  DAX: 'deutsche-boerse.com',
+  N225: 'nikkei.com',
+  HSI: 'hkex.com.hk',
+  FTSE: 'ftserussell.com',
+  CAC: 'euronext.com',
 };
 
-// ── Y-domain math, pure ─────────────────────────────────────────────────────
-// The "no jumping of graph on changing the token" rule: on an asset switch the
-// domain SNAPS to the new asset's own data; it never lerps from the previous
-// asset's domain, because two unrelated price domains have nothing to
-// interpolate between. Within one asset the domain eases toward its target so
-// the axis follows real moves smoothly.
 
 export interface YDomainBounds {
   min: number;
   max: number;
 }
 
-/** Fit a domain to one asset's own visible points (padding + a zoom floor). */
 export function computeYDomainTarget(
   points: readonly { price: number }[],
   price: number,
@@ -210,8 +184,6 @@ export function computeYDomainTarget(
   const padding = spread > 0 ? spread * paddingFactor : Math.max(price * 0.0002, 1e-8);
   let min = low - padding;
   let max = high + padding;
-  // Floor: 3 bps of price or 20 price ticks, whichever is wider. A one-tick bounce
-  // must read as a wiggle, never as a full-height swing, and a box cell must span real ticks.
   const minSpan = Math.max(price * 0.0003, tick * 20);
   if (max - min < minSpan) {
     const mid = (max + min) / 2;
@@ -221,10 +193,6 @@ export function computeYDomainTarget(
   return { min, max };
 }
 
-/**
- * Next domain given the previous one and this frame's target. `assetChanged`
- * (or a missing previous) snaps to the target; otherwise ease by `lerpFactor`.
- */
 export function nextYDomain(
   prev: YDomainBounds | null,
   target: YDomainBounds,
@@ -238,31 +206,25 @@ export function nextYDomain(
   };
 }
 
-// Component to safely display asset logos with multiple fallback sources
 const AssetIcon = ({ src, asset, className }: { src: string; asset: string; className: string }) => {
 
   const [currentSrc, setCurrentSrc] = useState(src);
   const [attemptIndex, setAttemptIndex] = useState(0);
   const [showFallback, setShowFallback] = useState(false);
 
-  // Reset state when asset or src changes
   useEffect(() => {
     setCurrentSrc(src);
     setAttemptIndex(0);
     setShowFallback(false);
   }, [src, asset]);
 
-  // Generate all possible logo sources for this asset
   const getAllSources = (): string[] => {
     const sources: string[] = [];
 
-    // 1. Original src (if not already a fallback)
     if (src && !src.includes('clearbit') && !src.includes('google.com')) {
       sources.push(src);
     }
 
-    // 2. Crypto CDNs before Clearbit domain guesses — wrong guesses (e.g. apt.com for APT)
-    //    often return a generic 200 image so onError never fires and the real logo is never tried.
     const cryptoMapping: Record<string, string> = {
       RENDER: 'rndr',
       EGLD: 'egld',
@@ -272,14 +234,12 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
     sources.push(LOGO_SOURCES.COINCAP(cryptoSymbol));
     sources.push(LOGO_SOURCES.BINANCE(cryptoSymbol));
 
-    // 3. Clearbit + Google when we have a known company domain (stocks / indices)
     const domain = STOCK_DOMAIN_MAP[asset];
     if (domain) {
       sources.push(LOGO_SOURCES.CLEARBIT(domain));
       sources.push(LOGO_SOURCES.GOOGLE(domain));
     }
 
-    // 4. Speculative domains last (stocks without a map entry; avoid intercepting crypto tickers above)
     if (!domain) {
       const variations = [
         `${asset.toLowerCase()}.com`,
@@ -293,7 +253,6 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
       });
     }
 
-    // 5. Local filename convention
     sources.push(LOGO_SOURCES.LOCAL(asset));
 
     return sources;
@@ -301,21 +260,17 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
 
   const allSources = getAllSources();
 
-  // Handle image load error - try next source
   const handleImageError = () => {
     const nextIndex = attemptIndex + 1;
     
     if (nextIndex < allSources.length) {
-      // Try next source
       setCurrentSrc(allSources[nextIndex]);
       setAttemptIndex(nextIndex);
     } else {
-      // All sources failed - show first letter fallback
       setShowFallback(true);
     }
   };
 
-  // Show first letter as final fallback
   if (showFallback || allSources.length === 0) {
     return (
       <div className={`relative flex items-center justify-center w-full h-full ${className}`}>
@@ -324,7 +279,6 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
     );
   }
 
-  // Special handling for different asset types
   const isMetal = asset === 'GOLD' || asset === 'SILVER';
   const isCommodity = ['WTI', 'BRENT'].includes(asset);
   const isNear = asset === 'NEAR';
@@ -356,7 +310,6 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
   );
 };
 
-// Memoised: it animates on its own clock, so parent re-renders shouldn't redraw it.
 export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartProps) {
   const priceHistory = useStore((state) => state.priceHistory);
   const currentPrice = useStore((state) => state.currentPrice);
@@ -379,21 +332,14 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const lastResult = useStore((state) => state.lastResult);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
-  // The app-wide feed (app/providers.tsx) fills the store; this only reads its state for the badge.
   const { mode: feedMode, connected: streamLive } = useStore((state) => state.priceFeed);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [now, setNow] = useState(Date.now());
-  // Display-only price for the chart tip: always the latest real tick (snapped, no easing).
-  // Tagged with the asset it belongs to — after a token switch a stale tip from the
-  // previous asset must never be drawn on the new domain (that read as a jump).
-  // Settlement always uses the real store price.
   const [tip, setTip] = useState<{ asset: AssetType | null; price: number }>({ asset: null, price: 0 });
   const tipPrice = tip.asset === selectedAsset && tip.price > 0 ? tip.price : currentPrice;
 
-  // Motion. React re-renders the chart at RENDER_MS; between renders every time-positioned
-  // layer slides on a GPU transform at full frame rate, and the tip eases to each new tick.
   const nowRef = useRef(now);
   const ppsRef = useRef(0);
   const reducedRef = useRef(false);
@@ -415,16 +361,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
 
-  // Loading state for price feed
   const [isLoadingPrice, setIsLoadingPrice] = useState(true);
 
-  // Track resolved (past) cells
   const resolvedDrawBetIdsRef = useRef<Set<string>>(new Set());
 
-  // Local state for tracking cell bets
   const [cellBets, setCellBets] = useState<Map<string, CellBet>>(new Map());
 
-  // --- Draw mode state ---
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
   const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
@@ -442,15 +384,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }
   const [pendingBox, setPendingBox] = useState<PendingDrawBox | null>(null);
 
-  // Warning state for insufficient funds
   const [showInsufficientFunds, setShowInsufficientFunds] = useState(false);
 
-  // Asset search and category filtering
   const [assetSearchQuery, setAssetSearchQuery] = useState('');
   const [watchlist, setWatchlist] = useState<AssetType[]>([]);
   const [activeAssetCategory, setActiveAssetCategory] = useState<'All' | 'Crypto' | 'Metals' | 'Forex' | 'Stocks' | 'Commodities'>('All');
 
-  // Bet results for visual feedback
   interface BetResult {
     id: string;
     won: boolean;
@@ -468,7 +407,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const setIsIndicatorsOpen = useStore((state) => state.setIsIndicatorsOpen);
   const toggleIndicator = useStore((state) => state.toggleIndicator);
 
-  // Bets settle in BOT or USDT; the chart labels whichever the player selected.
   const currencySymbol = useMemo(
     () => resolveHouseLedgerCurrency({ selectedCurrency }),
     [selectedCurrency]
@@ -476,7 +414,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
   const currentAssetConfig = ASSET_CONFIG[selectedAsset] || ASSET_CONFIG.BTC;
 
-  // Filtered assets based on search and category
   const filteredAssets = useMemo(() => {
     return (Object.keys(ASSET_CONFIG) as AssetType[]).filter(assetId => {
       const asset = ASSET_CONFIG[assetId];
@@ -491,36 +428,22 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }, [assetSearchQuery, activeAssetCategory]);
 
 
-  // Stable Y-Axis Domain. Tagged with the asset it was computed for: when the
-  // traded asset changes, the next scales computation SNAPS to the new asset's
-  // own domain inside the render (before paint) — see nextYDomain. The old
-  // asset's domain is never blended in.
   const yDomain = useRef<{ min: number; max: number } | null>(null);
   const yDomainAsset = useRef<AssetType | null>(null);
 
-  // Asset switch: clear overlays and re-seed the tip from the new asset's own
-  // data. `setSelectedAsset` updates selectedAsset, priceHistory and
-  // currentPrice atomically, so this render already carries the new asset's
-  // values; reading them from the closure (deps = selectedAsset only) is
-  // intentional. The y-domain itself is re-seeded during the next scales
-  // computation so no frame between render and effect can show a mixed domain.
   useEffect(() => {
-    setBetResults([]); // Clear bet results
-    setCellBets(new Map()); // Clear cell bets
+    setBetResults([]);
+    setCellBets(new Map());
 
     const lastPoint = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : null;
     const assetPrice = currentPrice > 0 ? currentPrice : (lastPoint?.price ?? 0);
 
-    // Tip shows the new asset's own last value (or nothing), never the old
-    // asset's eased tip.
     setTip({ asset: selectedAsset, price: assetPrice });
 
-    // Show the loading overlay only when the new asset has no history to render yet.
     setIsLoadingPrice(priceHistory.length === 0 || assetPrice <= 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAsset]);
 
-  // Box mode: map active bets onto grid cells so crossing / settlement runs (cellBets was never filled after placement).
   useEffect(() => {
     if (gameMode !== 'box') {
       setCellBets(new Map());
@@ -555,7 +478,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     setCellBets(next);
   }, [activeBets, gameMode, selectedAsset]);
 
-  // Persisted watchlist for quick switching.
   useEffect(() => {
     try {
       const raw = localStorage.getItem('strike_watchlist_assets');
@@ -583,7 +505,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     setWatchlist((prev) => prev.includes(asset) ? prev.filter((a) => a !== asset) : [...prev, asset]);
   };
 
-  // Auto-remove bet results after 3 seconds
   useEffect(() => {
     if (betResults.length === 0) return;
     const interval = setInterval(() => {
@@ -597,14 +518,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => clearInterval(interval);
   }, [betResults.length]);
 
-  // Hide loading when price data arrives
   useEffect(() => {
     if (currentPrice > 0 && priceHistory.length >= 2) {
       setIsLoadingPrice(false);
     }
   }, [currentPrice, priceHistory]);
 
-  // Update dimensions
   useEffect(() => {
     const updateDimensions = () => {
       if (containerRef.current) {
@@ -615,15 +534,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       }
     };
     updateDimensions();
-    // The chart sits beside the trade panel, so its size changes without a window resize.
     const observer = new ResizeObserver(updateDimensions);
     if (containerRef.current) observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
 
-  // Reduced motion: no idle RAF loop. New ticks still render IMMEDIATELY —
-  // the currentPrice effect below snaps the tip the moment a tick lands — and
-  // the scrolling x-axis clock only needs a slow 1s heartbeat.
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(
     () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   );
@@ -634,14 +549,10 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => mq.removeEventListener('change', onChange);
   }, []);
 
-  // The tip must show the LATEST real tick immediately (snap, no easing) in both modes.
   useEffect(() => {
     if (currentPrice > 0) setTip({ asset: selectedAsset, price: currentPrice });
   }, [currentPrice, selectedAsset]);
 
-  // Feed stall detection for the dimmed-line treatment. Polled from getState()
-  // rather than subscribed: lastTickAt changes every second and must not
-  // rerender the chart.
   const [feedStalled, setFeedStalled] = useState(false);
   useEffect(() => {
     const check = () => {
@@ -653,12 +564,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => clearInterval(id);
   }, []);
 
-  // Feed state for the header badge: live = SSE ticks flowing, polling = the
-  // 1s fallback owns the feed, stale = neither produced a fresh tick (the
-  // same condition that dims the chart line).
   const feedState = feedStalled ? 'stale' : feedMode === 'stream' && streamLive ? 'live' : 'polling';
 
-  // Writes the between-render motion straight to the DOM: no React work per frame.
   const applyMotion = useCallback((dt: number) => {
     const s = scalesRef.current;
     if (!s) return;
@@ -706,32 +613,20 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => cancelAnimationFrame(frameId);
   }, [prefersReducedMotion, applyMotion]);
 
-  // Configuration - Responsive + Timeframe
   const isMobile = dimensions.width < 640;
   const historyWidthRatio = isMobile ? 0.35 : 0.50;
   const targetColWidthPx = isMobile ? 100 : 250;
-  const gridInterval = ((gameMode === 'box' || gameMode === 'draw') ? timeframeSeconds : 30) * 1000; // ms per column
+  const gridInterval = ((gameMode === 'box' || gameMode === 'draw') ? timeframeSeconds : 30) * 1000;
   const pixelsPerSecond = (gameMode === 'box' || gameMode === 'draw')
     ? Math.max(2, targetColWidthPx / (gridInterval / 1000))
     : (isMobile ? 35 : 50);
 
-  // Scales
   const scales = useMemo(() => {
     if (dimensions.width === 0 || currentPrice === 0) return null;
 
-    // Scale to what the price actually did, not to a fixed percentage of its
-    // level. A flat +/-0.15% window on a 78,000 BTC is roughly 234 dollars
-    // wide, while a second of real movement is about a dollar — so the line
-    // sat dead flat no matter how much the market moved. Fitting the window to
-    // the visible high and low makes real volatility fill the chart, and a
-    // quiet market still reads as quiet because the line stays near the middle.
-    // priceHistory timestamps are milliseconds, same clock as `now`.
     const windowMs = (dimensions.width / Math.max(pixelsPerSecond, 0.0001)) * 1000;
     const cutoff = now - windowMs;
 
-    // Fit the domain to what THIS asset's price actually did inside the
-    // visible window (headroom + zoom floor live in computeYDomainTarget, the
-    // same function the switch re-seed uses).
     const visiblePoints: { price: number }[] = [];
     for (const point of priceHistory) {
       if (point.timestamp >= cutoff) visiblePoints.push(point);
@@ -746,10 +641,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       targetMax = mid + half;
     }
 
-    // DYNAMIC Y-axis. Asset switch: snap to this asset's own domain — the
-    // switch never lerps from the previous asset's prices (that interpolation
-    // was the visible "jump on changing the token"). Same asset: ease toward
-    // the target so the axis follows real moves without jarring steps.
     const assetChanged = yDomainAsset.current !== selectedAsset;
     if (assetChanged) yDomainAsset.current = selectedAsset;
     yDomain.current = nextYDomain(
@@ -778,14 +669,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const scalesRef = useRef(scales);
   const currentPriceRef = useRef(currentPrice);
 
-  // Same commit as the new positions, so a render never shows one frame of stale offset.
   useLayoutEffect(() => {
     scalesRef.current = scales;
     currentPriceRef.current = currentPrice;
     nowRef.current = now;
     ppsRef.current = pixelsPerSecond;
     tipPriceRef.current = tipPrice;
-    // A new asset snaps; easing from the old asset's price would sweep across the chart.
     if (easedAssetRef.current !== selectedAsset) {
       easedAssetRef.current = selectedAsset;
       easedTipRef.current = 0;
@@ -795,17 +684,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
 
 
-  // --- Draw mode helpers ---
   const getRelativePos = (e: React.MouseEvent): { x: number; y: number } => {
     if (!containerRef.current) return { x: 0, y: 0 };
     const rect = containerRef.current.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  /**
-   * Box geometry for a drag. Boxes live in the future, so a drag over the history side
-   * keeps its width and height but is projected to start just past the price tip.
-   */
   const drawBoxGeometry = (a: { x: number; y: number }, b: { x: number; y: number }) => {
     const tip = (scales?.tipX ?? 0) + 2;
     const width = Math.min(Math.abs(b.x - a.x), pixelsPerSecond * 20);
@@ -952,7 +836,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     }
   };
 
-  // Handle classic (binomo) mode bet results at the graph tip
   const lastProcessedResultRef = useRef<number>(0);
   useEffect(() => {
     if (lastResult && gameMode === 'binomo' && scales && lastResult.timestamp > lastProcessedResultRef.current) {
@@ -973,7 +856,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
       setBetResults(prev => [...prev, result]);
 
-      // Play sound effects
       if (lastResult.won) {
         playWinSound();
       } else {
@@ -983,27 +865,19 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }, [lastResult, gameMode, scales, currentPrice, playWinSound, playLoseSound]);
 
   const chartPath = useMemo(() => {
-    // Don't render if no scales or no price data yet
     if (!scales || currentPrice <= 0) return '';
 
     const pixelsPerSec = pixelsPerSecond;
     const thresholdMs = ((-100 - scales.tipX) / pixelsPerSec) * 1000;
     const minTimestamp = now + thresholdMs;
 
-    // Filter points that are actually visible on screen to speed up rendering
-    // Optimized: Calculate timestamp thresholds once instead of calling xScale for every point
     const visiblePoints = priceHistory.filter((p: any) => {
-      return p.timestamp > minTimestamp && p.timestamp <= now + 1000; // Buffer for tip
+      return p.timestamp > minTimestamp && p.timestamp <= now + 1000;
     });
 
 
-    // Ensure we have at least history or current point
-    // Upstream feeds repeat the last price between real updates; keeping only the points
-    // where the price actually changed lets the curve flow instead of stepping.
     const pointsToRender = visiblePoints.filter((p, i) => i === 0 || p.price !== visiblePoints[i - 1].price);
 
-    // The path ends at the last real tick. The live tail from there to the eased tip dot
-    // is drawn every frame by applyMotion.
     lastPointRef.current = pointsToRender.length > 0 ? pointsToRender[pointsToRender.length - 1] : null;
     if (pointsToRender.length < 2) return '';
 
@@ -1021,14 +895,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }, [scales, priceHistory, currentPrice, now]);
 
 
-  // TECHNICAL INDICATORS CALCULATION
   const indicatorPaths = useMemo(() => {
     if (!scales) return null;
 
     const paths: Record<string, any> = {};
     const points = [...priceHistory, { timestamp: now, price: currentPrice }];
 
-    // 1. Moving Average (SMA 20)
     if (activeIndicators['ma'] && points.length >= 2) {
       const maPoints = [];
       const period = 20;
@@ -1045,7 +917,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       paths.ma = lineGen(maPoints) || '';
     }
 
-    // 2. Bollinger Bands (20, 2)
     if (activeIndicators['bollinger'] && points.length >= 2) {
       const topPoints = [];
       const bottomPoints = [];
@@ -1079,7 +950,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       ];
     }
 
-    // 3. Alligator
     if (activeIndicators['alligator'] && points.length >= 2) {
       const calculateDynamicSMA = (period: number) => {
         const sma = [];
@@ -1098,13 +968,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         .curve(curveMonotoneX);
 
       paths.alligator = [
-        lineGen(calculateDynamicSMA(13)) || '', // Jaw
-        lineGen(calculateDynamicSMA(8)) || '',  // Teeth
-        lineGen(calculateDynamicSMA(5)) || '',  // Lips
+        lineGen(calculateDynamicSMA(13)) || '',
+        lineGen(calculateDynamicSMA(8)) || '',
+        lineGen(calculateDynamicSMA(5)) || '',
       ];
     }
 
-    // 4. RSI (14) - Refined Wilder's Smoothing
     if (activeIndicators['rsi'] && points.length >= 2) {
       const rsiPoints = [];
       let avgGain = 0;
@@ -1128,7 +997,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             rsiPoints.push({ timestamp: points[i].timestamp, rsi: 50 });
           }
         } else {
-          // Precise Wilder's Smoothing
           avgGain = (avgGain * (period - 1) + gain) / period;
           avgLoss = (avgLoss * (period - 1) + loss) / period;
           const rs = avgGain / (avgLoss || 0.00001);
@@ -1143,20 +1011,15 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return paths;
   }, [scales, priceHistory, now, currentPrice, activeIndicators]);
 
-  // Continuous Grid Generation
-  // Cells are now positioned based on PRICE LEVELS, not fixed pixels
   const betCells = useMemo(() => {
     if (!scales || dimensions.height === 0) return [];
 
     const cells = [];
     const colWidth = (gridInterval / 1000) * pixelsPerSecond;
 
-    // Calculate a stable price step based on the current range to ensure the grid "slides" correctly
     const rawStep = (scales.maxY - scales.minY) / 10;
-    // Safety check: rawStep must be positive and meaningful
     if (isNaN(rawStep) || rawStep <= 0) return [];
     
-    // Snap to "nice" numbers (e.g., 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100...)
     const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
     const normalized = rawStep / magnitude;
     let priceStep;
@@ -1166,20 +1029,17 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     else priceStep = 10 * magnitude;
 
 
-    // Calculate visible price range with buffer (0.8x viewport)
     const viewPadding = (scales.maxY - scales.minY) * 0.8;
 
 
     const gridMaxY = scales.maxY + viewPadding;
     const gridMinY = scales.minY - viewPadding;
 
-    // Stable snap points
     const startPrice = Math.floor(gridMaxY / priceStep) * priceStep;
     const endPrice = Math.ceil(gridMinY / priceStep) * priceStep;
 
     const priceRange = scales.maxY - scales.minY;
 
-    // Time-based generation for stable keys
     const startTime = Math.floor(now / gridInterval) * gridInterval - gridInterval;
     const endTime = now + ((dimensions.width - scales.tipX) / pixelsPerSecond) * 1000 + gridInterval * 2;
 
@@ -1193,7 +1053,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       const isPast = colX + colWidth <= scales.tipX;
 
 
-      // Loop through price levels
       for (let rowPriceTop = startPrice; rowPriceTop >= endPrice; rowPriceTop -= priceStep) {
         const rowPriceBottom = rowPriceTop - priceStep;
         const rowPriceCenter = (rowPriceTop + rowPriceBottom) / 2;
@@ -1204,10 +1063,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         const cellBottom = scales.yScale(rowPriceBottom);
         const rowHeight = cellBottom - y;
 
-        // Skip if completely off screen vertically to save performance
         if (y > dimensions.height + 50 || cellBottom < -50) continue;
 
-        // Determine win/loss for cells crossing or past
         let status: 'future' | 'active' | 'won' | 'lost' = 'future';
 
         if (isCrossing) {
@@ -1228,7 +1085,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         if (priceInRow) {
           baseMultiplier = 1.01;
         } else {
-          // Distance from CURRENT PRICE in price terms
           const priceDist = Math.abs(rowPriceCenter - currentPrice);
           const normalizedDist = Math.min(priceDist / (priceRange * 0.8), 1);
           baseMultiplier = 1.05 + Math.pow(normalizedDist, 1.3) * 3.95;
@@ -1237,10 +1093,9 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         const timeBonus = Math.max(0, (colX - scales.tipX) / 800) * 0.25;
         let calculatedMultiplier = Math.min(baseMultiplier + timeBonus, 10.0);
 
-        // BLITZ MODE BOOST (x2 Multiplier) - Reduced density as requested
         const colIndex = Math.floor(colTimestamp / gridInterval);
-        const isHighStake = baseMultiplier > 2.2; // Only very high risk cells
-        const isLuckyDiagonal = (priceLevelIndex + colIndex) % 5 === 0; // Less frequent (1 in 5 instead of 1 in 3)
+        const isHighStake = baseMultiplier > 2.2;
+        const isLuckyDiagonal = (priceLevelIndex + colIndex) % 5 === 0;
         const isBlitzBoosted = isBlitzActive && hasBlitzAccess && (isHighStake || isLuckyDiagonal);
 
 
@@ -1251,11 +1106,9 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
         const multiplier = Math.min(calculatedMultiplier, 20).toFixed(2);
 
-        // Visual properties
         const distFromCenter = Math.abs(rowPriceCenter - currentPrice) / priceRange;
         const intensity = Math.min(distFromCenter * 1.5, 1);
 
-        // Orange hue for Blitz, Purple otherwise
         const hue = isBlitzBoosted ? 25 : 270;
         const saturation = isBlitzBoosted ? 80 + intensity * 15 : 50 + intensity * 30;
         const lightness = isBlitzBoosted ? 55 : 45;
@@ -1271,7 +1124,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
           colTimestamp,
           x: colX,
           y,
-          // Flush cells: neighbours share a hairline instead of leaving a gutter.
           width: colWidth,
           height: Math.max(rowHeight, 5),
           multiplier,
@@ -1292,7 +1144,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
 
 
-  // Handle bet resolution when chart crosses cells with active bets
   useEffect(() => {
     if (!scales || cellBets.size === 0 || gameMode !== 'box') return;
 
@@ -1300,25 +1151,20 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       const bet = cellBets.get(cell.id);
       if (!bet) return;
 
-      // Check if this cell is being crossed or has been passed
       const isCrossing = cell.status === 'active' || cell.status === 'won' || cell.status === 'lost';
 
       if (isCrossing) {
-        // Determine if bet won or lost based on current price
         const won = currentPrice <= cell.priceTop && currentPrice >= cell.priceBottom;
         const payout = won ? bet.amount * bet.multiplier : 0;
 
-        // Remove from cellBets
         setCellBets(prev => {
           const newMap = new Map(prev);
           newMap.delete(cell.id);
           return newMap;
         });
 
-        // Resolve the bet in the store
         resolveBet(bet.betId, won, payout);
 
-        // Add bet result notification
         setBetResults(prev => [...prev, {
           id: `result-${bet.betId}`,
           won,
@@ -1330,15 +1176,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
           y: cell.y
         }]);
 
-        // Play sound effect
         if (won) {
           playWinSound();
         } else {
           playLoseSound();
         }
 
-        // Balance settlement is handled centrally by resolveBet in the store.
-        // Avoid duplicate /api/balance/win calls from the chart layer.
         if (userAddress) {
           fetchBalance(userAddress);
         }
@@ -1347,7 +1190,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     });
   }, [betCells, cellBets, scales, currentPrice, resolveBet, userAddress, fetchBalance, playWinSound, playLoseSound, gameMode]);
 
-  // Draw mode settlement: resolve when `now >= endTime` and price stays inside [priceBottom, priceTop]
   useEffect(() => {
     if (!scales || gameMode !== 'draw') return;
 
@@ -1392,7 +1234,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
   return (
     <div ref={containerRef} className="absolute inset-0 z-0 bg-white font-tight text-ink overflow-hidden select-none">
-      {/* Loading State */}
       {isLoadingPrice && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/80">
           <div className="flex flex-col items-center gap-3">
@@ -1405,12 +1246,10 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         </div>
       )}
 
-      {/* Box Mode: Grid Cells layer */}
       {gameMode === 'box' && (
         <div className="absolute inset-0 z-5 overflow-hidden pointer-events-none">
           <div ref={scrollLayer} className="absolute inset-0 will-change-transform">
           {betCells.map((cell: any) => {
-            // Visual styling based on status
             let opacity = 0.9;
             let canBet = cell.status === 'future';
             let tone = cell.isBlitzBoosted
@@ -1430,7 +1269,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 </div>
               );
             } else if (cell.status === 'lost') {
-              // Keep the slot so the grid never gets holes.
               return (
                 <div
                   key={cell.id}
@@ -1457,14 +1295,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 try {
                   const targetId = `${cell.isUp ? 'UP' : 'DOWN'}-${cell.multiplier}-${timeframeSeconds}`;
 
-                  // House balance only — deduct via /api/balance/bet (no per-bet wallet signature).
-                  // Users fund the treasury once via Deposit; stakes are not sent on-chain each click.
                   const result = await placeBetFromHouseBalance(
                     betAmount,
                     targetId,
                     userAddress,
                     cell.id,
-                    // The server settles a cell at the moment the tip enters it.
                     {
                       priceTop: cell.priceTop,
                       priceBottom: cell.priceBottom,
@@ -1473,9 +1308,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                     },
                   );
 
-                  if (result && result.bet) {
-                    // cellBets will be automatically updated by the useEffect watching activeBets
-                  }
+                  if (result && result.bet) {}
                 } catch (error) {
                   console.error('Failed to place box bet:', error);
                   toast.error(error instanceof Error ? error.message : 'Failed to place bet');
@@ -1527,10 +1360,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         </div>
       )}
 
-      {/* Draw mode: interaction overlay + active draw rectangles */}
       {gameMode === 'draw' && scales && (
         <>
-          {/* Mouse capture overlay (prevents placing new bets while confirming) */}
           <div
             className="absolute inset-0 z-30"
             style={{ cursor: 'crosshair', pointerEvents: pendingBox ? 'none' : 'auto' }}
@@ -1540,7 +1371,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             onMouseLeave={handleDrawMouseLeave}
           />
 
-          {/* Preview while dragging */}
           {isDrawing && drawStart && drawCurrent && (
             <div
               className="absolute z-25 pointer-events-none"
@@ -1556,7 +1386,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             />
           )}
 
-          {/* Pending placement preview + confirm panel */}
           {pendingBox && !isDrawing && (
             <>
               <div
@@ -1624,7 +1453,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             </>
           )}
 
-          {/* Active draw bet rectangles */}
           <svg className="absolute inset-0 w-full h-full z-20 pointer-events-none" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}>
             <g ref={scrollLayer}>
             {activeBets
@@ -1684,7 +1512,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         </>
       )}
 
-      {/* Classic mode: Active Bets SVG Overlay - Strike and Expiration lines */}
       <svg className="absolute inset-0 w-full h-full z-20 pointer-events-none">
         <g ref={scrollLayer}>
         {gameMode === 'binomo' && scales && activeBets.map((bet: any) => {
@@ -1694,7 +1521,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
           const expirationX = scales.xScale(bet.endTime);
           const nowX = scales.tipX;
 
-          // Only show if expiration is in the future
           if (expirationX < 0) return null;
 
           const isUp = bet.direction === 'UP';
@@ -1702,7 +1528,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
           return (
             <g key={bet.id}>
-              {/* Strike Line (Horizontal) */}
               <line
                 x1={nowX}
                 y1={strikeY}
@@ -1713,7 +1538,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 strokeDasharray="4 4"
               />
 
-              {/* Expiration Line (Vertical) */}
               {expirationX > nowX && (
                 <line
                   x1={expirationX}
@@ -1727,7 +1551,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 />
               )}
 
-              {/* Price Filling Area */}
               {expirationX > nowX && (
                 <rect
                   x={nowX}
@@ -1739,7 +1562,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 />
               )}
 
-              {/* Label at Strike Price */}
               <text
                 x={nowX + 5}
                 y={strikeY - 5}
@@ -1755,15 +1577,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         </g>
       </svg>
 
-      {/* SVG Layer for Chart - ON TOP (no asset-switch remount: the switch re-seeds
-          tip/overlays in the effect and the y-domain snaps to the new asset inside the
-          scales computation itself, and nothing here holds stale DOM state) */}
       <svg
         className="absolute inset-0 w-full h-full z-10 pointer-events-none"
       >
         {scales && (
           <>
-            {/* Y-Axis Price Ticks */}
             <g className="y-axis">
               {[0.1, 0.3, 0.5, 0.7, 0.9].map((tick) => {
                 const price = scales.minY + (scales.maxY - scales.minY) * tick;
@@ -1786,11 +1604,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
               })}
             </g>
 
-            {/* X-Axis Time Ticks: anchored to wall-clock times so they scroll with the chart */}
             <g className="x-axis" ref={scrollLayer}>
               {(() => {
-                // Dynamic tick interval based on pixelsPerSecond
-                // We want at least 120px between time labels to prevent overlap
                 const minSpacing = 120;
                 let tickInterval = 10;
 
@@ -1800,7 +1615,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 if (pixelsPerSecond < minSpacing / 120) tickInterval = 300;
                 if (pixelsPerSecond < minSpacing / 300) tickInterval = 600;
 
-                // Calculate range of seconds to show based on visible dimensions
                 const secondsPast = scales.tipX / pixelsPerSecond;
                 const secondsFuture = (dimensions.width - scales.tipX) / pixelsPerSecond;
 
@@ -1834,7 +1648,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
             {currentPrice > 0 && (
               <>
-                {/* Main line — dimmed (opacity only, no layout shift) while the feed is stalled */}
                 <g
                   ref={scrollLayer}
                   opacity={feedStalled ? 0.35 : 1}
@@ -1852,7 +1665,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   opacity={feedStalled ? 0.35 : 1}
                 />
 
-                {/* Current price: dashed guide, tip dot, right-axis tag. Positioned by applyMotion. */}
                 <g ref={tipGroupRef}>
                   <line
                     x1={0}
@@ -1878,10 +1690,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   </text>
                 </g>
 
-                {/* TECHNICAL INDICATORS RENDER */}
                 {indicatorPaths && (
                   <g className="indicators-layer" ref={scrollLayer}>
-                    {/* Moving Average */}
                     {activeIndicators['ma'] && indicatorPaths.ma && (
                       <path
                         d={indicatorPaths.ma as string}
@@ -1893,7 +1703,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                       />
                     )}
 
-                    {/* Bollinger Bands */}
                     {activeIndicators['bollinger'] && indicatorPaths.bollinger && (
                       <g>
                         <path
@@ -1921,7 +1730,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                       </g>
                     )}
 
-                    {/* Alligator */}
                     {activeIndicators['alligator'] && indicatorPaths.alligator && (
                       <g>
                         <path d={(indicatorPaths.alligator as string[])[0]} fill="none" stroke="var(--ink)" strokeWidth="1.5" opacity="0.5" />
@@ -1930,7 +1738,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                       </g>
                     )}
 
-                    {/* RSI Advanced Visualization */}
                     {activeIndicators['rsi'] && indicatorPaths.rsi && (() => {
                       try {
                         const rsiPoints = indicatorPaths.rsi as any[];
@@ -1941,19 +1748,15 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
                         return (
                           <g transform={`translate(0, ${panelY})`}>
-                            {/* Panel Background */}
                             <rect x={0} y={0} width={dimensions.width} height={panelHeight} fill="var(--paper)" fillOpacity="0.92" />
                             <line x1={0} y1={0} x2={dimensions.width} y2={0} stroke="var(--line)" strokeWidth="1" />
 
-                            {/* Zones (70-30) */}
                             <line x1={0} y1={30} x2={dimensions.width} y2={30} stroke="var(--line)" strokeWidth="1" strokeDasharray="4 4" />
                             <line x1={0} y1={70} x2={dimensions.width} y2={70} stroke="var(--line)" strokeWidth="1" strokeDasharray="4 4" />
 
-                            {/* Labels */}
                             <text x={10} y={26} fill="var(--faint)" fontSize="10" className="font-jet">70</text>
                             <text x={10} y={66} fill="var(--faint)" fontSize="10" className="font-jet">30</text>
 
-                            {/* RSI Line */}
                             <path
                               d={line<{ timestamp: number, rsi: number }>()
                                 .x(d => scales.xScale(d.timestamp))
@@ -1979,7 +1782,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         )}
       </svg>
 
-      {/* Price Header with Asset Selector */}
       <div className="absolute top-4 left-4 pointer-events-auto z-40">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
@@ -2010,7 +1812,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             />
           </button>
 
-          {/* Price Display */}
           <div className="pointer-events-none flex items-baseline gap-2" data-tour="price-display">
             <p className="font-jet text-ink text-[28px] leading-none tracking-tight">
               {currentPrice > 0 ? currentPrice.toLocaleString('en-US', {
@@ -2021,7 +1822,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             {(() => {
               const first = priceHistory[0]?.price;
               if (!first || currentPrice <= 0) return null;
-              // Round first so a tiny negative move doesn't render as "-0.00%".
               const pct = Number((((currentPrice - first) / first) * 100).toFixed(2)) || 0;
               return (
                 <span className={`font-jet text-[13px] ${pct > 0 ? 'text-up' : pct < 0 ? 'text-down' : 'text-faint'}`}>
@@ -2029,7 +1829,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 </span>
               );
             })()}
-            {/* Feed-state badge: inline in the existing price row — no layout churn. */}
             <span
               data-testid="feed-state"
               title={
@@ -2066,7 +1865,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         )}
       </div>
 
-      {/* Indicator Selection UI */}
       <div className="absolute top-16 right-4 z-50 pointer-events-none">
         <AnimatePresence>
           {isIndicatorsOpen && (
@@ -2109,7 +1907,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       </div>
 
 
-      {/* Insufficient Funds Notice */}
       {showInsufficientFunds && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50">
           <div className={`${OVERLAY} px-4 py-2.5`}>
@@ -2120,12 +1917,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         </div>
       )}
 
-      {/* Bet Result Notifications */}
       <div className="absolute inset-0 z-50 pointer-events-none overflow-hidden">
         {betResults.map((result) => {
           const age = Date.now() - result.timestamp;
           const opacity = Math.max(0, 1 - age / 3000);
-          const translateY = -age / 20; // Float upward faster
+          const translateY = -age / 20;
 
           return (
             <div
@@ -2158,16 +1954,13 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         })}
       </div>
 
-      {/* Asset Dropdown - rendered via Portal to escape all stacking contexts */}
       {isAssetDropdownOpen && typeof document !== 'undefined' && createPortal(
         <>
-          {/* Backdrop */}
           <div
             className="fixed inset-0 z-[9998]"
             onClick={() => setIsAssetDropdownOpen(false)}
           />
 
-          {/* Dropdown Panel */}
           <motion.div
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
@@ -2176,7 +1969,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             style={{ position: 'fixed', top: dropdownPos.top, left: dropdownPos.left }}
             className={`${OVERLAY} w-80 overflow-hidden z-[9999] p-2 text-ink`}
           >
-            {/* Search Input */}
             <div className="relative mb-2">
               <MagnifyingGlass size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-faint pointer-events-none" />
               <input
@@ -2188,7 +1980,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
               />
             </div>
 
-            {/* Category Tabs */}
             <div className="flex gap-0.5 mb-2 bg-surface p-0.5 rounded-full ring-1 ring-line">
               {(['All', 'Crypto', 'Metals', 'Forex', 'Stocks', 'Commodities'] as const).map((cat) => (
                 <button
@@ -2201,7 +1992,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
               ))}
             </div>
 
-            {/* Asset List */}
             <div className="max-h-[320px] overflow-y-auto scrollbar-none no-scrollbar grid grid-cols-1 gap-0.5">
               {filteredAssets.length > 0 ? (
                 filteredAssets.map((asset) => (

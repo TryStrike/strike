@@ -1,4 +1,3 @@
-/** Read-side Arc helpers (USDC via its ERC-20 interface). */
 
 import { ethers } from 'ethers';
 import {
@@ -24,7 +23,6 @@ function getArcProvider(): ethers.JsonRpcProvider {
   return provider;
 }
 
-/** Balance of any playable asset, as a whole-token number. */
 export async function getAssetBalance(address: string, asset: ArcAsset): Promise<number> {
   if (!address) return 0;
   const cfg = getAssetConfig(asset);

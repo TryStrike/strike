@@ -1,14 +1,5 @@
 'use client';
 
-/**
- * StateScreen — one component that renders the four first-class route/data
- * states: empty, loading, error, offline. Theme is off the existing light
- * design tokens (ink/muted/faint/line/surface/up) defined in app/globals.css.
- *
- * The error variant intentionally shows a sanitized `ErrorNote` instead of
- * anything derived from the raw error object, so stack traces, SQL, env vars
- * and absolute paths structurally cannot reach the DOM via this component.
- */
 
 import React, { useEffect, useState, type ReactNode } from 'react';
 import {
@@ -33,7 +24,6 @@ interface VariantDefaults {
   tone: 'neutral' | 'error' | 'muted';
 }
 
-/** Pure so tests can pin the copy/variant contract. */
 export function describeStateVariant(variant: StateVariant): VariantDefaults {
   switch (variant) {
     case 'loading':
@@ -84,22 +74,14 @@ function SpinnerGlyph() {
 
 export interface StateScreenProps {
   variant: StateVariant;
-  /** Override the default headline for the variant. */
   title?: string;
-  /** Supporting line under the headline. */
   hint?: ReactNode;
-  /** Replace the default icon entirely. */
   icon?: ReactNode;
-  /** Retry CTA. The CTA only renders when onRetry is provided (error/offline
-   *  variants default to their own labels). */
   onRetry?: () => void;
   retryLabel?: string;
-  /** Optional secondary, lower-emphasis action. */
   secondaryAction?: SecondaryAction;
-  /** For the error variant: the raw error (or message) to sanitize + show. */
   error?: unknown;
   className?: string;
-  /** Tighter paddings for embedding inside cards/panels. */
   compact?: boolean;
 }
 
@@ -117,11 +99,6 @@ export const StateScreen: React.FC<StateScreenProps> = ({
 }) => {
   const defaults = describeStateVariant(variant);
 
-  // "Empty" means the request succeeded and there is genuinely no data
-  // (title "Nothing here yet", neutral icon, no error line, no CTA unless
-  // the caller passes onRetry). A FAILED request must use variant="error",
-  // which shows the sanitized ErrorNote and always offers an actionable
-  // retry — falling back to reloading the page when no handler is given.
   const showCta = variant === 'error' || variant === 'offline' || !!onRetry;
   const handleRetry =
     onRetry ??
@@ -185,10 +162,6 @@ export const StateScreen: React.FC<StateScreenProps> = ({
   );
 };
 
-/**
- * Live-status helper for the offline variant: returns whether the browser is
- * currently online and re-renders on online/offline events. SSR-safe.
- */
 export function useOnlineStatus(): boolean {
   const [online, setOnline] = useState(true);
   useEffect(() => {

@@ -1,18 +1,5 @@
 'use client';
 
-/**
- * HistoryTable — the settled-rounds ledger for /history.
- *
- * One row per `bet_history` entry: settle time, asset, side, stake, multiplier,
- * strike vs end price, result and payout/net — plus the per-row proof affordance.
- * The proof itself reuses the shared settlement panel (components/game/
- * SettlementProof), which lazily reads GET /api/bets/<id> for the ledger
- * references and any Arc tx hash; a row that already carries a hash links
- * straight to the explorer. Play-money rounds are badged, never hidden.
- *
- * Strictly read-only: this renders what /api/bets/history returned and asks the
- * proof endpoint for more — it never writes to the ledger.
- */
 
 import React from 'react';
 import { ArrowSquareOut, ShieldCheck } from '@phosphor-icons/react';
@@ -36,7 +23,6 @@ import {
 interface HistoryTableProps {
   rows: BetHistoryRow[];
   loading: boolean;
-  /** Connected wallet, forwarded to the settlement-proof read. */
   wallet: string;
   skeletonRows?: number;
 }
@@ -95,12 +81,10 @@ const SkeletonRow: React.FC<{ index: number }> = ({ index }) => (
   </tr>
 );
 
-/** Is this a play-money round? Server `isDemoBet` flag first, `demo-` id as backup. */
 export function isDemoHistoryRow(row: BetHistoryRow): boolean {
   return isDemoRow(row);
 }
 
-/** Map a ledger row onto the shared settlement-panel input. */
 export function proofInputFromRow(row: BetHistoryRow): SettlementProofInput {
   return {
     betId: String(row.id ?? ''),
@@ -196,7 +180,6 @@ const HistoryRow: React.FC<{ row: BetHistoryRow; wallet: string }> = ({ row, wal
   );
 };
 
-/** Filtered / unfiltered empty state, kept next to the table it replaces. */
 export const HistoryEmptyState: React.FC<{ filtered: boolean; onClear?: () => void }> = ({
   filtered,
   onClear,

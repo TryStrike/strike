@@ -16,7 +16,6 @@ import { ArrowDown, ArrowUp, ArrowUpRight, Minus } from '@phosphor-icons/react';
 const STATIC_DOTS =
   'h-full w-full [background-image:radial-gradient(var(--ink)_1px,transparent_1px)] [background-size:24px_24px] opacity-[0.08] [mask-image:radial-gradient(ellipse_60%_55%_at_50%_35%,#000_20%,transparent_80%)]';
 
-// WebGL, so it loads after first paint and never ships with /trade.
 const HeroDither = dynamic(() => import('@/components/ui/DitherField').then((m) => m.DitherField), {
   ssr: false,
   loading: () => <div className={STATIC_DOTS} />,
@@ -30,9 +29,6 @@ const HERO_ASSETS = [
 ];
 const TICKER = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'GOLD', 'SILVER', 'EUR', 'GBP', 'JPY', 'AAPL', 'NVDA', 'TSLA', 'SPX', 'WTI'];
 
-/** Same localStorage key the /trade poller (lib/utils/priceFeed) writes on
- *  every successful fetch — lets a fresh landing visit start from the last
- *  known prices instead of an empty/placeholder flash. */
 const PRICE_CACHE_KEY = 'strike_last_price_cache_v1';
 
 function fmt(v: number) {
@@ -40,8 +36,6 @@ function fmt(v: number) {
   return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }
 
-/** Only finite, positive numbers may enter price state — NaN/0/strings from a
- *  bad payload can never reach the UI. */
 function sanitizePrices(raw: unknown): Record<string, number> {
   const out: Record<string, number> = {};
   if (raw && typeof raw === 'object') {
@@ -52,10 +46,6 @@ function sanitizePrices(raw: unknown): Record<string, number> {
   return out;
 }
 
-/**
- * Live prices for the hero and ticker, from the app-wide feed in app/providers.tsx.
- * Seeded from the last cached snapshot so the first paint is never empty.
- */
 function usePrices() {
   const live = useStore((s) => s.assetPrices);
   const [seed] = useState<Record<string, number>>(() => {
@@ -82,7 +72,6 @@ export default function Landing() {
   const reduceMotion = useReducedMotion();
   const [i, setI] = useState(0);
   useEffect(() => {
-    // Under reduced motion the hero stays on one asset — nothing auto-advances.
     if (reduceMotion) return;
     const id = setInterval(() => setI((n) => n + 1), 5000);
     return () => clearInterval(id);
@@ -113,7 +102,6 @@ export default function Landing() {
       />
 
       <div id="landing-content" tabIndex={-1} className="focus:outline-none">
-      {/* Hero */}
       <section className="relative overflow-hidden">
         <div aria-hidden="true" className="pointer-events-none absolute inset-0 text-up">
           <HeroDither pattern="horizon" dotSize={2} intensity={0.7} className="h-full w-full" />
@@ -151,7 +139,6 @@ export default function Landing() {
             </div>
           </BlurFade>
 
-          {/* Live round card */}
           <BlurFade delay={0.34} className="mt-16 w-full max-w-[600px]">
             <div className="rounded-[28px] bg-white p-6 text-left ring-1 ring-line shadow-2xl sm:p-8">
               <div className="flex items-center justify-between">
@@ -165,9 +152,6 @@ export default function Landing() {
               </div>
 
               <div className="mt-6 font-jet text-[clamp(44px,9vw,76px)] font-semibold leading-none tracking-[-0.05em] tabular-nums">
-                {/* An invisible widest-case sizer pins the row width so digit-count
-                    changes never shift the layout; the live value overlays it.
-                    Before the first tick: reserved whitespace, never "—"/NaN/0. */}
                 <span className="relative inline-block align-top">
                   <span aria-hidden="true" className="invisible">
                     1,111,111.11
@@ -181,7 +165,6 @@ export default function Landing() {
                 </span>
                 {!priceText && <span className="sr-only">Loading live price</span>}
               </div>
-              {/* Three-state direction: never claim "moving up" on dir=0 / no data. */}
               <div className={`mt-3 min-h-[1.25rem] font-jet text-sm ${dir < 0 ? 'text-down' : dir > 0 ? 'text-up' : 'text-subtle'}`}>
                 {priceText ? (
                   typeof prevPrice === 'number' ? (
@@ -211,7 +194,6 @@ export default function Landing() {
 
       </section>
 
-      {/* Ticker */}
       <div className="border-y border-ink/[0.06] py-3.5 font-jet text-[13px]">
         <Marquee seconds={50}>
           {TICKER.map((s) => {
@@ -229,7 +211,6 @@ export default function Landing() {
         </Marquee>
       </div>
 
-      {/* How it works */}
       <section id="how" className="scroll-mt-16">
         <div className="mx-auto max-w-[1040px] px-5 py-28 sm:px-8">
           <BlurFade className="text-center">
@@ -279,7 +260,6 @@ export default function Landing() {
             </BlurFade>
           </div>
 
-          {/* Numbers */}
           <BlurFade className="mt-20 grid grid-cols-2 gap-y-10 md:grid-cols-4">
             {[
               ['5s', 'fastest round'],
@@ -298,7 +278,6 @@ export default function Landing() {
 
       <ArcProof />
 
-      {/* Closing */}
       <section className="border-t border-ink/[0.06]">
         <BlurFade className="mx-auto flex max-w-[720px] flex-col items-center px-5 py-28 text-center sm:px-8">
           <h2 className="font-serif text-[clamp(44px,6vw,72px)] font-normal leading-[1] tracking-[-0.02em]">

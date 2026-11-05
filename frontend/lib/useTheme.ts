@@ -11,7 +11,6 @@ function applyTheme(pathname: string | null) {
   else delete document.documentElement.dataset.theme;
 }
 
-/** Keeps the theme in step with the route (back button, links) and ends a pending burst. */
 export function useThemeSync() {
   const pathname = usePathname();
   useEffect(() => {
@@ -21,7 +20,6 @@ export function useThemeSync() {
   }, [pathname]);
 }
 
-/** Toggles AI mode with the theme bursting out of the clicked point. */
 export function useAiModeToggle() {
   const router = useRouter();
   const pathname = usePathname();

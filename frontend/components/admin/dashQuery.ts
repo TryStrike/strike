@@ -1,12 +1,5 @@
 'use client';
 
-/**
- * Deep-linkable dashboard filter state: everything a panel filters by lives in
- * the URL (?tab=…&q=…&status=…&currency=…&from=…&to=…&account=…&limit=…&offset=…)
- * so a link like /dashboard?tab=financial&status=pending is shareable and
- * survives reloads. Parsing is defensive — bad values fall back to defaults
- * instead of throwing.
- */
 
 import { normalizeTabParam, type DashboardTab } from '@/lib/admin/dashboardTabs';
 import { LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT } from '@/lib/admin/listParams';
@@ -18,11 +11,9 @@ export interface DashFilters {
     currency: string;
     from: string;
     to: string;
-    /** gameplay real/demo split */
     account: string;
     limit: number;
     offset: number;
-    /** wallet-intel address query (kept in the URL for deep links) */
     address: string;
 }
 
@@ -64,7 +55,6 @@ export function parseDashFilters(sp: URLSearchParams): DashFilters {
     };
 }
 
-/** Serialises filters into a query string; empty/default values are omitted. */
 export function dashQuery(f: DashFilters, overrides: Partial<DashFilters> = {}): string {
     const merged = { ...f, ...overrides };
     const sp = new URLSearchParams();
@@ -82,7 +72,6 @@ export function dashQuery(f: DashFilters, overrides: Partial<DashFilters> = {}):
     return s ? `?${s}` : '';
 }
 
-/** Query string for admin list APIs from the current filters (no tab/address). */
 export function apiListQuery(f: DashFilters, overrides: Partial<DashFilters> = {}): string {
     const merged = { ...f, ...overrides };
     const sp = new URLSearchParams();
@@ -97,16 +86,10 @@ export function apiListQuery(f: DashFilters, overrides: Partial<DashFilters> = {
     return sp.toString();
 }
 
-/**
- * The status value to send to an export/list route that only understands a
- * whitelist of enum values: keep the active filter when the dataset supports
- * it, otherwise fall back to '' (any) instead of risking a 400.
- */
 export function exportStatusFor(allowed: readonly string[], status: string): string {
     return allowed.includes(status) ? status : '';
 }
 
-/** Export link: apiListQuery with a dataset-safe status. */
 export function apiExportQuery(f: DashFilters, allowedStatuses: readonly string[]): string {
     return apiListQuery(f, { status: exportStatusFor(allowedStatuses, f.status) });
 }

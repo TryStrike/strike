@@ -1,8 +1,3 @@
-/**
- * Main Zustand store for STRIKE dApp
- * Combines wallet, game, history, balance, and referral slices.
- * Game logic is off-chain; deposits/withdrawals settle on Arc.
- */
 
 import { create } from "zustand";
 import { WalletState, createWalletSlice } from "./walletSlice";
@@ -21,7 +16,6 @@ export const useStore = create<Store>()((...args) => ({
   ...createReferralSlice(...args),
 }));
 
-/** Individual selectors for optimized re-renders */
 export const useWalletAddress = () => useStore(state => state.address);
 export const useIsConnected = () => useStore(state => state.isConnected);
 export const useHouseBalance = () => useStore(state => state.houseBalance);

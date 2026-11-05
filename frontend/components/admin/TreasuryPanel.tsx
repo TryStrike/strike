@@ -1,9 +1,5 @@
 'use client';
 
-/**
- * On-chain treasury EOA balances (read-only RPC snapshot) with skeleton,
- * empty and error+retry states.
- */
 
 import { EmptyState, ErrorState, SkeletonRows } from './AdminUi';
 import { useAdminFetch } from './useAdminFetch';

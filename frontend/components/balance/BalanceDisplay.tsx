@@ -12,7 +12,6 @@ import { ARC_ASSETS } from '@/lib/arc/config';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { calculateFeeAmount } from '@/lib/fees/platformFee';
 
-/** House balance with deposit and withdraw. */
 export const BalanceDisplay: React.FC = () => {
   const houseBalance = useStore(state => state.houseBalance);
   const network = useStore(state => state.network);
@@ -30,8 +29,6 @@ export const BalanceDisplay: React.FC = () => {
   const [isReceiptOpen, setIsReceiptOpen] = useState(false);
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);
 
-  // House credits: sync when this panel mounts or wallet / ledger currency changes.
-  // WalletSync only refreshed on-chain balance; fetchBalance loads the house balance.
   useEffect(() => {
     if (!address || !network) return;
     let cancelled = false;
@@ -44,10 +41,6 @@ export const BalanceDisplay: React.FC = () => {
     };
   }, [address, network, selectedCurrency, fetchBalance]);
 
-  /**
-   * Handle refresh button click
-   * Fetches the latest balance from the API
-   */
   const handleRefresh = async () => {
     if (!address || isLoading) return;
 
@@ -63,28 +56,14 @@ export const BalanceDisplay: React.FC = () => {
     }
   };
 
-  /**
-   * Handle deposit button click
-   * Opens the deposit modal
-   */
   const handleDeposit = () => {
     setIsDepositModalOpen(true);
   };
 
-  /**
-   * Handle withdraw button click
-   * Opens the withdraw modal
-   */
   const handleWithdraw = () => {
     setIsWithdrawModalOpen(true);
   };
 
-  /**
-   * Handle successful deposit
-   * The modal only calls this after the ledger has credited the deposit, so
-   * the receipt shows the server's own numbers (fee, net, credited-at) whenever
-   * it returned them; the client-side fee helper is only a fallback.
-   */
   const handleDepositSuccess = (amount: number, txHash: string, proof?: DepositProof) => {
     const fee = typeof proof?.fee === 'number' ? proof.fee : calculateFeeAmount(amount, userTier);
     const net =
@@ -104,13 +83,6 @@ export const BalanceDisplay: React.FC = () => {
     setIsReceiptOpen(true);
   };
 
-  /**
-   * Handle successful withdrawal request
-   *
-   * A withdrawal is only complete when the ledger says it is — the modal
-   * reports 'confirmed' receipts solely for a paid-out status, everything else
-   * is a queued request (no hash, pending).
-   */
   const handleWithdrawSuccess = (
     amount: number,
     txHash: string,
@@ -137,7 +109,6 @@ export const BalanceDisplay: React.FC = () => {
 
   const formattedBalance = houseBalance.toFixed(4);
 
-  // The ledger row the player is playing with.
   const currentSymbol = resolveHouseLedgerCurrency({ selectedCurrency });
 
   return (
@@ -205,14 +176,12 @@ export const BalanceDisplay: React.FC = () => {
         )}
       </div>
 
-      {/* Deposit Modal */}
       <DepositModal
         isOpen={isDepositModalOpen}
         onClose={() => setIsDepositModalOpen(false)}
         onSuccess={handleDepositSuccess}
       />
 
-      {/* Withdraw Modal */}
       <WithdrawModal
         isOpen={isWithdrawModalOpen}
         onClose={() => setIsWithdrawModalOpen(false)}

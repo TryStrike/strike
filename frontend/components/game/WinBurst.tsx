@@ -9,7 +9,6 @@ import { BRAND } from '@/lib/brand';
 const CANNON_MS = 1500;
 const GRAVITY = 0.35;
 
-/** Side cannons: two streams fired inward from the left and right edges. */
 function fireSideCannons(canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return () => {};
@@ -67,13 +66,11 @@ function fireSideCannons(canvas: HTMLCanvasElement) {
   return () => cancelAnimationFrame(frame);
 }
 
-/** X intent for sharing a win. */
 export function shareWinUrl(payout: number, market: string) {
   const text = `Just called ${market} on ${BRAND.name} and won +${payout.toFixed(2)} USDC, settled in USDC on Arc.`;
   return `https://x.com/intent/post?text=${encodeURIComponent(text)}&url=${encodeURIComponent(BRAND.url)}`;
 }
 
-/** Side-cannon confetti + counting payout whenever a new round is won. Sits over the chart. */
 export function WinBurst() {
   const selectedAsset = useStore((s) => s.selectedAsset);
   const gameMode = useStore((s) => s.gameMode);
@@ -87,7 +84,6 @@ export function WinBurst() {
     return fireSideCannons(canvasRef.current);
   }, [win, reduceMotion]);
 
-  // Fire once per newly settled winning round (existing history never triggers it).
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unsubscribe = useStore.subscribe((state, prev) => {
@@ -103,7 +99,6 @@ export function WinBurst() {
     };
   }, []);
 
-  // Count the payout up over ~0.6s.
   useEffect(() => {
     if (!win) return;
     let frame = 0;
@@ -131,9 +126,6 @@ export function WinBurst() {
           <motion.div
             role="status"
             initial={{ scale: 0.9, y: 8 }}
-            // Box mode: lift the card into the chart's top third so it doesn't
-            // cover grid cells the player may want to tap (transform moves the
-            // hit area too; the confetti canvas stays full-size).
             animate={{ scale: 1, y: gameMode === 'box' ? -110 : 0 }}
             className="pointer-events-auto flex flex-col items-center rounded-[28px] bg-white/80 px-8 py-6 font-tight shadow-[0_30px_80px_-30px_rgba(33,81,245,0.45)] ring-1 ring-ink/[0.06] backdrop-blur-xl"
           >

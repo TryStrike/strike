@@ -1,11 +1,3 @@
-/**
- * Single source for which `user_balances.currency` row the house ledger uses
- * (fetch, bet, deposit, withdraw).
- *
- * Arc settles in native USDC, so the row is chosen by the selected asset
- * alone. Anything unrecognised falls back to USDC rather than to a currency the
- * treasury cannot pay out.
- */
 
 const PLAYABLE = ['USDC'] as const;
 type Playable = (typeof PLAYABLE)[number];

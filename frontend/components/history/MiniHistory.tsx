@@ -7,12 +7,10 @@ import { formatMoney } from '@/components/ui/MoneyText';
 import { useStore } from '@/lib/store';
 import { Badge, Label, cx } from '@/components/ui/kit';
 
-/** Play-money rounds survive into `bets` with the `demo-` id prefix. */
 export function isDemoBetId(id: string | null | undefined): boolean {
   return String(id ?? '').toLowerCase().startsWith('demo-');
 }
 
-/** Last 10 settled rounds, shown in the trade panel. */
 export const MiniHistory: React.FC = () => {
   const bets = useStore((state) => state.bets);
   const recentBets = bets.slice(0, 10);
@@ -63,7 +61,6 @@ export const MiniHistory: React.FC = () => {
   );
 };
 
-/** Opens the chart's indicators panel. */
 export const IndicatorsToggle: React.FC = () => {
   const isIndicatorsOpen = useStore((state) => state.isIndicatorsOpen);
   const setIsIndicatorsOpen = useStore((state) => state.setIsIndicatorsOpen);

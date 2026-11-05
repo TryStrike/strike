@@ -1,18 +1,10 @@
 'use client';
 
-/**
- * Small motion pieces for the landing page, modelled on Motion Primitives'
- * Sliding Number, Magic UI's Word Rotate / Marquee / Blur Fade. CSS and
- * framer-motion only — no extra packages.
- */
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useEffect, useState, type ReactNode } from 'react';
 
 const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
-/** Odometer-style number: each digit rolls to its new value.
- *  Under prefers-reduced-motion the value is printed as plain text — the
- *  digits still update, they never roll. */
 export function SlidingNumber({ value, className }: { value: string; className?: string }) {
   const reduce = useReducedMotion();
   if (reduce) {
@@ -44,7 +36,6 @@ export function SlidingNumber({ value, className }: { value: string; className?:
   );
 }
 
-/** Cycles through words with a short slide/blur. Reduced motion: static word. */
 export function WordRotate({ words, index, className }: { words: string[]; index: number; className?: string }) {
   const reduce = useReducedMotion();
   const word = words[index % words.length];
@@ -73,9 +64,6 @@ export function WordRotate({ words, index, className }: { words: string[]; index
   );
 }
 
-/** Fades children in from a slight blur, staggered by `delay`.
- *  Reduced motion: children render immediately at full opacity — nothing
- *  enters the viewport by animating. */
 export function BlurFade({ children, delay = 0, className }: { children: ReactNode; delay?: number; className?: string }) {
   const reduce = useReducedMotion();
   if (reduce) {
@@ -94,8 +82,6 @@ export function BlurFade({ children, delay = 0, className }: { children: ReactNo
   );
 }
 
-/** Infinite horizontal scroll; content is rendered twice for a seamless loop.
- *  Reduced motion: one static copy, no looping track at all. */
 export function Marquee({ children, seconds = 40 }: { children: ReactNode; seconds?: number }) {
   const reduce = useReducedMotion();
   if (reduce) {
@@ -121,9 +107,6 @@ export function Marquee({ children, seconds = 40 }: { children: ReactNode; secon
   );
 }
 
-/** A ring that drains over `seconds`, restarting forever. Under reduced
- *  motion the sweep never animates — the remaining-seconds figure just
- *  updates in place. */
 export function CountdownRing({ seconds = 5, size = 72 }: { seconds?: number; size?: number }) {
   const reduce = useReducedMotion();
   const [left, setLeft] = useState(seconds);

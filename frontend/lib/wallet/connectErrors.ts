@@ -1,11 +1,3 @@
-/**
- * Map opaque wallet-provider / wagmi / viem errors onto the small set of
- * user-facing failure kinds in the connection state machine. Providers are
- * gloriously inconsistent about codes and wording, so this is a layered
- * heuristic: exact provider codes first, then error names, then message
- * patterns. Never trust the message for display — only for classification;
- * the UI renders CONNECT_COPY instead.
- */
 
 import type { ConnectErrorKind } from './connectMachine';
 
@@ -28,7 +20,6 @@ function haystack(err: unknown): { text: string; code: number | string | null } 
     const e = err as ErrorShape & { error?: unknown };
     const parts = [e.name, e.message, e.shortMessage, e.details].filter((p): p is string => typeof p === 'string');
     const code = typeof e.code === 'number' || typeof e.code === 'string' ? e.code : null;
-    // EIP-1193 errors often nest under { error: { code, message } }.
     if (e.error && typeof e.error === 'object') {
       const inner = e.error as ErrorShape;
       if (typeof inner.message === 'string') parts.push(inner.message);
@@ -42,18 +33,16 @@ function haystack(err: unknown): { text: string; code: number | string | null } 
 export function classifyConnectError(err: unknown): ConnectErrorKind {
   const { text, code } = haystack(err);
 
-  // EIP-1193 provider codes first — they are the only stable part.
-  if (code === 4001 || code === '4001') return 'rejected'; // user rejected the request
-  if (code === -32002 || code === '-32002') return 'locked'; // MetaMask "pending request" / locked
-  if (code === 4902 || code === '4902') return 'wrong_network'; // chain not added to wallet
-  if (code === 'ACTION_REJECTED') return 'rejected'; // ethers v6
+  if (code === 4001 || code === '4001') return 'rejected';
+  if (code === -32002 || code === '-32002') return 'locked';
+  if (code === 4902 || code === '4902') return 'wrong_network';
+  if (code === 'ACTION_REJECTED') return 'rejected';
 
   const name = err && typeof err === 'object' && typeof (err as Error).name === 'string' ? (err as Error).name : '';
   if (/userejected|rejectedrequest|actionrejected|providerrejected/i.test(name)) return 'rejected';
   if (/resourceunavailable|nodiscovery|noethereumprovider|noprov|providermissing/i.test(name)) return 'no_provider';
   if (/timeout|expired/i.test(name)) return 'timeout';
 
-  // Message heuristics, most specific first.
   if (/user rejected|user denied|declined|action rejected|rejected the request|request was dismissed|permission denied|not allowed|cancel?l?ed by user|denied access|user closed/i.test(text)) {
     return 'rejected';
   }
@@ -69,10 +58,6 @@ export function classifyConnectError(err: unknown): ConnectErrorKind {
   return 'unknown';
 }
 
-/**
- * Best-effort short message for logging/store bookkeeping. Falls back to the
- * generic copy so raw provider strings never reach the UI verbatim.
- */
 export function safeConnectErrorMessage(err: unknown): string {
   if (err instanceof Error && typeof err.message === 'string' && err.message.trim()) {
     return err.message.trim().slice(0, 300);

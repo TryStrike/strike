@@ -1,12 +1,3 @@
-/**
- * Display-only address shortening for referral surfaces.
- *
- * NOTE (integration hook): the canonical home for this helper is
- * `lib/utils/address.ts`, which currently only exports `isValidAddress`.
- * I did not edit that shared file because it is being modified concurrently;
- * this local copy lets /referrals render referred-friend addresses safely and
- * can be swapped for the shared util once it gains the function.
- */
 export function shortenAddress(
   address: string | null | undefined,
   prefix = 6,
@@ -18,7 +9,6 @@ export function shortenAddress(
   return `${a.slice(0, prefix)}...${a.slice(-suffix)}`;
 }
 
-/** Format a joined timestamp as a short, human-readable date. */
 export function formatJoinedDate(value: string | null | undefined): string {
   if (!value) return '—';
   const d = new Date(value);

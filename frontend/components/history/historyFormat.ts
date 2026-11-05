@@ -1,15 +1,7 @@
-/**
- * Pure formatting / aggregation helpers for the /history surface.
- * No React, no network — everything here is unit-testable and shared by the
- * table, the filters, the summary strip and the CSV export.
- *
- * Read-only by construction: these helpers never write to the ledger.
- */
 
 import type { BetHistoryFilters, BetHistoryRow } from '@/lib/store/historySlice';
 import { formatMoney } from '@/components/ui/MoneyText';
 
-/** NUMERIC columns arrive from Postgres as strings; anything unparseable is 0. */
 export function asNumber(value: unknown): number {
   if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
   if (typeof value === 'string') {
@@ -19,26 +11,16 @@ export function asNumber(value: unknown): number {
   return 0;
 }
 
-/**
- * Stake / payout: amounts are USDC in whole units (6-decimal token, but the
- * ledger stores the human value — never scale by 1e6/1e12 here). Formatting
- * delegates to the app-wide `formatMoney` so /history rounds with the exact
- * same half-away-from-zero rule as every other money surface.
- */
 export function formatAmount(value: unknown, decimals: 2 | 4 = 2): string {
   return formatMoney(asNumber(value), decimals);
 }
 
-/** Signed money value: `+12.00` / `−8.50` (never a bare minus for zero). */
 export function formatSignedAmount(value: number): string {
   const n = asNumber(value);
   const sign = n > 0 ? '+' : n < 0 ? '−' : '';
   return `${sign}${formatAmount(Math.abs(n))}`;
 }
 
-/**
- * Price with magnitude-aware precision: BTC reads 118,412.50, XRP reads 0.6241.
- */
 export function formatPrice(value: unknown): string {
   const n = asNumber(value);
   if (n === 0) return '0.00';
@@ -60,7 +42,6 @@ function safeTime(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-/** Settled-at timestamp; falls back to created_at so a row never reads "—". */
 export function rowTimeMs(row: Pick<BetHistoryRow, 'resolved_at' | 'created_at'>): number | null {
   return safeTime(row.resolved_at) ?? safeTime(row.created_at);
 }
@@ -113,7 +94,6 @@ export function shortenHash(hash: string | null | undefined): string {
   return `${h.slice(0, 10)}…${h.slice(-6)}`;
 }
 
-/** Strike → end movement, the thing the player actually bet on. */
 export function priceDelta(row: BetHistoryRow): number {
   return asNumber(row.end_price) - asNumber(row.strike_price);
 }
@@ -124,10 +104,6 @@ export function outcomeOf(row: Pick<BetHistoryRow, 'won'>): HistoryOutcome {
   return row.won ? 'won' : 'lost';
 }
 
-/**
- * Net for the player: the payout credited minus the stake taken at bet time.
- * A loss is just the staked amount.
- */
 export function netOf(row: BetHistoryRow): number {
   return row.won ? asNumber(row.payout) - asNumber(row.amount) : -asNumber(row.amount);
 }
@@ -139,11 +115,9 @@ export interface HistorySummary {
   wagered: number;
   credited: number;
   net: number;
-  /** 0–100, `0` when there were no rounds. */
   winRate: number;
 }
 
-/** Aggregate a set of rows — used by the summary strip and the export footer. */
 export function summarizeHistoryRows(rows: BetHistoryRow[]): HistorySummary {
   let wins = 0;
   let wagered = 0;
@@ -170,19 +144,12 @@ export function summarizeHistoryRows(rows: BetHistoryRow[]): HistorySummary {
   };
 }
 
-/**
- * Is this a play-money round? The server flag (`isDemoBet`, set from
- * isDemoBetHistoryRow) is authoritative; the `demo-` bet-id prefix is the
- * fallback for rows produced before the flag existed.
- */
 export function isDemoRow(row: BetHistoryRow): boolean {
   return row.isDemoBet === true || String(row.id ?? '').toLowerCase().startsWith('demo-');
 }
 
 export interface DemoSplit {
-  /** Real-money rounds — the ONLY rows the real totals may count. */
   real: BetHistoryRow[];
-  /** Practice rounds — badged, counted separately, never mixed into real totals. */
   demo: BetHistoryRow[];
 }
 
@@ -193,13 +160,11 @@ export function splitDemoRows(rows: BetHistoryRow[]): DemoSplit {
   return { real, demo };
 }
 
-/** Summary over the real-money rows only — practice stakes are play money. */
 export function summarizeRealRows(rows: BetHistoryRow[]): HistorySummary & { practiceRounds: number } {
   const { real, demo } = splitDemoRows(rows);
   return { ...summarizeHistoryRows(real), practiceRounds: demo.length };
 }
 
-/** Assets offered in the filter, in the order the trade board uses them. */
 export const KNOWN_HISTORY_ASSETS = [
   'BTC',
   'ETH',
@@ -219,7 +184,6 @@ export const KNOWN_HISTORY_ASSETS = [
   'TSLA',
 ] as const;
 
-/** Static list plus any asset actually present on the loaded rows (deduped). */
 export function buildAssetOptions(rows: BetHistoryRow[]): string[] {
   const seen = new Set<string>(KNOWN_HISTORY_ASSETS);
   for (const row of rows) {
@@ -248,7 +212,6 @@ export const CSV_HEADERS = [
   'tx_hash',
 ] as const;
 
-/** RFC-4180-ish quoting: wrap when the value contains a comma, quote or newline. */
 export function escapeCsvCell(value: unknown): string {
   const s = value === null || value === undefined ? '' : String(value);
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -276,7 +239,6 @@ export function historyRowToCsvCells(row: BetHistoryRow): string[] {
   ];
 }
 
-/** Deterministic CSV for the current filter: header + one row per settled bet. */
 export function buildHistoryCsv(rows: BetHistoryRow[]): string {
   const lines = [CSV_HEADERS.join(',')];
   for (const row of rows) {
@@ -289,7 +251,6 @@ function tokenise(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-/** `strike-history-<wallet>-<filters>-<date>.csv` */
 export function buildHistoryExportFilename(opts: {
   address?: string | null;
   filters?: BetHistoryFilters | null;
@@ -314,7 +275,6 @@ export function buildHistoryExportFilename(opts: {
   return `strike-${parts.join('-')}-${stamp}.csv`;
 }
 
-/** `<input type="date">` value (YYYY-MM-DD) for an ISO bound, or '' when unset. */
 export function toDateInputValue(iso: string | null | undefined): string {
   if (!iso) return '';
   const t = Date.parse(iso);
@@ -324,7 +284,6 @@ export function toDateInputValue(iso: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** Inclusive local-day lower bound, or null for an empty date input. */
 export function dayStartIso(dateInput: string): string | null {
   if (!dateInput) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateInput.trim());
@@ -333,7 +292,6 @@ export function dayStartIso(dateInput: string): string | null {
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
-/** Inclusive local-day upper bound (last second of the day), or null. */
 export function dayEndIso(dateInput: string): string | null {
   if (!dateInput) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateInput.trim());
@@ -342,7 +300,6 @@ export function dayEndIso(dateInput: string): string | null {
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
-/** True when any filter is active — drives the "clear filters" affordance. */
 export function hasActiveFilters(filters: BetHistoryFilters): boolean {
   return Boolean(
     (filters.asset && filters.asset !== 'ALL') ||

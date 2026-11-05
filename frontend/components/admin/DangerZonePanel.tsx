@@ -1,11 +1,5 @@
 'use client';
 
-/**
- * Danger zone panel: high-frequency withdrawal review queue (with the same live
- * accept-window countdown as Financials), the global wallet ban list, and
- * win-streak suspiction controls. Every mutating action here touches money or
- * access, so each one requires typing a confirmation string first.
- */
 
 import { useCallback, useMemo, useState } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
@@ -41,7 +35,6 @@ interface SuspiciousUser {
 interface DangerApi {
     suspiciousUsers?: SuspiciousUser[];
     frequencyUsers?: FrequencyUser[];
-    /** Additive: set when a bounded scan hit its row cap (counts under-reported). */
     scans?: {
         betsTruncated?: boolean;
         auditTruncated?: boolean;
@@ -56,11 +49,9 @@ interface BansApi {
     bans?: BannedWalletRow[];
 }
 
-/** Confirmation phrase for an address-scoped action: the wallet's last 6 chars. */
 const tail = (addr: string) => String(addr).slice(-6).toLowerCase();
 
 const fmt = (n: unknown, dec = 6) => {
-    // Missing/failed money values must render as '—', never as a misleading 0.
     if (n === null || n === undefined || n === '') return '—';
     const v = Number(n);
     if (!Number.isFinite(v)) return '—';
@@ -190,7 +181,6 @@ export default function DangerZonePanel({
                 </div>
             )}
 
-            {/* High-frequency withdrawal review */}
             <section className="space-y-4" aria-labelledby="freq-queue-heading">
                 <div className="flex items-center gap-3 px-1">
                     <div className="w-2 h-2 rounded-full bg-down animate-pulse" />
@@ -311,7 +301,6 @@ export default function DangerZonePanel({
                 )}
             </section>
 
-            {/* Global ban list */}
             <section className="p-8 bg-down-soft border border-down/30 rounded-[2rem] space-y-4" aria-labelledby="ban-list-heading">
                 <p id="ban-list-heading" className="text-xs font-black uppercase tracking-wider text-down">Global wallet ban list</p>
                 <p className="text-sm text-subtle leading-relaxed max-w-2xl">
@@ -392,7 +381,6 @@ export default function DangerZonePanel({
                 )}
             </section>
 
-            {/* Win-streak suspicion */}
             <section aria-labelledby="streak-heading">
                 <p id="streak-heading" className="px-1 pb-3 text-xs font-black uppercase tracking-widest text-subtle">
                     Win-streak anomalies (10+ consecutive wins)

@@ -1,19 +1,3 @@
-/**
- * Wallet connection state machine — pure transitions so the whole table is
- * unit-testable without React, wagmi or a browser.
- *
- * Phases:
- *   idle          nothing attempted yet in this page load
- *   connecting    a provider prompt / dapp link is in flight (UI: spinner,
- *                 buttons disabled — double-clicks must not stack prompts)
- *   authed        wallet connected and adopted by the app
- *   reconnecting  one-tap reconnect to a recently-used wallet in flight
- *   failed        last attempt errored; `lastError.kind` says why
- *   disconnected  user (or wallet) ended an authed session
- *
- * Unknown (phase, event) pairs return the phase unchanged, so the reducer is
- * total and stray events can never corrupt it.
- */
 
 export type ConnectPhase = 'idle' | 'connecting' | 'authed' | 'reconnecting' | 'failed' | 'disconnected';
 
@@ -32,7 +16,6 @@ const TRANSITIONS: Record<ConnectPhase, Partial<Record<ConnectEvent['type'], Con
   idle: {
     START_CONNECT: 'connecting',
     START_RECONNECT: 'reconnecting',
-    // Wallet already connected when the UI mounts (restored session).
     CONNECT_SUCCESS: 'authed',
     DISCONNECT: 'disconnected',
   },
@@ -46,8 +29,6 @@ const TRANSITIONS: Record<ConnectPhase, Partial<Record<ConnectEvent['type'], Con
     START_RECONNECT: 'reconnecting',
     DISCONNECT: 'disconnected',
     RESET: 'idle',
-    // Re-confirming an authed wallet (e.g. ConnectKit opened again) is a no-op,
-    // never a second stacked prompt.
     START_CONNECT: 'authed',
   },
   reconnecting: {
@@ -76,19 +57,15 @@ export function transitionConnectPhase(phase: ConnectPhase, event: ConnectEvent)
   return TRANSITIONS[phase]?.[event.type] ?? phase;
 }
 
-/** Phases where a connect is in flight and buttons must be disabled. */
 export function isConnectingPhase(phase: ConnectPhase): boolean {
   return phase === 'connecting' || phase === 'reconnecting';
 }
 
 export interface ConnectCopy {
-  /** One-line, non-technical headline. */
   title: string;
-  /** Concrete next step for the user. */
   hint: string;
 }
 
-/** User-facing copy per failure kind — no RPC jargon, no stack traces. */
 export const CONNECT_COPY: Record<ConnectErrorKind, ConnectCopy> = {
   rejected: {
     title: 'Request declined',

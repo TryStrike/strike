@@ -9,15 +9,12 @@ import { WagmiProvider, useAccount, useSwitchChain } from 'wagmi';
 import { ConnectKitProvider } from 'connectkit';
 import { config as wagmiConfig, arc } from '@/lib/arc/wagmi';
 
-// Custom Components
 import { WalletConnectModal } from '@/components/wallet/WalletConnectModal';
 import { ReferralSync } from './ReferralSync';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 import { useThemeSync } from '@/lib/useTheme';
 import { usePriceStream } from '@/lib/hooks/usePriceStream';
 
-// Bridges the connected wallet into the Zustand store: adopt the wagmi address,
-// put the wallet on Arc, and load the balances.
 function WalletSync() {
   const { address: wagmiAddress, isConnected: wagmiConnected, chainId: wagmiChainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
@@ -33,15 +30,10 @@ function WalletSync() {
     fetchBalance,
   } = useStore(useShallow((s) => ({ address: s.address, isConnected: s.isConnected, network: s.network, setAddress: s.setAddress, setIsConnected: s.setIsConnected, setNetwork: s.setNetwork, refreshWalletBalance: s.refreshWalletBalance, fetchBalance: s.fetchBalance })));
 
-  // Track session dwell time for this wallet
   useSessionTracker(address, storeNetwork);
 
   const connectedAddress = wagmiConnected && wagmiAddress ? wagmiAddress : null;
 
-  // Put the wallet on Arc as soon as it connects. The old version called
-  // the non-async switchChain inside a try/catch, which cannot catch the
-  // promise rejection, so a declined or failed switch passed silently and the
-  // wallet stayed on whatever network it arrived with.
   useEffect(() => {
     if (!wagmiConnected || wagmiChainId === arc.id || !switchChainAsync) return;
     let cancelled = false;
@@ -93,14 +85,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
   useThemeSync();
 
-  // One price feed for the whole app: SSE for every asset, the poll only while SSE is down.
   const updateAllPrices = useStore((s) => s.updateAllPrices);
   const feed = usePriceStream(updateAllPrices);
   useEffect(() => {
     useStore.getState().setPriceFeed(feed);
   }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The balance session warms up in the background. Nothing waits on it.
   useEffect(() => {
     void import('@/lib/balance/balanceClientHeaders').then(({ ensureBalanceSession }) => ensureBalanceSession());
   }, []);

@@ -1,17 +1,5 @@
 'use client';
 
-/**
- * Admin dashboard shell.
- *
- * Owns: the auth gate (cookie-backed session probed through /api/admin/stats),
- * the deep-linked tab + filter state (everything lives in the URL so any view
- * is shareable and survives a reload), the keyboard shortcuts, and the
- * auto-refresh cadence (polling pauses while the document is hidden and a
- * refresh fires the moment the tab becomes visible again).
- *
- * Panels under components/admin/* do the data work; this file never fetches a
- * list itself.
- */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -41,7 +29,6 @@ const TAB_LABELS: Record<DashboardTab, string> = {
     danger: 'Danger Zone',
 };
 
-/** Which ?status= values each tab understands (mirrors the route enums). */
 const TAB_STATUS_OPTIONS: Partial<Record<DashboardTab, { value: string; label: string }[]>> = {
     users: [
         { value: 'active', label: 'Active' },
@@ -84,19 +71,15 @@ export default function AdminDashboard() {
     const [sessionExpired, setSessionExpired] = useState(false);
 
     const [nonce, setNonce] = useState(0);
-    // On-chain treasury reads are RPC-bound, so they only re-run on an explicit
-    // re-sync — the 30s poll and the visibility pulse refresh the DB panels.
     const [treasuryNonce, setTreasuryNonce] = useState(0);
     const [lastSync, setLastSync] = useState<number | null>(null);
     const [autoSync, setAutoSync] = useState(true);
     const [qDraft, setQDraft] = useState(filters.q);
     const qTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // Keep the visible search box aligned with the URL when it changes elsewhere.
     useEffect(() => setQDraft(filters.q), [filters.q]);
     useEffect(() => () => { if (qTimer.current) clearTimeout(qTimer.current); }, []);
 
-    // ── Auth gate ────────────────────────────────────────────────────────────
     useEffect(() => {
         let alive = true;
         fetch('/api/admin/stats', { credentials: 'include' })
@@ -107,7 +90,7 @@ export default function AdminDashboard() {
                     setLastSync(Date.now());
                 }
             })
-            .catch(() => { /* treated as logged out */ })
+            .catch(() => {})
             .finally(() => { if (alive) setProbing(false); });
         return () => { alive = false; };
     }, []);
@@ -133,8 +116,6 @@ export default function AdminDashboard() {
                 setIsAuthorized(true);
                 setSessionExpired(false);
                 setPassword('');
-                // Panels mount on the authorized flip and fetch immediately; only
-                // the header clock needs pinning.
                 setLastSync(Date.now());
                 return;
             }
@@ -153,7 +134,6 @@ export default function AdminDashboard() {
         setPassword('');
     }, []);
 
-    // ── URL state ────────────────────────────────────────────────────────────
     const onPatch = useCallback((patch: Partial<DashFilters>) => {
         const merged: DashFilters = { ...filters, ...patch };
         const filterKeys: (keyof DashFilters)[] = ['tab', 'q', 'status', 'currency', 'from', 'to', 'account', 'limit'];
@@ -173,7 +153,6 @@ export default function AdminDashboard() {
         setLastSync(Date.now());
     }, []);
 
-    // ── Auto-refresh: paused while hidden, fires on return ───────────────────
     useEffect(() => {
         if (!isAuthorized || !autoSync) return;
         const id = setInterval(() => {
@@ -192,7 +171,6 @@ export default function AdminDashboard() {
         return () => document.removeEventListener('visibilitychange', onVisibility);
     }, [isAuthorized, bumpLists]);
 
-    // ── Keyboard shortcuts: 1..9 switch tabs, r re-sync ──────────────────────
     useEffect(() => {
         if (!isAuthorized) return;
         const onKey = (e: KeyboardEvent) => {
@@ -224,7 +202,6 @@ export default function AdminDashboard() {
         }, Q_DEBOUNCE_MS);
     };
 
-    // ── Login gate ───────────────────────────────────────────────────────────
     if (probing) {
         return (
             <div className="min-h-screen bg-white flex items-center justify-center p-4">
@@ -271,14 +248,11 @@ export default function AdminDashboard() {
     }
 
     const statusOptions = TAB_STATUS_OPTIONS[filters.tab];
-    // /api/admin/player-ledger has no status enum, so a stale ?status= deep link
-    // would bounce off the route's 400 guard instead of filtering anything.
     const pnlFilters: DashFilters = filters.status ? { ...filters, status: '' } : filters;
 
     return (
         <div className="min-h-screen bg-white text-subtle p-6 lg:p-12">
             <div className="max-w-[1400px] mx-auto space-y-12">
-                {/* Header */}
                 <header className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-line pb-8">
                     <div className="space-y-2">
                         <div className="flex items-center gap-3">
@@ -322,11 +296,9 @@ export default function AdminDashboard() {
                     </div>
                 </header>
 
-                {/* Overview + treasury (always visible) */}
                 <OverviewStatsPanel nonce={nonce} onUnauthorized={handleUnauthorized} />
                 <TreasuryPanel nonce={treasuryNonce} onUnauthorized={handleUnauthorized} />
 
-                {/* Navigation & global filters */}
                 <div className="space-y-6">
                     <div className="flex flex-col gap-6 border-b border-line pb-6">
                         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
@@ -362,7 +334,6 @@ export default function AdminDashboard() {
                             </div>
                         </div>
 
-                        {/* Filter rail — writes the same params every list route reads */}
                         <div className="flex flex-wrap gap-3 items-end">
                             {statusOptions && statusOptions.length > 0 && (
                                 <label className="flex flex-col gap-1">
@@ -437,7 +408,6 @@ export default function AdminDashboard() {
                         </div>
                     </div>
 
-                    {/* Active panel */}
                     <div className="bg-surface border border-line rounded-[2.5rem] overflow-hidden">
                         <div className="overflow-x-auto">
                             {filters.tab === 'wallet_intel' && (

@@ -1,13 +1,5 @@
 'use client';
 
-/**
- * Pending-withdrawal queue shared by the Financials and Danger Zone panels.
- *
- * Each request carries `signed_at` (epoch ms of the signed intent). The accept
- * endpoint enforces the 10-minute window server-side; this queue shows a live
- * per-second countdown and disables Accept the moment the window closes, so an
- * admin never clicks a payout that the server will refuse.
- */
 
 import { useEffect, useState } from 'react';
 import { formatCountdown, intentRemainingMs } from '@/lib/admin/countdown';
@@ -19,7 +11,6 @@ interface Props {
     requests: PendingWithdrawal[];
     onAccept: (id: number) => Promise<void> | void;
     onReject: (id: number) => Promise<void> | void;
-    /** id currently mid-mutation, to disable its buttons. */
     busyId?: number | null;
     emptyHint?: string;
 }
@@ -27,7 +18,6 @@ interface Props {
 export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, emptyHint }: Props) {
     const [now, setNow] = useState(() => Date.now());
 
-    // Tick once per second while rows exist; the countdown must actually move.
     useEffect(() => {
         if (requests.length === 0) return;
         const t = setInterval(() => setNow(Date.now()), 1000);
@@ -76,7 +66,6 @@ export default function WithdrawalQueue({ requests, onAccept, onReject, busyId, 
                             −{Number(w.amount).toFixed(4)}
                         </span>
 
-                        {/* Live countdown to intent expiry */}
                         <span
                             className={`px-2.5 py-1 rounded font-mono text-xs font-bold tabular-nums border ${
                                 expired

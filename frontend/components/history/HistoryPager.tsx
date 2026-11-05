@@ -1,11 +1,5 @@
 'use client';
 
-/**
- * HistoryPager — bounded offset paging for /history.
- * The denominator comes from the route's PostgREST `count`; the page size is
- * capped by the server (200) and the offset by MAX_HISTORY_OFFSET, so this can
- * never turn into an unbounded scan.
- */
 
 import React from 'react';
 import { CaretLeft, CaretRight } from '@phosphor-icons/react';
@@ -18,12 +12,10 @@ interface HistoryPagerProps {
   limit: number;
   total: number | null;
   rowCount: number;
-  /** The server's `hasMore` for this exact query — never re-derived client-side. */
   hasMore: boolean;
   loading: boolean;
   onPageChange: (offset: number) => void;
   onLimitChange: (limit: number) => void;
-  /** Optional honest caveat rendered next to the counts (e.g. demo rows hidden). */
   note?: string | null;
 }
 

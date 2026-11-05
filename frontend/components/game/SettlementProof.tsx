@@ -1,38 +1,19 @@
 'use client';
 
-/**
- * SettlementProof
- *
- * The transparency panel for one settled round: what the strike was, the exact
- * price the round settled against, the instant that price was taken at, where
- * that number came from, and the ledger references the bet left behind.
- *
- * Settlement itself happens in the game engine, which reads "the last feed tick
- * at or before the round end" (see lib/store/gameSlice.ts `priceAtOrBefore`) and
- * refunds the stake when that tick equals the strike. This panel mirrors that
- * rule for display only — it never settles or writes anything.
- *
- * Everything user-facing is assembled by the pure `buildSettlementProof()`
- * below, which is unit-tested on its own.
- */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, Copy, ShieldCheck, X } from '@phosphor-icons/react';
 import { explorerTxUrl } from '@/lib/arc/config';
 import { useStore } from '@/lib/store';
 
-/** A feed tick for an asset: the shape the engine settles against. */
 export interface SettlementTick {
   timestamp: number;
   price: number;
-  /** True when the tick came from a fallback (last-known / cached price) instead of a live read. */
   stale?: boolean;
 }
 
 export interface SettlementLedgerRefs {
-  /** Audit rows exist for this bet, i.e. it moved the house ledger. */
   touched?: boolean;
-  /** The ledger itself could not be read (distinct from "no references"). */
   available?: boolean;
   betRequestId?: string | null;
   endTime?: number | null;
@@ -53,21 +34,12 @@ export interface SettlementProofInput {
   won?: boolean | null;
   network?: string | null;
   strikePrice?: number | null;
-  /** Round end frozen at click time. */
   endTime?: number | null;
-  /** `end_price` as recorded on the bet row / held by the client at resolution. */
   recordedEndPrice?: number | null;
   resolvedAt?: number | null;
-  /** Feed history for this bet's asset; the engine settles from these. */
   ticks?: SettlementTick[];
-  /** The feed heartbeat was stalled when this proof was built. */
   feedDelayed?: boolean;
   ledger?: SettlementLedgerRefs | null;
-  /**
-   * Explicit play-money marker. Demo rounds are also detected from the
-   * client-generated `demo-<ts>` bet id prefix; when true the panel never
-   * pretends a server proof exists for a round that never touched the ledger.
-   */
   isDemoBet?: boolean;
 }
 
@@ -87,16 +59,12 @@ export interface SettlementProofData {
   tieRefund: boolean;
   strikePrice: number | null;
   settlementPrice: number | null;
-  /** Instant the settlement price was taken at (tick timestamp, else row time). */
   settlementTakenAt: number | null;
-  /** True when `settlementTakenAt` is the round end rather than a real tick time. */
   takenAtIsRoundEnd: boolean;
   endTime: number | null;
   source: SettlementSource;
   sourceLabel: string;
-  /** Honest flag: the settlement value came from a fallback, not a live read. */
   tickStale: boolean;
-  /** How far before the round end the chosen tick actually was. */
   tickGapMs: number | null;
   delta: number | null;
   verdict: string | null;
@@ -110,7 +78,6 @@ export interface SettlementProofData {
   caveats: string[];
 }
 
-/** A tick older than this relative to the round end means the feed had a gap. */
 export const FEED_GAP_STALE_MS = 5000;
 
 const finiteOrNull = (v: unknown): number | null => {
@@ -119,30 +86,16 @@ const finiteOrNull = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
-/**
- * A price of 0 means "not recorded": the engine writes `strikePrice || 0` when
- * a round had no strike, and a real feed price is always positive.
- */
 const priceOrNull = (v: unknown): number | null => {
   const n = finiteOrNull(v);
   return n === null || n <= 0 ? null : n;
 };
 
-/**
- * Epoch 0 means "this instant was never recorded", not 1 January 1970: the
- * engine writes `0` for a round whose settlement tick or resolution time did
- * not land. Money fields legitimately hold 0, so this guard lives only on the
- * timestamp formatters.
- */
 const epochMsOrNull = (v: unknown): number | null => {
   const n = finiteOrNull(v);
   return n === null || n <= 0 ? null : n;
 };
 
-/**
- * The settlement tick, exactly as the engine picks it: the LAST history point
- * whose timestamp is at or before the round end. No endTime → no tick.
- */
 export function pickSettlementTick(
   ticks: SettlementTick[] | undefined,
   endTime: number | null | undefined,
@@ -158,11 +111,6 @@ export function pickSettlementTick(
   return null;
 }
 
-/**
- * A round that settles exactly on its strike is a draw: the engine resolves it
- * as a win with the stake handed back untouched. Every payout multiplier is > 1,
- * so `payout === stake` on a winning row can only mean that refund.
- */
 export function isTieRefund(input: {
   won?: boolean | null;
   stake?: number | null;
@@ -179,9 +127,6 @@ export function isTieRefund(input: {
   return m === null || m > 1;
 }
 
-/**
- * Assemble everything the panel shows. Pure: same input, same proof.
- */
 export function buildSettlementProof(input: SettlementProofInput): SettlementProofData {
   const stake = finiteOrNull(input.stake);
   const payout = finiteOrNull(input.payout);
@@ -197,9 +142,6 @@ export function buildSettlementProof(input: SettlementProofInput): SettlementPro
   const tick = pickSettlementTick(ticks, endTime ?? ledgerEndTime);
   const usedEndTime = endTime ?? ledgerEndTime;
   const gapMs = tick && usedEndTime !== null ? usedEndTime - tick.timestamp : null;
-  // Three ways a value can be "not a fresh live read": the feed flagged the
-  // tick, the tick is well older than the round end (feed gap), or the whole
-  // heartbeat was stalled when the round closed.
   const tickStale =
     !!tick && (tick.stale === true || (gapMs !== null && gapMs > FEED_GAP_STALE_MS) || input.feedDelayed === true);
 
@@ -340,7 +282,6 @@ export function buildSettlementProof(input: SettlementProofInput): SettlementPro
   return proof;
 }
 
-/** Money/price formatting shared by the panel and the board. */
 export function formatSettlementPrice(value: number | null | undefined): string {
   const n = finiteOrNull(value);
   if (n === null) return '—';
@@ -372,17 +313,11 @@ export function formatSettlementClock(value: number | null | undefined): string 
   });
 }
 
-/** Raw millisecond stamp, so a player can diff it against their own clock. */
 export function settlementEpochMs(value: number | null | undefined): string {
   const n = epochMsOrNull(value);
   return n === null ? '—' : String(Math.round(n));
 }
 
-/**
- * Match a settled round back to its history row. The engine writes the history
- * record and the `lastResult` a few milliseconds apart, so match on the money
- * and take the closest timestamp.
- */
 export function matchSettledRound<T extends { id: string; timestamp: number; amount: string; payout: string; won: boolean }>(
   bets: T[],
   result: { timestamp: number; amount: number; payout: number; won: boolean } | null | undefined,
@@ -404,27 +339,15 @@ export function matchSettledRound<T extends { id: string; timestamp: number; amo
   return best;
 }
 
-/**
- * Client-side demo bet ids are minted by the game engine as `demo-<ts>` and
- * never pass through /api/balance/bet, so there is no server row, no audit
- * trail and nothing for GET /api/bets/<id> to return. The history surface also
- * carries an explicit `isDemoBet` marker on server rows; combine both signals.
- */
 export const isDemoBetId = (betId: string | null | undefined): boolean =>
   /^demo-/i.test(String(betId ?? ''));
 
-/** The subset of the panel state a caller may want to open programmatically. */
 export interface SettlementProofProps {
   bet: SettlementProofInput;
-  /** Caller wallet — required for the read-only proof fetch that fills ledger refs. */
   wallet?: string | null;
-  /** 'bar' = the result moment strip, 'chip' = a trigger inside the rounds list. */
   variant?: 'bar' | 'chip';
-  /** Override the feed history used for the tick lookup (tests / chart-owned data). */
   ticks?: SettlementTick[];
-  /** Feed was reporting a delay when this round closed. */
   feedDelayed?: boolean;
-  /** Extra context read out with the trigger, e.g. "Higher · 2.15×". */
   label?: string;
 }
 
@@ -479,9 +402,6 @@ const Row: React.FC<{ label: string; children: React.ReactNode; highlight?: bool
   </div>
 );
 
-/**
- * Compact trigger + accessible sheet with the full settlement breakdown.
- */
 export const SettlementProof: React.FC<SettlementProofProps> = ({
   bet,
   wallet,
@@ -497,17 +417,10 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
   const dialogRef = useRef<HTMLDivElement>(null);
   const requestedRef = useRef(false);
   const titleId = `settlement-proof-title-${bet.betId}`;
-  // Play-money rounds have no server row by construction: the proof degrades
-  // to "unavailable" instead of firing a request that can only 404.
   const demo = bet.isDemoBet === true || isDemoBetId(bet.betId);
 
   const close = useCallback(() => setOpen(false), []);
 
-  // Fetch the read-only proof (ledger refs + the row's recorded values) once,
-  // the first time the sheet opens. A ref, not state, because the state update
-  // below re-renders the effect's own dependency list. Without a wallet there is
-  // nothing to authorise against, so the request is simply never made and the
-  // panel stays silent about the ledger (asserted at render, not via setState).
   useEffect(() => {
     if (!open) return;
     if (demo) {
@@ -537,16 +450,10 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
     };
   }, [open, wallet, bet.betId, demo]);
 
-  // A failed read may be transient, so closing the sheet re-arms the request.
   useEffect(() => {
     if (!open && serverState === 'failed') requestedRef.current = false;
   }, [open, serverState]);
 
-  // Feed history for this bet's asset plus the click-time round end carried by
-  // the session row — read once per open, never subscribed (the store rebuilds
-  // those arrays on every tick). The round end matters because it is the cutoff
-  // the engine applied: without it the resolve instant has to stand in, which is
-  // a hair later than the real deadline and so not exactly the engine's rule.
   const local = useMemo(() => {
     const empty = { ticks: [] as SettlementTick[], rowEndTime: null as number | null, rowAsset: null as string | null };
     if (!open) return empty;
@@ -601,9 +508,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
         multiplier: bet.multiplier ?? server?.multiplier ?? null,
         won: bet.won ?? server?.won ?? null,
         network: bet.network ?? server?.network ?? null,
-        // Cutoff order: the value the caller knows, then the ledger's click-time
-        // round end, then the session row's own endTime, then the server's resolve
-        // time (buildSettlementProof falls back and says so in a caveat).
         endTime: bet.endTime ?? ledgerEndMs ?? local.rowEndTime ?? null,
         resolvedAt: bet.resolvedAt ?? toMs(server?.resolved_at) ?? null,
         asset: bet.asset ?? server?.asset ?? local.rowAsset ?? null,
@@ -611,14 +515,11 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
         direction: bet.direction ?? server?.direction ?? null,
         ticks: localTicks,
         feedDelayed,
-        // Ledger claims only ever come from a successful read: while the proof
-        // request is in flight (or failed) there is nothing to assert about it.
         ledger: serverState === 'ready' ? ledger : null,
       }),
     [bet, server, ledgerEndMs, local, localTicks, feedDelayed, ledger, serverState],
   );
 
-  // Escape closes, focus moves in on open and back out on close.
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const focusRaf = requestAnimationFrame(() => {
@@ -675,11 +576,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
 
   const priceDelta = proof.delta;
 
-  // How much may be claimed about the ledger, in plain render terms: a read in
-  // flight says nothing, a read that failed (or was never possible without a
-  // wallet) says "could not be loaded", and only a successful read may state
-  // that no entry references this bet at all. A play-money round never had a
-  // ledger entry to load: it is "proof unavailable", not "read failed".
   const ledgerNeedsWallet = open && !wallet && !demo;
   const ledgerFailed = !demo && (serverState === 'failed' || ledgerNeedsWallet);
   const ledgerLoading = open && !demo && !ledgerFailed && serverState !== 'ready';
@@ -772,7 +668,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
-              {/* The settlement itself, front and centre. */}
               <div className="flex flex-col gap-1.5 rounded-3xl bg-surface px-1 py-2.5">
                 <Row label="Strike price" highlight>
                   {formatSettlementPrice(proof.strikePrice)}
@@ -803,7 +698,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
                 </Row>
               </div>
 
-              {/* Where the number came from — the part a player actually judges. */}
               <div className="mt-3 rounded-3xl bg-ink/[0.03] px-4 py-3">
                 <div className="text-[11px] uppercase tracking-[0.08em] text-subtle">Source</div>
                 <div className={`mt-1 text-sm font-medium ${proof.source === 'feed_tick' && !proof.tickStale ? 'text-ink' : 'text-down'}`}>
@@ -823,9 +717,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
                 </div>
               </div>
 
-              {/* Honest degradation: no server verification — for play-money
-                  rounds by construction, for real rounds when the read failed.
-                  The numbers shown are then session records, nothing more. */}
               {(demo || serverState === 'failed') && (
                 <p role="note" data-testid="proof-unavailable" className="mt-3 rounded-2xl bg-down-soft px-4 py-3 text-[11px] leading-relaxed text-down">
                   {demo
@@ -851,7 +742,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
                 <Row label="Direction">{proof.direction ?? '—'}</Row>
               </div>
 
-              {/* Ledger / chain references, only when they exist. */}
               <div className="mt-3 rounded-3xl border border-line px-4 py-3">
                 <div className="text-[11px] uppercase tracking-[0.08em] text-subtle">
                   {demo

@@ -1,11 +1,9 @@
-/** Arc network configuration. Arc Testnet by default, NEXT_PUBLIC_ARC_* overrides. */
 
 export type ArcAsset = 'USDC';
 
 interface ArcAssetConfig {
   symbol: ArcAsset;
   decimals: number;
-  /** Arc's USDC ERC-20 interface (6 decimals; the native gas token is the same balance at 18). */
   address: `0x${string}`;
   logo: string;
 }
@@ -31,17 +29,6 @@ interface ArcConfig extends NetworkConfig {
   assets: Record<ArcAsset, ArcAssetConfig>;
 }
 
-/**
- * The env values this config is derived from, as a single identity key.
- *
- * `getArcConfig()` is called from render bodies and effect dependency lists, so
- * returning a fresh object every time makes those effects re-run on every
- * render (the deposit balance check flickered back to `loading` indefinitely).
- * Keying the cache on the env rather than on call count keeps the object
- * referentially stable while the configuration is stable, and still rotates the
- * moment an override changes — which tests do by setting
- * `NEXT_PUBLIC_TREASURY_ADDRESS` between cases.
- */
 function envKey(): string {
   return [
     process.env.NEXT_PUBLIC_ARC_CHAIN_ID ?? '',

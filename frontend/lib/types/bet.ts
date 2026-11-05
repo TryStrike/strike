@@ -1,6 +1,3 @@
-/**
- * Bet-related type definitions for Strike
- */
 
 import { TargetCell } from './game';
 

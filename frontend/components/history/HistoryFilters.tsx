@@ -1,18 +1,5 @@
 'use client';
 
-/**
- * HistoryFilters — the control strip for /history.
- *
- * Every filter the GET /api/bets/history contract supports gets a control:
- *   asset (chips) · outcome (won/lost) · direction (UP/DOWN/DRAW) · from/to
- * (inclusive date window), plus the client-side practice-rows toggle for the
- * play-money rows the route flags but cannot yet filter server-side.
- *
- * The component is fully controlled: it renders the draft view and reports
- * patches; the page owns the draft -> debounced-URL -> fetch pipeline, so
- * rapid edits (e.g. date typing) coalesce into one request. The applied set
- * is echoed back as removable chips with a one-click "clear filters".
- */
 
 import React, { useCallback, useMemo } from 'react';
 import { DownloadSimple, X } from '@phosphor-icons/react';
@@ -26,7 +13,6 @@ import {
 import { dayEndIso, dayStartIso, formatDateTime, toDateInputValue } from './historyFormat';
 
 interface HistoryFiltersProps {
-  /** The draft view — what the controls show, pending the debounced URL write. */
   view: HistoryView;
   assets: string[];
   onPatch: (patch: HistoryViewPatch) => void;
@@ -159,7 +145,6 @@ export const HistoryFilters: React.FC<HistoryFiltersProps> = ({
               { value: 'ANY', label: 'Any' },
               { value: 'UP', label: 'Up' },
               { value: 'DOWN', label: 'Down' },
-              // The route accepts direction=DRAW; the panel filter must show it too.
               { value: 'DRAW', label: 'Draw' },
             ]}
           />

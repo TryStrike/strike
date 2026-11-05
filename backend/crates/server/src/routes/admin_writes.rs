@@ -16,12 +16,12 @@ use serde_json::{json, Map, Value};
 
 use strike_core::address::{canonical, search_variants};
 use strike_core::admin_writes::{
-    aggregate_withdrawal_stats, ban_reason, combined_tx_hash, danger_zone_json,
-    frequency_review_candidates, frequency_user_json, js_number_string, parse_request_id,
-    plan_payout, reconciliation_note, sanitize_error_text, scans_json, sort_frequency_users,
-    stale_intent_message, suspicious_user_json, verify_withdrawal_intent, wallet_address_too_long,
-    win_streak_hits, wipe_audit_rows, within_accept_window, AUDIT_SCAN_CAP, BET_SCAN_CAP,
-    PENDING_SCAN_CAP, SCAN_PAGE,
+    aggregate_withdrawal_stats, ban_reason, danger_zone_json, frequency_review_candidates,
+    frequency_user_json, js_number_string, parse_request_id, plan_payout, reconciliation_note,
+    sanitize_error_text, scans_json, sort_frequency_users, stale_intent_message,
+    suspicious_user_json, verify_withdrawal_intent, wallet_address_too_long, win_streak_hits,
+    wipe_audit_rows, within_accept_window, AUDIT_SCAN_CAP, BET_SCAN_CAP, PENDING_SCAN_CAP,
+    SCAN_PAGE,
 };
 use strike_core::bets::{is_truthy, iso_ms, now_ms, number_coerce, to_number, value_to_string};
 use strike_core::config::{config, USDC_DECIMALS};
@@ -672,8 +672,9 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
         mark_needs_reconciliation(id, &format!("chain_payout_error:sent={hashes:?}: {err}")).await;
         return Ok(payout_parked());
     }
-    let fee_tx_hash = has_fee.then(|| hashes[0].to_string());
-    let combined = combined_tx_hash(fee_tx_hash.as_deref(), hashes[hashes.len() - 1]);
+    // Fee and net share one withdrawBatch transaction.
+    let combined = hashes[0].to_string();
+    let fee_tx_hash = has_fee.then(|| combined.clone());
 
     let finalize_failure =
         match withdrawals::finalize(db::db().await?, id, combined, fee_tx_hash).await {

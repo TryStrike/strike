@@ -1,18 +1,3 @@
-/**
- * Wallet-bound proof for reading withdrawal history.
- *
- * GET /api/withdrawals used to take `address` as a query parameter guarded only
- * by the (global, wallet-agnostic) balance session cookie: any authorised
- * browser could read any wallet's requests, fees and addresses — an
- * enumeration oracle. The fix is a proof of control: the client signs a short
- * off-chain message naming itself, and the route scopes the ledger strictly by
- * the RECOVERED signer, never by a client-supplied address.
- *
- * This mirrors the withdrawal intent style in lib/balance/withdrawalIntent.ts
- * but is read-only: it authorises seeing your own statuses, nothing else. The
- * message never contains balances, signatures, or intents, and a captured
- * proof is useless after its freshness window.
- */
 
 import { ethers } from 'ethers';
 import { MAX_CLOCK_SKEW_MS } from '@/lib/balance/withdrawalIntent';
@@ -20,9 +5,7 @@ import { canonicalHouseUserAddress } from '@/lib/wallet/canonicalAddress';
 
 export const WITHDRAWAL_READ_AUTH_HEADER = 'x-strike-withdrawal-read-auth';
 
-/** A read proof is a standing query licence; keep it short-lived. */
 export const READ_AUTH_MAX_AGE_MS = 10 * 60 * 1000;
-/** Clients re-sign before the hard cut-off so polling never trips on skew. */
 export const READ_AUTH_REFRESH_AFTER_MS = READ_AUTH_MAX_AGE_MS - 60 * 1000;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -55,7 +38,6 @@ export type ReadAuthVerification =
   | { ok: true; proof: ReadAuthProof; recovered: string }
   | { ok: false; code: ReadAuthFailureCode; message: string };
 
-/** Strict decode of the header value; never throws. */
 export function parseReadAuthHeader(raw: string | null): ReadAuthProof | null {
   if (!raw) return null;
   let parsed: unknown;

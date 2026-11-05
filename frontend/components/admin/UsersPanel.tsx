@@ -1,8 +1,5 @@
 'use client';
 
-/**
- * Ledger (users) panel — server-side filtering + pagination via /api/admin/users.
- */
 
 import { useMemo } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';

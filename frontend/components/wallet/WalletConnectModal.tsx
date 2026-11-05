@@ -103,7 +103,6 @@ function ErrorPanel() {
     );
 }
 
-/** One-tap reconnect to wallets used earlier in this tab (sessionStorage only). */
 function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string; address: string } }) {
     const toast = useToast();
     const pending = useStore((s) => isConnectingPhase(s.connectPhase));
@@ -136,7 +135,7 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
         }
     }, [connector, busy, pending, dispatchConnectEvent, connectAsync, targetChainId, recordRecentWallet, setConnectModalOpen, entry.address, toast]);
 
-    if (!connector) return null; // provider uninstalled since last use
+    if (!connector) return null;
 
     return (
         <OptionRow
@@ -161,7 +160,7 @@ export const WalletConnectModal: React.FC = () => {
     const pending = isConnectingPhase(connectPhase);
 
     const handleArcConnect = () => {
-        if (pending) return; // never stack provider prompts on double-click
+        if (pending) return;
         dispatchConnectEvent({ type: 'START_CONNECT' });
         openConnectKit(true);
         setOpen(false);

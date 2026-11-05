@@ -1,16 +1,9 @@
 import React, { type CSSProperties } from 'react';
 
-/**
- * Skeleton primitives sized for the shapes this app actually renders:
- * stat tiles, market cards, table rows (history/leaderboard), list items
- * and chart blocks. Uses the `.by-skeleton` shimmer defined in globals.css,
- * which self-damps under prefers-reduced-motion.
- */
 
 export interface SkeletonProps {
   className?: string;
   style?: CSSProperties;
-  /** Roundness preset. */
   rounded?: 'sm' | 'md' | 'lg' | 'full';
 }
 
@@ -24,7 +17,6 @@ export const Skeleton: React.FC<SkeletonProps> = ({ className = '', style, round
   />
 );
 
-/** Card like the balance/market panels: title line, big value, two rows. */
 export const SkeletonCard: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div className={`space-y-3 rounded-3xl bg-surface p-5 ring-1 ring-line ${className}`} role="presentation">
     <Skeleton className="h-3.5 w-24" rounded="sm" />
@@ -34,7 +26,6 @@ export const SkeletonCard: React.FC<{ className?: string }> = ({ className = '' 
   </div>
 );
 
-/** One leaderboard/history table row: avatar dot, two text lines, right-aligned value. */
 export const SkeletonTableRow: React.FC<{ columns?: number; className?: string }> = ({ columns = 3, className = '' }) => (
   <div className={`flex items-center gap-3 border-b border-line px-2 py-3 last:border-0 ${className}`} role="presentation">
     {Array.from({ length: columns }, (_, i) => (
@@ -46,7 +37,6 @@ export const SkeletonTableRow: React.FC<{ columns?: number; className?: string }
   </div>
 );
 
-/** N stacked table rows for list loading states. */
 export const SkeletonTable: React.FC<{ rows?: number; columns?: number; className?: string }> = ({
   rows = 6,
   columns = 3,
@@ -59,7 +49,6 @@ export const SkeletonTable: React.FC<{ rows?: number; columns?: number; classNam
   </div>
 );
 
-/** Activity/feed item: icon square + two stacked lines. */
 export const SkeletonListItem: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div className={`flex items-start gap-3 py-2 ${className}`} role="presentation">
     <Skeleton className="h-9 w-9 shrink-0" rounded="lg" />
@@ -70,7 +59,6 @@ export const SkeletonListItem: React.FC<{ className?: string }> = ({ className =
   </div>
 );
 
-/** Chart block matching the live chart aspect (roughly 2:1 min 220px tall). */
 export const SkeletonChartBlock: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div
     className={`relative min-h-[220px] w-full overflow-hidden rounded-3xl bg-surface ring-1 ring-line ${className}`}
@@ -83,7 +71,6 @@ export const SkeletonChartBlock: React.FC<{ className?: string }> = ({ className
   </div>
 );
 
-/** Balance/stats-tile shape: eyebrow label, big mono value, delta chip. */
 export const SkeletonStatTile: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div className={`rounded-3xl bg-white p-5 ring-1 ring-line ${className}`} role="presentation">
     <Skeleton className="mb-3 h-3 w-16" rounded="sm" />
@@ -92,7 +79,6 @@ export const SkeletonStatTile: React.FC<{ className?: string }> = ({ className =
   </div>
 );
 
-/** Convenience composite for a whole dashboard grid. */
 export const SkeletonGrid: React.FC<{ tiles?: number; className?: string }> = ({ tiles = 3, className = '' }) => (
   <div className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-${Math.min(4, Math.max(1, tiles))} ${className}`}>
     {Array.from({ length: Math.max(0, tiles) }, (_, i) => (

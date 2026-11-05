@@ -1,10 +1,5 @@
 'use client';
 
-/**
- * Wallet intelligence panel: one address, everything the house knows about it.
- * The queried address lives in the URL (?address=0x…) so a lookup is
- * shareable/reloadable and the fetch is driven by the shared polling nonce.
- */
 
 import { useEffect, useMemo, useState } from 'react';
 import { isDemoBetHistoryRow } from '@/lib/admin/walletAddressVariants';
@@ -23,7 +18,6 @@ interface WalletIntel {
     recentBets?: any[];
 }
 
-/** Missing / non-finite values render as '—', never as a fake 0 or $NaN. */
 const num = (v: unknown, digits = 6) => {
     if (v === null || v === undefined || v === '') return '—';
     const n = Number(v);
@@ -31,7 +25,6 @@ const num = (v: unknown, digits = 6) => {
     return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 };
 
-/** Net of one bet row (payout - stake) with the same missing-value guard. */
 const betNet = (row: { payout?: unknown; amount?: unknown }): string => {
     const payout = Number(row?.payout ?? 0);
     const amount = Number(row?.amount ?? 0);
@@ -48,7 +41,6 @@ export default function WalletIntelPanel({
     onPatch: (patch: Partial<DashFilters>) => void;
 }) {
     const [draft, setDraft] = useState(filters.address);
-    // Keep the input in sync when the URL changes (back button / shared link).
     useEffect(() => setDraft(filters.address), [filters.address]);
 
     const url = useMemo(

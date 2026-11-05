@@ -1,21 +1,3 @@
-/**
- * Read path for /history with an *honest* failure taxonomy.
- *
- * The page must tell four situations apart, and the generic slice loader
- * (which flattens everything into a message string) is not enough for that:
- *   - 401  → the balance session was not minted / died → "re-authorise",
- *            never "you have no bets";
- *   - 400  → the URL filters were rejected → point at the filters;
- *   - 5xx / network → the ledger could not be read → retry, rows stay stale;
- *   - 200 with no rows → the only case allowed to render the empty state.
- *
- * Authorization mirrors the existing call sites exactly (lib/store/
- * historySlice.ts `fetchBetHistoryPage`): same-origin `credentials: 'include'`
- * with the balance-session cookie minted by POST /api/balance/session, one
- * mint-and-retry on a first 401. No secret ever ships in the client.
- *
- * Strictly read-only.
- */
 
 import {
   buildHistoryQueryUrl,
@@ -25,11 +7,6 @@ import {
 import type { BetRecord } from '@/lib/types/bet';
 import type { HistoryView } from './historyQuery';
 
-/**
- * Map a fresh newest-page result onto the trade panel's lightweight recent
- * rounds (`store.bets`), mirroring what `loadBetHistoryPage` used to do so
- * MiniHistory keeps showing the ledger, not just the current session.
- */
 export function rowsToBetRecords(rows: BetHistoryRow[], max = 50): BetRecord[] {
   return rows.slice(0, max).map((row) => ({
     id: row.id,
@@ -79,11 +56,6 @@ const asFiniteInt = (value: unknown, fallback: number): number => {
   return Number.isFinite(n) ? Math.trunc(n) : fallback;
 };
 
-/**
- * One bounded, filtered page. Throws HistoryFeedError with a classified `kind`
- * on every failure and re-throws AbortError unchanged so navigations stay
- * silent.
- */
 export async function loadHistoryViewPage(
   wallet: string,
   view: HistoryView,
@@ -102,9 +74,6 @@ export async function loadHistoryViewPage(
   let res: Response;
   try {
     res = await send();
-    // The app shell mints the balance session on boot, but a deep link
-    // straight to /history can beat that request — mint once and retry
-    // before blaming the player (same dance as historySlice).
     if (res.status === 401) {
       const { ensureBalanceSession } = await import('@/lib/balance/balanceClientHeaders');
       await ensureBalanceSession();
@@ -120,9 +89,7 @@ export async function loadHistoryViewPage(
     try {
       const body = (await res.json()) as RawPage;
       if (typeof body?.error === 'string' && body.error.trim()) bodyMessage = body.error.trim();
-    } catch {
-      /* no JSON body — fall through to the status-based message */
-    }
+    } catch {}
 
     if (res.status === 401) {
       throw new HistoryFeedError(
@@ -166,8 +133,6 @@ export async function loadHistoryViewPage(
       : typeof json.total === 'number' && Number.isFinite(json.total)
         ? json.total
         : null;
-  // Without a server count all we can honestly claim is "at least this page";
-  // hasMore then degrades to "the page came back full".
   const total = totalCount ?? view.offset + rows.length;
   const hasMore =
     typeof json.hasMore === 'boolean'

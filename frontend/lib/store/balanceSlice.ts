@@ -1,16 +1,13 @@
-/** House balance state: fetch, optimistic updates, withdraw. */
 
 import { StateCreator } from "zustand";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 
 export interface BalanceState {
-  // State
   houseBalance: number;
   userTier: 'free' | 'standard' | 'vip';
   isLoading: boolean;
   error: string | null;
 
-  // Actions
   fetchBalance: (address: string) => Promise<void>;
   setBalance: (balance: number) => void;
   updateBalance: (amount: number, operation: 'add' | 'subtract') => void;
@@ -22,22 +19,12 @@ export interface BalanceState {
   clearError: () => void;
 }
 
-/**
- * Create balance slice for Zustand store
- * Handles house balance fetching, updates, deposits, and withdrawals
- */
 export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
-  // Initial state
   houseBalance: 0,
   userTier: 'free',
   isLoading: false,
   error: null,
 
-  /**
-   * Fetch house balance for a user address
-   * Queries the balance API endpoint
-   * @param address - Wallet address
-   */
   fetchBalance: async (address: string) => {
     const currency = resolveHouseLedgerCurrency({
       selectedCurrency: (get() as any).selectedCurrency,
@@ -72,21 +59,10 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
     }
   },
 
-  /**
-   * Set house balance directly
-   * Used by event listeners and after successful operations
-   * @param balance - New balance value
-   */
   setBalance: (balance: number) => {
     set({ houseBalance: balance });
   },
 
-  /**
-   * Update house balance by adding or subtracting an amount
-   * Used for optimistic updates before API confirmation
-   * @param amount - Amount to add or subtract
-   * @param operation - 'add' to increase balance, 'subtract' to decrease
-   */
   updateBalance: (amount: number, operation: 'add' | 'subtract') => {
     const { houseBalance } = get();
 
@@ -97,12 +73,6 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
     set({ houseBalance: newBalance });
   },
 
-  /**
-   * Process withdraw funds operation
-   * Called after withdrawal transaction completes to update database
-   * @param address - User wallet address
-   * @param amount - Withdrawal amount
-   */
   withdrawFunds: async (
     address: string,
     amount: number,
@@ -143,7 +113,6 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
         error: null
       });
 
-      // Secondary check after a delay to ensure eventual consistency
       setTimeout(() => get().fetchBalance(address), 1500);
 
       return data;
@@ -157,9 +126,6 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
     }
   },
 
-  /**
-   * Clear error message
-   */
   clearError: () => {
     set({ error: null });
   }

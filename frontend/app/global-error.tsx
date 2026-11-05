@@ -2,13 +2,6 @@
 
 import { sanitizeUserError } from '@/components/states/ErrorNote';
 
-/**
- * Root-error boundary. It replaces app/layout.tsx, so it must not depend on
- * the app root layout, providers, fonts, context — or even globals.css, which
- * may itself be what failed to load. Everything (focus ring, reduced-motion
- * handling, layout) is inline or in this screen's own <style> tag.
- * Only the sanitized message is shown — never error.stack or digest internals.
- */
 export default function GlobalError({
   error,
   reset,

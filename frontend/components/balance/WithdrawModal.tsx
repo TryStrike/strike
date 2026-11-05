@@ -10,20 +10,12 @@ import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 import { ARC_ASSETS, type ArcAsset } from '@/lib/arc/config';
 import { calculateFeeAmount, getFeePercentLabel } from '@/lib/fees/platformFee';
 
-/**
- * Server-side facts of the queued withdrawal, returned by POST
- * /api/balance/withdraw. The receipt may show these; anything the client
- * guessed itself is a preview, not a record.
- */
 export interface WithdrawRequestDetails {
-  /** Ledger status of the request; anything other than paid/completed means the money has not moved. */
   status?: string;
   feeAmount?: number;
   netAmount?: number;
   requestedAt?: string;
-  /** True when this POST replayed a request the signature had already created. */
   duplicate?: boolean;
-  /** Raw server response extras the caller may need for messaging. */
   frequencyReview?: boolean;
   requestId?: number;
 }
@@ -40,18 +32,10 @@ interface WithdrawModalProps {
   onError?: (error: string) => void;
 }
 
-/**
- * WithdrawModal
- *
- * Moves credits out of the house balance and back to the player's wallet on
- * Arc. The withdrawal is authorised by a signed message so the backend
- * can prove the request came from the wallet that owns the balance.
- */
 export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, onSuccess, onError }) => {
   const [amount, setAmount] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** Click can land twice in one paint; a second signed intent is a second queue entry. */
   const inFlight = useRef(false);
 
   const address = useStore(state => state.address);
@@ -68,7 +52,6 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
 
   const asset: ArcAsset = 'USDC';
 
-  // Same helper the server uses, so the preview cannot drift from what is charged.
   const feeLabel = getFeePercentLabel(userTier);
 
   const validateAmount = (value: string): string | null => {
@@ -99,7 +82,6 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
     setError(null);
   };
 
-  /** Proves the request came from the wallet that owns the balance. */
   const signAuthorization = async (
     withdrawAmount: number,
     signedAt: number
@@ -151,8 +133,6 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       const withdrawAmount = parseFloat(amount);
       toast.info('Processing withdrawal...');
 
-      // The balance routes are gated by the HttpOnly session cookie; mint it
-      // before signing so a missing cookie cannot strand a fresh signature.
       await ensureBalanceSession();
 
       const signedAt = Date.now();
@@ -169,15 +149,10 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
           ? String(details.txHash)
           : 'PENDING';
       const frequencyReview = details.frequencyReview;
-      // withdrawal_requests.id from the API — used to deep-link the receipt
-      // into the status timeline at /withdrawals?request=<id>.
       const rawRequestId = details.requestId;
       const requestId =
         typeof rawRequestId === 'number' && Number.isFinite(rawRequestId) ? rawRequestId : undefined;
 
-      // Only the ledger declaring the payout done lets us claim the money moved.
-      // Anything else — pending, a status this build does not know, a legacy
-      // response without one — is a queued request, never a completed withdrawal.
       const paid = status === 'paid' || status === 'completed' || status === 'accepted_paid';
       if (paid) {
         toast.success(
