@@ -250,6 +250,59 @@ pub fn verify_settlement_token_with(
 }
 
 // ---------------------------------------------------------------------------
+// Agent token
+// ---------------------------------------------------------------------------
+
+pub const AGENT_COOKIE: &str = "strike_agent";
+
+/// Binds a cookie to one wallet and one agent session.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct AgentClaims {
+    pub session_id: String,
+    pub wallet: String,
+    pub exp: i64,
+}
+
+/// Signed with the settlement secret under its own prefix, so an agent token
+/// never verifies as a settlement token or the other way round.
+fn agent_mac(secret: &str, encoded: &str) -> String {
+    hmac_b64url(secret, &format!("agent.{encoded}"))
+}
+
+pub fn mint_agent_token(
+    session_id: &str,
+    wallet: &str,
+    ttl_seconds: i64,
+) -> Result<String, String> {
+    let secret = config()
+        .balance_settlement_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "BALANCE_SETTLEMENT_SECRET is not configured.".to_string())?;
+    let claims = AgentClaims {
+        session_id: session_id.to_string(),
+        wallet: wallet.to_string(),
+        exp: now_seconds() + ttl_seconds,
+    };
+    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(|e| e.to_string())?);
+    Ok(format!("{encoded}.{}", agent_mac(secret, &encoded)))
+}
+
+pub fn verify_agent_token(token: Option<&str>) -> Option<AgentClaims> {
+    let secret = config()
+        .balance_settlement_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())?;
+    let (encoded, sig) = token?.trim().split_once('.')?;
+    if encoded.is_empty() || !constant_eq(sig, &agent_mac(secret, encoded)) {
+        return None;
+    }
+    let claims: AgentClaims =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()?;
+    (claims.exp >= now_seconds()).then_some(claims)
+}
+
+// ---------------------------------------------------------------------------
 // Admin session token
 // ---------------------------------------------------------------------------
 

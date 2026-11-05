@@ -99,7 +99,7 @@ fn render_stream(
     )
 }
 
-fn sse_headers() -> HeaderMap {
+pub(crate) fn sse_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,

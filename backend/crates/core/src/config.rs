@@ -80,6 +80,10 @@ pub struct Config {
     pub banned_wallet_addresses: Vec<String>,
     pub withdrawal_frequency_exempt: Vec<String>,
     pub app_url: Option<String>,
+    /// House ceilings on what one agent session may be started with.
+    pub agent_max_per_trade: rust_decimal::Decimal,
+    pub agent_max_budget: rust_decimal::Decimal,
+    pub agent_max_minutes: i64,
     /// `NODE_ENV === 'production'` equivalent: strict guard behaviour.
     pub production: bool,
     pub bind_addr: String,
@@ -144,6 +148,11 @@ impl Config {
             banned_wallet_addresses: banned,
             withdrawal_frequency_exempt: exempt,
             app_url: str_var("NEXT_PUBLIC_APP_URL"),
+            agent_max_per_trade: parse_num("AGENT_MAX_PER_TRADE")
+                .unwrap_or(rust_decimal::Decimal::from(10)),
+            agent_max_budget: parse_num("AGENT_MAX_BUDGET")
+                .unwrap_or(rust_decimal::Decimal::from(100)),
+            agent_max_minutes: parse_num("AGENT_MAX_MINUTES").unwrap_or(30),
             production,
             bind_addr: str_var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
         }

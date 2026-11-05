@@ -12,7 +12,11 @@ use axum::http::StatusCode as AxumStatus;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use strike_core::address::keccak256;
+use strike_core::agent::{start_message, StartTerms};
+use k256::ecdsa::SigningKey;
 use reqwest::{Client, StatusCode};
+use rust_decimal::Decimal;
 use serde_json::{json, Value};
 
 const SECRET: &str = "http-test-secret";
@@ -622,4 +626,307 @@ async fn a_forged_or_late_band_is_refused() {
         assert_eq!(reply["code"], code, "{reply}");
     }
     assert_eq!(s.balance(), 100 * UNIT);
+}
+
+// -- agent -------------------------------------------------------------------
+
+fn key(byte: u8) -> SigningKey {
+    SigningKey::from_slice(&[byte; 32]).unwrap()
+}
+
+fn address_of(signer: &SigningKey) -> String {
+    let point = signer.verifying_key().to_encoded_point(false);
+    let hash = keccak256(&point.as_bytes()[1..]);
+    format!("0x{}", hex::encode(&hash[12..]))
+}
+
+fn sign(signer: &SigningKey, message: &str) -> String {
+    let mut framed = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
+    framed.extend_from_slice(message.as_bytes());
+    let (signature, recovery) = signer
+        .sign_prehash_recoverable(&keccak256(&framed))
+        .unwrap();
+    format!(
+        "0x{}{:02x}",
+        hex::encode(signature.to_bytes()),
+        27 + recovery.to_byte()
+    )
+}
+
+fn usdc(whole: i64) -> Decimal {
+    Decimal::from(whole)
+}
+
+/// Yolo on BTC, 5 USDC a trade out of 5, valid for a minute from now.
+fn yolo(signer: &SigningKey) -> StartTerms {
+    StartTerms {
+        wallet: address_of(signer),
+        chain_id: 5042002,
+        asset: "BTC".into(),
+        mode: "yolo".into(),
+        budget: usdc(5),
+        max_per_trade: usdc(5),
+        stop_loss: usdc(5),
+        minutes: 5,
+        expires_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+        nonce: uuid::Uuid::new_v4().simple().to_string(),
+    }
+}
+
+/// `(event, data)` frames off an SSE body.
+struct SseFeed {
+    res: reqwest::Response,
+    buffer: String,
+}
+
+impl SseFeed {
+    async fn next(&mut self) -> Option<(String, Value)> {
+        loop {
+            if let Some(end) = self.buffer.find("\n\n") {
+                let frame: String = self.buffer.drain(..end + 2).collect();
+                let mut event = String::new();
+                let mut data = String::new();
+                for line in frame.lines() {
+                    if let Some(rest) = line.strip_prefix("event: ") {
+                        event = rest.to_string();
+                    } else if let Some(rest) = line.strip_prefix("data: ") {
+                        data.push_str(rest);
+                    }
+                }
+                if data.is_empty() {
+                    continue;
+                }
+                return Some((event, serde_json::from_str(&data).unwrap()));
+            }
+            let chunk = self.res.chunk().await.ok()??;
+            self.buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
+
+    /// The first frame of `event` that `wanted` accepts, within `secs`.
+    async fn until(&mut self, event: &str, secs: u64, wanted: impl Fn(&Value) -> bool) -> Value {
+        let found = tokio::time::timeout(Duration::from_secs(secs), async {
+            while let Some((name, data)) = self.next().await {
+                if name == event && wanted(&data) {
+                    return data;
+                }
+            }
+            panic!("feed ended before a matching {event}");
+        });
+        found
+            .await
+            .unwrap_or_else(|_| panic!("no matching {event} in {secs}s"))
+    }
+}
+
+impl Server {
+    /// `(status, body, agent cookie)`.
+    async fn start_agent(
+        &self,
+        signer: &SigningKey,
+        terms: &StartTerms,
+    ) -> (StatusCode, Value, Option<String>) {
+        let message = start_message(terms);
+        let res = self
+            .http
+            .post(format!("{}/api/agent/start", self.url))
+            .json(&json!({ "message": message, "signature": sign(signer, &message) }))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status();
+        let cookie = res
+            .headers()
+            .get("set-cookie")
+            .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
+        (status, res.json().await.unwrap_or(Value::Null), cookie)
+    }
+
+    async fn agent_post(&self, path: &str, cookie: Option<&str>) -> (StatusCode, Value) {
+        let mut req = self.http.post(format!("{}{path}", self.url));
+        if let Some(cookie) = cookie {
+            req = req.header("cookie", cookie);
+        }
+        let res = req.send().await.unwrap();
+        let status = res.status();
+        (status, res.json().await.unwrap_or(Value::Null))
+    }
+
+    async fn feed(&self, cookie: &str) -> SseFeed {
+        let res = self
+            .http
+            .get(format!("{}/api/agent/decisions", self.url))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        SseFeed {
+            res,
+            buffer: String::new(),
+        }
+    }
+
+    fn balance_of(&self, wallet: &str) -> i64 {
+        self.sqlite()
+            .query_row(
+                "SELECT balance FROM user_balances WHERE user_address = ?1",
+                [wallet],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_price_move_makes_a_yolo_agent_place_a_bet_on_the_feed() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let trader = key(7);
+    let wallet = address_of(&trader);
+    s.fund(&wallet, 100);
+
+    let (status, body, cookie) = s.start_agent(&trader, &yolo(&trader)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cookie = cookie.expect("agent cookie");
+    let mut decisions = s.feed(&cookie).await;
+    let session = decisions.until("session", 5, |_| true).await;
+    assert_eq!(session["status"], "running", "{session}");
+
+    // Fifteen seconds of a flat 100, then a jump the 2 minute range can't hide.
+    tokio::time::sleep(Duration::from_millis(16_000)).await;
+    set_price(&feed, 101.0);
+
+    let placed = decisions
+        .until("decision", 15, |d| d["verdict"] == "placed")
+        .await;
+    assert_eq!(placed["direction"], "UP", "{placed}");
+    assert_eq!(placed["stake"], json!(5.0), "{placed}");
+    assert!(placed["confidence"].is_null(), "{placed}");
+    assert!(placed["betId"].is_string(), "{placed}");
+    assert_eq!(s.balance_of(&wallet), 95 * UNIT);
+
+    let stopped = decisions
+        .until("session", 10, |d| d["status"] == "stopped")
+        .await;
+    assert_eq!(stopped["stoppedReason"], "limit reached", "{stopped}");
+    assert_eq!(stopped["spent"], json!(5.0), "{stopped}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_wallets_token_cannot_stop_or_read_a_session() {
+    let (s, _feed, _) = Server::start(100.0).await;
+    let (alice, bob) = (key(8), key(9));
+    let (_, a, alice_cookie) = s.start_agent(&alice, &yolo(&alice)).await;
+    let (_, b, bob_cookie) = s.start_agent(&bob, &yolo(&bob)).await;
+    let (alice_cookie, bob_cookie) = (alice_cookie.unwrap(), bob_cookie.unwrap());
+
+    // Alice's claims with a signature that isn't the server's.
+    let (claims, sig) = alice_cookie.rsplit_once('.').unwrap();
+    let flipped = if sig.ends_with('A') { "B" } else { "A" };
+    let forged = format!("{claims}.{}{flipped}", &sig[..sig.len() - 1]);
+    for cookie in [None, Some(forged.as_str()), Some("strike_agent=abc.def")] {
+        let (status, reply) = s.agent_post("/api/agent/stop", cookie).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{reply}");
+    }
+    let res = s
+        .http
+        .get(format!("{}/api/agent/decisions", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, reply) = s.agent_post("/api/agent/stop", Some(&bob_cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["session"]["id"], b["session"]["id"]);
+    assert_eq!(reply["session"]["stoppedReason"], "You stopped the agent");
+
+    let mut bobs = s.feed(&bob_cookie).await;
+    let seen = bobs.until("session", 5, |_| true).await;
+    assert_eq!(seen["id"], b["session"]["id"], "{seen}");
+    let mut alices = s.feed(&alice_cookie).await;
+    let seen = alices.until("session", 5, |_| true).await;
+    assert_eq!(seen["id"], a["session"]["id"], "{seen}");
+    assert_eq!(
+        seen["status"], "running",
+        "bob's stop reached alice: {seen}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_is_refused_with_the_reason() {
+    let (s, _feed, _) = Server::start(100.0).await;
+    let trader = key(10);
+    let now = chrono::Utc::now().timestamp_millis();
+    let refused: Vec<(StartTerms, StatusCode, &str)> = vec![
+        (
+            StartTerms {
+                expires_ms: now - 1,
+                ..yolo(&trader)
+            },
+            StatusCode::BAD_REQUEST,
+            "Start message expired",
+        ),
+        (
+            StartTerms {
+                budget: usdc(101),
+                ..yolo(&trader)
+            },
+            StatusCode::BAD_REQUEST,
+            "Budget is above the 100 USDC ceiling",
+        ),
+        (
+            StartTerms {
+                max_per_trade: usdc(11),
+                budget: usdc(20),
+                ..yolo(&trader)
+            },
+            StatusCode::BAD_REQUEST,
+            "Max per trade is above the 10 USDC ceiling",
+        ),
+        (
+            StartTerms {
+                minutes: 31,
+                ..yolo(&trader)
+            },
+            StatusCode::BAD_REQUEST,
+            "Session length is above the 30 minute ceiling",
+        ),
+        (
+            StartTerms {
+                asset: "AAPL".into(),
+                ..yolo(&trader)
+            },
+            StatusCode::BAD_REQUEST,
+            "The agent trades crypto assets only",
+        ),
+    ];
+    for (terms, status, error) in refused {
+        let (got, reply, cookie) = s.start_agent(&trader, &terms).await;
+        assert_eq!(
+            (got, reply["error"].as_str()),
+            (status, Some(error)),
+            "{reply}"
+        );
+        assert!(cookie.is_none());
+    }
+
+    // Signed by someone else.
+    let (status, reply, _) = s.start_agent(&key(11), &yolo(&trader)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{reply}");
+
+    let terms = yolo(&trader);
+    let (status, _, cookie) = s.start_agent(&trader, &terms).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, reply, _) = s.start_agent(&trader, &yolo(&trader)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+    assert_eq!(
+        reply["error"],
+        "This wallet already has an active agent session"
+    );
+
+    s.agent_post("/api/agent/stop", cookie.as_deref()).await;
+    let (status, reply, _) = s.start_agent(&trader, &terms).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+    assert_eq!(reply["error"], "Start message already used");
 }

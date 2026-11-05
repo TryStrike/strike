@@ -243,7 +243,6 @@ async fn bet(headers: HeaderMap, raw: Bytes) -> Response {
 
 /// The locked bet path for in-process callers. Requires a well-formed
 /// `betRequestId`, a derived key would let a retry deduct twice.
-#[expect(dead_code, reason = "the agent task (ticket 02) is the first caller")]
 pub(crate) async fn place_bet(body: &Value) -> ledger::BetOutcome {
     if ledger::sanitize_bet_request_id(body.get("betRequestId")).is_none() {
         return ledger::BetOutcome::Rejected("Invalid bet request id".into());

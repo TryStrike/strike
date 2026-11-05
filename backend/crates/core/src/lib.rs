@@ -6,6 +6,7 @@
 //! testable without a server.
 
 pub mod address;
+pub mod agent;
 pub mod bets;
 pub mod config;
 pub mod crypto;

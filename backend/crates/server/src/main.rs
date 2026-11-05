@@ -2,6 +2,7 @@
 //! routes. It answers the same `/api/...` paths with the same JSON so the
 //! frontend can be pointed at either implementation during the cutover.
 
+mod agent;
 mod bans;
 mod http;
 mod routes;
@@ -24,6 +25,11 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    let stale = strike_core::agent::stop_all_running(strike_core::db::db().await?).await?;
+    if stale > 0 {
+        tracing::warn!("{stale} agent sessions were running before the restart, marked stopped");
+    }
 
     tokio::spawn(strike_core::ticks::run_flusher());
     tokio::spawn(strike_core::withdrawals::watch_stuck());
