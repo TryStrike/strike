@@ -1231,9 +1231,9 @@ fn block(index: usize, start: Value, deltas: &[Value]) -> Vec<Value> {
     events
 }
 
-/// A thinking block, then both tools in parallel, the way Haiku answered the
-/// smoke test. "loop" questions ask for movers forever.
-fn tool_turn(looping: bool) -> String {
+/// A thinking block, then `tools` as parallel calls, the way Haiku answered
+/// the smoke test. Each input arrives split across two deltas.
+fn tool_turn(tools: &[(&str, Value)]) -> String {
     let mut events = vec![
         json!({ "type": "message_start", "message": { "id": "msg_1", "type": "message", "role": "assistant", "content": [] } }),
     ];
@@ -1242,24 +1242,49 @@ fn tool_turn(looping: bool) -> String {
         json!({ "type": "thinking", "thinking": "", "signature": "" }),
         &[json!({ "type": "signature_delta", "signature": "sig-1" })],
     ));
-    events.extend(block(
-        1,
-        json!({ "type": "tool_use", "id": "toolu_1", "name": "get_market_movers", "input": {} }),
-        &[json!({ "type": "input_json_delta", "partial_json": "" })],
-    ));
-    if !looping {
+    for (i, (name, input)) in tools.iter().enumerate() {
+        let raw = input.to_string();
+        let (head, tail) = raw.split_at(raw.len() / 2);
         events.extend(block(
-            2,
-            json!({ "type": "tool_use", "id": "toolu_2", "name": "show_table", "input": {} }),
+            i + 1,
+            json!({ "type": "tool_use", "id": format!("toolu_{}", i + 1), "name": name, "input": {} }),
             &[
-                json!({ "type": "input_json_delta", "partial_json": "{\"source\": \"market_" }),
-                json!({ "type": "input_json_delta", "partial_json": "movers\", \"title\": \"Movers\"}" }),
+                json!({ "type": "input_json_delta", "partial_json": head }),
+                json!({ "type": "input_json_delta", "partial_json": tail }),
             ],
         ));
     }
     events.push(json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 9 } }));
     events.push(json!({ "type": "message_stop" }));
     sse(&events)
+}
+
+/// The tool calls the fake model makes for a question, by keyword.
+fn script(question: &str) -> Vec<(&'static str, Value)> {
+    if question.contains("loop") {
+        return vec![("get_market_movers", json!({}))];
+    }
+    if question.contains("trend") {
+        return vec![("get_market_trend", json!({ "symbol": "BTC" }))];
+    }
+    if question.contains("screen") {
+        return vec![
+            ("open_market", json!({ "symbol": "ETH" })),
+            ("show_chart", json!({ "symbol": "BTC" })),
+            ("open_page", json!({ "page": "/history" })),
+            (
+                "fill_trade_ticket",
+                json!({ "symbol": "BTC", "direction": "UP", "amount": 2.5, "seconds": 30 }),
+            ),
+        ];
+    }
+    vec![
+        ("get_market_movers", json!({})),
+        (
+            "show_table",
+            json!({ "source": "market_movers", "title": "Movers" }),
+        ),
+    ]
 }
 
 fn text_turn() -> String {
@@ -1296,7 +1321,7 @@ async fn messages_api(
     let stream = if after_tools && !question.contains("loop") {
         text_turn()
     } else {
-        tool_turn(question.contains("loop"))
+        tool_turn(&script(question))
     };
     ([("content-type", "text/event-stream")], stream).into_response()
 }
@@ -1326,10 +1351,18 @@ async fn copilot_server(btc: f64) -> (Server, Feed, Claude) {
 impl Server {
     /// `(status, frames)`: the whole SSE answer, or a JSON error as one frame.
     async fn ask(&self, question: &str) -> (StatusCode, Vec<(String, Value)>) {
+        self.ask_with(question, false).await
+    }
+
+    async fn ask_with(
+        &self,
+        question: &str,
+        ticket_open: bool,
+    ) -> (StatusCode, Vec<(String, Value)>) {
         let res = self
             .http
             .post(format!("{}/api/copilot", self.url))
-            .json(&json!({ "messages": [{ "role": "user", "content": question }] }))
+            .json(&json!({ "messages": [{ "role": "user", "content": question }], "ticketOpen": ticket_open }))
             .send()
             .await
             .unwrap();
@@ -1458,4 +1491,132 @@ async fn the_copilot_takes_ten_questions_a_minute() {
         frames[0].1["error"],
         "Copilot limit is 10 questions a minute. Try again shortly."
     );
+}
+
+/// The tool results the server sent back on the second turn, by tool name.
+fn results_of(claude: &Claude) -> HashMap<String, Value> {
+    let bodies = claude.lock().unwrap().clone();
+    let replay = &bodies[1]["messages"];
+    let names: HashMap<String, String> = replay[1]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["type"] == "tool_use")
+        .map(|b| {
+            (
+                b["id"].as_str().unwrap().to_string(),
+                b["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    replay[2]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (names[r["tool_use_id"].as_str().unwrap()].clone(), r.clone()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_market_trend_is_read_from_the_tick_buffer() {
+    let (s, feed, claude) = copilot_server(100.0).await;
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    set_price(&feed, 101.0);
+    after_the_next_sample().await;
+
+    let (status, _) = s.ask("trend for btc?").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let result = &results_of(&claude)["get_market_trend"];
+    assert_eq!(result["is_error"], false, "{result}");
+    let trend: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+    assert_eq!(trend["symbol"], "BTC", "{trend}");
+    assert_eq!(trend["price"], json!(101.0), "{trend}");
+    assert_eq!(trend["changePct"], json!(1.0), "{trend}");
+    assert_eq!(trend["high"], json!(101.0), "{trend}");
+    assert_eq!(trend["low"], json!(100.0), "{trend}");
+    assert_eq!(trend["window"], "last 15 minutes", "{trend}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_tools_become_typed_actions_and_none_touches_money() {
+    let (s, _feed, claude) = copilot_server(100.0).await;
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+
+    let (status, frames) = s.ask("put it on my screen").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let actions = of(&frames, "action");
+    let types: Vec<&str> = actions
+        .iter()
+        .map(|a| a["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "open_market",
+            "show_chart",
+            "open_page",
+            "fill_trade_ticket"
+        ],
+        "{frames:?}"
+    );
+    assert_eq!(actions[0]["symbol"], "ETH");
+    assert_eq!(actions[1]["symbol"], "BTC");
+    let points = actions[1]["points"].as_array().unwrap();
+    assert!(
+        points.len() >= 2,
+        "the server fills the chart: {}",
+        actions[1]
+    );
+    assert!(points
+        .iter()
+        .all(|p| p["price"] == json!(100.0) && p["at"].is_i64()));
+    assert_eq!(actions[2]["page"], "/history");
+    assert_eq!(
+        *actions[3],
+        json!({ "type": "fill_trade_ticket", "symbol": "BTC", "direction": "UP", "amount": 2.5, "seconds": 30 })
+    );
+
+    let tools: Vec<String> = claude.lock().unwrap()[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            "get_market_movers",
+            "get_market_trend",
+            "show_table",
+            "show_chart",
+            "open_page",
+            "open_market",
+            "fill_trade_ticket"
+        ],
+        "a fixed list, and nothing that bets, changes a limit or moves funds"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_ticket_blocks_navigation() {
+    let (s, _feed, claude) = copilot_server(100.0).await;
+
+    let (status, frames) = s.ask_with("put it on my screen", true).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let types: Vec<&str> = of(&frames, "action")
+        .iter()
+        .map(|a| a["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types, ["show_chart", "fill_trade_ticket"], "{frames:?}");
+    let results = results_of(&claude);
+    for tool in ["open_market", "open_page"] {
+        assert_eq!(results[tool]["is_error"], true, "{tool}: {}", results[tool]);
+        assert_eq!(
+            results[tool]["content"],
+            "The trader has a trade ticket open, so the copilot can't navigate away"
+        );
+    }
 }

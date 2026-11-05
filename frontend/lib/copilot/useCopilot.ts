@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { dispatch } from './actions';
+import { dispatch, useCopilotView } from './actions';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -38,7 +38,7 @@ export function useCopilot() {
         const res = await fetch('/api/copilot', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ messages: history(asked) }),
+          body: JSON.stringify({ messages: history(asked), ticketOpen: useCopilotView.getState().ticket !== null }),
         });
         if (!res.ok || !res.body) {
           const body = await res.json().catch(() => null);
@@ -60,7 +60,13 @@ export function useCopilot() {
             if (!event || !data) continue;
             const payload = JSON.parse(data);
             if (event === 'text') appendAnswer(payload.text);
-            else if (event === 'action') dispatch(payload);
+            else if (event === 'action') {
+              try {
+                dispatch(payload);
+              } catch (e) {
+                setError(e instanceof Error ? e.message : 'Copilot action failed');
+              }
+            }
             else if (event === 'error') setError(payload.error);
           }
         }

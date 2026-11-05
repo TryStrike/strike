@@ -1,18 +1,23 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { ChatCircleDots } from '@phosphor-icons/react';
-import { useCopilotView } from '@/lib/copilot/actions';
+import { setNavigator, useCopilotView } from '@/lib/copilot/actions';
 
 const CopilotDrawer = dynamic(() => import('./CopilotDrawer'), { ssr: false });
 const TableOverlay = dynamic(() => import('./TableOverlay'), { ssr: false });
+const ChartOverlay = dynamic(() => import('./ChartOverlay'), { ssr: false });
 
 /** The only part of the copilot on first paint. The drawer loads on first tap. */
 export function CopilotLauncher() {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const table = useCopilotView((s) => s.table);
+  const chart = useCopilotView((s) => s.chart);
+  const router = useRouter();
+  useEffect(() => setNavigator(router.push), [router]);
   return (
     <>
       <button
@@ -28,6 +33,7 @@ export function CopilotLauncher() {
       </button>
       {loaded && <CopilotDrawer open={open} onClose={() => setOpen(false)} />}
       {table && <TableOverlay />}
+      {chart && <ChartOverlay />}
     </>
   );
 }

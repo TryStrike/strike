@@ -51,8 +51,12 @@ async fn ask(
         return http::too_many(copilot::RATE_LIMITED, 60);
     }
 
+    let ticket_open = body
+        .get("ticketOpen")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(answer(key, messages, tx));
+    tokio::spawn(answer(key, messages, ticket_open, tx));
     let frames = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
@@ -74,8 +78,8 @@ fn send(tx: &Frames, event: &str, data: Value) -> Result<(), String> {
         .map_err(|_| "client disconnected".to_string())
 }
 
-async fn answer(key: String, mut messages: Vec<Value>, tx: Frames) {
-    let (event, data) = match converse(&key, &mut messages, &tx).await {
+async fn answer(key: String, mut messages: Vec<Value>, ticket_open: bool, tx: Frames) {
+    let (event, data) = match converse(&key, &mut messages, ticket_open, &tx).await {
         Ok(()) => ("done", json!({})),
         Err(why) => {
             tracing::warn!("[copilot] {why}");
@@ -86,10 +90,15 @@ async fn answer(key: String, mut messages: Vec<Value>, tx: Frames) {
     let _ = send(&tx, event, data);
 }
 
-async fn converse(key: &str, messages: &mut Vec<Value>, tx: &Frames) -> Result<(), String> {
-    let mut movers: Option<Vec<Value>> = None;
+async fn converse(
+    key: &str,
+    messages: &mut Vec<Value>,
+    ticket_open: bool,
+    tx: &Frames,
+) -> Result<(), String> {
+    let mut desk = copilot::Desk::new(ticks::buffer(), now_ms(), ticket_open);
     for turn_number in 0..=copilot::MAX_TOOL_TURNS {
-        let turn = copilot::stream_turn(key, messages, |text| {
+        let turn = copilot::stream_turn(key, messages, ticket_open, |text| {
             send(tx, "text", json!({ "text": text }))
         })
         .await?;
@@ -105,23 +114,15 @@ async fn converse(key: &str, messages: &mut Vec<Value>, tx: &Frames) -> Result<(
         }
         let mut results = Vec::new();
         for tool in turn.tool_uses() {
-            let rows = movers.get_or_insert_with(|| copilot::movers(ticks::buffer(), now_ms()));
-            let (content, is_error) = match tool.name.as_str() {
-                "get_market_movers" => (copilot::movers_result(rows), false),
-                "show_table" => match copilot::table_action(&tool.input, rows) {
-                    Ok(action) => {
-                        send(tx, "action", action)?;
-                        ("The table is open for the trader".to_string(), false)
-                    }
-                    Err(why) => (why, true),
-                },
-                other => (format!("There is no tool called {other}"), true),
-            };
+            let ran = desk.run(&tool);
+            if let Some(action) = ran.action {
+                send(tx, "action", action)?;
+            }
             results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool.id,
-                "content": content,
-                "is_error": is_error,
+                "content": ran.content,
+                "is_error": ran.is_error,
             }));
         }
         messages.push(json!({ "role": "assistant", "content": turn.blocks }));
