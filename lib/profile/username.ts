@@ -8,7 +8,7 @@
  *   - the column is `TEXT UNIQUE`, so a duplicate is rejected with a unique
  *     violation and a non-string is rejected before SQL;
  *   - there is NO length or charset constraint in SQL
- *     (supabase/user_profiles.sql, migrations/001_complete_schema.sql).
+ *     (db/schema.sqlite.sql).
  *
  * The server is therefore a uniqueness check, not a content check, and the
  * username is echoed to other players (/leaderboard, /api/bets/leaderboard).

@@ -13,13 +13,11 @@
     "start": "next start",
     "lint": "eslint",
     "security:audit": "npm audit --audit-level=moderate",
-    "arc:check": "node db/check-arc.mjs",
     "api:dev": "BIND_ADDR=${BIND_ADDR:-127.0.0.1:8080} cargo run --manifest-path backend/Cargo.toml -p server",
     "api:build": "cargo build --release --locked --manifest-path backend/Cargo.toml -p server",
     "api:start": "backend/target/release/strike-backend",
     "api:test": "cargo test --manifest-path backend/Cargo.toml --workspace",
-    "api:check": "cargo fmt --manifest-path backend/Cargo.toml --all -- --check && cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings && cargo build --locked --manifest-path backend/Cargo.toml --workspace",
-    "api:parity": "backend/parity/run.sh"
+    "api:check": "cargo fmt --manifest-path backend/Cargo.toml --all -- --check && cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings && cargo build --locked --manifest-path backend/Cargo.toml --workspace"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

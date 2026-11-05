@@ -1,8 +1,7 @@
 /**
  * Withdrawal status → player-facing view model.
  *
- * The schema allows exactly four statuses (supabase/migrations/008,
- * db/arc.sql): 'pending', 'accepted', 'rejected', 'paid_needs_reconciliation'.
+ * The schema allows exactly four statuses (db/schema.sqlite.sql): 'pending', 'accepted', 'rejected', 'paid_needs_reconciliation'.
  * Anything else (a future migration, a synced legacy row) must degrade to an
  * honest "we are watching this" state rather than pretending to be rejected.
  *

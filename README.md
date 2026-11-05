@@ -29,7 +29,7 @@ Strike was a working binary options dapp that had been ported across several cha
 - **USDC-only `StrikeTreasury`** — rewritten for Arc, where native USDC and the ERC-20 interface share one balance: no payable paths, `depositToken`, `withdrawTokenTo`, batched payouts, pause and two-step ownership.
 - **Treasury contract is now the money path** — deposits land in the contract, payouts go through `withdrawTokenTo` signed by the owner key (previously an EOA).
 - **Decimals fix** — the app treated USDC as native with 6 decimals; native USDC on Arc has 18. Everything now goes through the 6-decimal ERC-20 interface.
-- **Testnet end to end** — Arc Testnet config, Neon Postgres, deploy + e2e scripts driven by env.
+- **Testnet end to end** — Arc Testnet config, deploy scripts driven by env.
 
 ---
 
@@ -267,9 +267,7 @@ flowchart TD
 | `access_codes` / `waitlist` / `user_sessions` | Onboarding and dwell time |
 | `withdrawal_requests` | Manual approval queue |
 
-Arc defaults `user_balances.currency` to `'USDC'`. See `db/arc.sql`.
-
-The schema is `db/schema.sqlite.sql`, and `PRAGMA user_version` tracks changes after it (`MIGRATIONS` in `backend/crates/core/src/db.rs`). Only the backend writes the file. `supabase/` and `db/arc.sql` are the old Postgres schema: only `db/migrate_pg_to_sqlite`'s test still uses them.
+The schema is `db/schema.sqlite.sql`, and `PRAGMA user_version` tracks changes after it (`MIGRATIONS` in `backend/crates/core/src/db.rs`). Only the backend writes the file.
 
 ---
 
@@ -328,11 +326,10 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 │   ├── balance/                # Client balance helpers
 │   └── supabase/               # Query client for the /api/db gateway
 │
-├── backend/                    # Rust API, token parity and concurrency harnesses
-├── contracts/arc/         # StrikeTreasury.sol, deploy, e2e
-├── db/                         # schema.sqlite.sql, migrate_pg_to_sqlite, check-arc.mjs
+├── backend/                    # Rust API (axum + SQLite)
+├── contracts/arc/         # StrikeTreasury.sol, deploy
+├── db/                         # schema.sqlite.sql
 ├── scripts/deploy/             # oracle.sh, systemd units, backup and restore
-├── supabase/                   # Old Postgres schema, used by the migration tool's test
 └── docs/                       # ENVIRONMENT.md, CONTRIBUTING.md, SECURITY_REPORTING.md
 ```
 
@@ -411,8 +408,6 @@ App: http://localhost:3000. Next proxies `/api/*` to the Rust service, so both m
 BACKEND_URL=http://127.0.0.1:8080 npm run build
 npm run api:test
 npm run api:check          # fmt, clippy, build
-npm run api:parity         # tokens against the frozen JS algorithms
-npm run arc:check          # RPC + USDC sanity
 ```
 
 Running it in production: `docs/OPERATIONS.md`.
@@ -425,10 +420,7 @@ Running it in production: `docs/OPERATIONS.md`.
 
 ```bash
 ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... node contracts/arc/deploy.mjs
-ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... node contracts/arc/e2e.mjs
 ```
-
-`e2e.mjs` covers deposit (call + plain transfer), payout, batch payout, over-balance refusal, non-owner refusal, pause/unpause, and the ownership handshake at 0.00001 per step.
 
 ---
 

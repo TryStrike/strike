@@ -31,12 +31,8 @@ funds tracked against it.
 
 ```bash
 node contracts/arc/deploy.mjs   # writes deployments/arc-<chainId>.json + ABI
-node contracts/arc/e2e.mjs      # spends a few micro-USDC
 ```
 
-`e2e.mjs` covers deposit (with and without allowance), plain ERC-20 transfer,
-native-value refusal, payout, batch payout, over-balance refusal, non-owner
-refusal, pause/unpause and the ownership handshake.
 
 ## Configuration
 
