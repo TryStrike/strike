@@ -1,10 +1,12 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { usePrivy } from '@privy-io/react-auth';
-import { useStore } from '@/lib/store';
+import { useStore, useHouseBalance } from '@/lib/store';
+import { formatUsdc } from '@/lib/profile/format';
 import { useShallow } from 'zustand/react/shallow';
-import { Check, CopySimple, SignOut, Wallet } from '@phosphor-icons/react';
+import { CaretDown, Check, CopySimple, SignOut, Wallet } from '@phosphor-icons/react';
 import { glassPrimary } from '@/components/ui/kit';
 import { useAccount, useDisconnect as useWagmiDisconnect, useEnsName, useSwitchChain } from 'wagmi';
 import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
@@ -215,26 +217,98 @@ function WalletConnectButton({
           Switch to {arcChainLabel(targetChainId)}
         </button>
       ) : null}
+      <AccountMenu
+        label={label || truncateAddress(address)}
+        address={address}
+        wrongNetwork={wrongNetwork}
+        copied={copied}
+        onCopy={() => void handleCopy()}
+        onDisconnect={handleDisconnect}
+      />
+    </div>
+  );
+}
+
+const MENU_LINKS = [
+  ['/history', 'History'],
+  ['/withdrawals', 'Withdrawals'],
+  ['/referrals', 'Referrals'],
+] as const;
+
+function AccountMenu({
+  label,
+  address,
+  wrongNetwork,
+  copied,
+  onCopy,
+  onDisconnect,
+}: {
+  label: string;
+  address: string;
+  wrongNetwork: boolean;
+  copied: boolean;
+  onCopy: () => void;
+  onDisconnect: () => void;
+}) {
+  const balance = useHouseBalance();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const item = 'flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-ink';
+
+  return (
+    <div ref={ref} className="relative">
       <button
         type="button"
-        onClick={() => void handleCopy()}
-        aria-label={copied ? 'Address copied' : 'Copy wallet address'}
-        title={address}
-        className="inline-flex h-9 max-w-[260px] items-center gap-2 rounded-full bg-surface px-3.5 font-jet text-[13px] text-ink transition-colors hover:bg-line"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="inline-flex h-9 max-w-[260px] items-center gap-2 rounded-full bg-surface px-3.5 font-jet text-[13px] text-ink"
       >
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${wrongNetwork ? 'bg-down' : 'bg-up'}`} aria-hidden="true" />
-        <span className="truncate">{label || truncateAddress(address)}</span>
-        {copied ? <Check size={14} className="shrink-0 text-up" /> : <CopySimple size={14} className="shrink-0 text-subtle" />}
+        <span className="truncate">{label}</span>
+        <CaretDown size={12} className="shrink-0 text-subtle" />
       </button>
-      <button
-        type="button"
-        onClick={handleDisconnect}
-        aria-label="Disconnect wallet"
-        title="Disconnect"
-        className="grid h-9 w-9 place-items-center rounded-full text-subtle transition-colors hover:bg-surface hover:text-down"
-      >
-        <SignOut size={16} />
-      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-50 mt-2 w-60 rounded-2xl bg-white p-1.5 font-tight shadow-[0_20px_40px_-16px_rgba(10,12,16,0.25)] ring-1 ring-ink/[0.08]"
+        >
+          <div className="px-3 pb-2 pt-1.5">
+            <p className="font-jet text-[11px] uppercase tracking-[0.14em] text-faint">Balance</p>
+            <p className="font-jet text-lg font-semibold tabular-nums">{formatUsdc(balance)} USDC</p>
+          </div>
+          <button type="button" role="menuitem" onClick={onCopy} title={address} className={item}>
+            <span className="truncate font-jet text-[13px]">{truncateAddress(address)}</span>
+            {copied ? <Check size={14} className="text-up" /> : <CopySimple size={14} className="text-subtle" />}
+          </button>
+          <div className="my-1 h-px bg-line" />
+          {MENU_LINKS.map(([href, text]) => (
+            <Link key={href} href={href} role="menuitem" onClick={() => setOpen(false)} className={item}>
+              {text}
+            </Link>
+          ))}
+          <div className="my-1 h-px bg-line" />
+          <button type="button" role="menuitem" onClick={onDisconnect} className={`${item} text-down`}>
+            Disconnect
+            <SignOut size={14} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

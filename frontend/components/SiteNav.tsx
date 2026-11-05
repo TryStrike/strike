@@ -12,8 +12,6 @@ import { cx } from '@/components/ui/kit';
 const LINKS = [
   { href: '/trade', label: 'Trade' },
   { href: '/history', label: 'History' },
-  { href: '/leaderboard', label: 'Leaderboard' },
-  { href: '/profile', label: 'Profile' },
 ];
 
 /** Exact match or a segment below it (e.g. /trade/… still marks /trade active). */

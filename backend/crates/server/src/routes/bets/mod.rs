@@ -7,10 +7,8 @@
 
 pub mod bet_id;
 pub mod history;
-pub mod leaderboard;
 pub mod recent;
 pub mod save;
-pub mod stats;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -33,8 +31,6 @@ pub(crate) fn json_cached(status: StatusCode, body: Value, cache: &str) -> Respo
 pub fn routes() -> Router {
     Router::new()
         .merge(history::routes())
-        .merge(stats::routes())
-        .merge(leaderboard::routes())
         .merge(recent::routes())
         .merge(save::routes())
         .merge(bet_id::routes())
@@ -106,8 +102,4 @@ pub(crate) async fn column_type(table: &str, column: &str) -> ApiResult<String> 
     Ok(ty.to_string())
 }
 
-/// `NextResponse.json(..., { headers: { 'Cache-Control': ... } })` for the
-/// wallet-scoped (private) vs. board-scoped (public) cache postures.
-pub(crate) const PUBLIC_BOARD_CACHE: &str = "public, s-maxage=30, stale-while-revalidate=120";
 pub(crate) const RECENT_CACHE: &str = "public, s-maxage=5, stale-while-revalidate=30";
-pub(crate) const PRIVATE_NO_STORE: &str = "private, no-store, max-age=0, must-revalidate";

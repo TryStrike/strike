@@ -292,7 +292,6 @@ Deposits are verified against the Arc RPC (`verify_deposit` in `backend/crates/c
 |--------|-------|---------|
 | `POST` | `/api/bets/save` | Upsert settled bet |
 | `GET` | `/api/bets/history` | User history |
-| `GET` | `/api/bets/leaderboard` | Aggregated leaderboard |
 | `GET` | `/api/stats/public` | Platform stats (`chainsActive: 1`) |
 
 Admin routes live under `/api/admin/*` (auth, stats, ledger, treasury balances, withdrawal queue, access codes).
