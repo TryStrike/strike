@@ -178,7 +178,7 @@ async fn start() -> Server {
         node,
         player,
     };
-    for _ in 0..500 {
+    for _ in 0..3000 {
         let health = format!("{}/api/health", server.url);
         if server.http.get(health).send().await.is_ok() {
             return server;

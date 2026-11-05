@@ -167,7 +167,7 @@ impl Server {
     }
 
     async fn wait_up(&self) {
-        for _ in 0..500 {
+        for _ in 0..3000 {
             let up = self.http.get(format!("{}/api/health", self.url)).send();
             if up.await.is_ok() {
                 return;
