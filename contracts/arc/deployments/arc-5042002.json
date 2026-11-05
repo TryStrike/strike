@@ -1,0 +1,11 @@
+{
+  "chainId": 5042002,
+  "network": "Arc Testnet",
+  "strikeTreasury": "0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A",
+  "token": "0x3600000000000000000000000000000000000000",
+  "owner": "0xc0368D6Ec4586B9F96b379a9584ae05E0d31fD28",
+  "txHash": "0x98918bb313ffdfd200415e5b732757bcbe55c0bd413df04d9f3aaa9ae4e9f24a",
+  "gasUsed": "831197",
+  "deployedAt": "2026-10-26T11:53:17.438Z",
+  "explorer": "https://explorer.testnet.arc.io/address/0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A"
+}
