@@ -211,7 +211,8 @@ async function runVerification(
       });
       status = response.status;
       body = (await response.json().catch(() => null)) as DepositApiResponse | null;
-    } catch {
+    } catch (err) {
+      console.error('[deposit] credit request failed, will retry', record.txHash, err);
       status = 0;
       body = null;
     }
@@ -466,8 +467,9 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         if (gasPrice == null) return 0.01;
         // Gas is priced in 18-decimal native USDC; convert to the deposit unit.
         return parseFloat(ethers.formatUnits(gas * gasPrice, 18));
-      } catch {
+      } catch (err) {
         // If the node is unreachable, keep a conservative flat headroom.
+        console.warn('[deposit] gas estimate failed, reserving 0.01 USDC', err);
         return 0.01;
       }
     },
@@ -519,8 +521,10 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           { credentials: 'include' }
         );
         const body = await response.json().catch(() => null);
+        if (!response.ok) console.error(`[deposit] precheck answered ${response.status}`, body);
         if (!cancelled) setPrecheck(response.ok && body ? body : null);
-      } catch {
+      } catch (err) {
+        console.error('[deposit] precheck failed', err);
         if (!cancelled) setPrecheck(null);
       }
     })();
@@ -607,7 +611,8 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     try {
       if (connector) await switchChainAsync({ chainId: config.chainId });
       else setError(`Add ${config.name} (chain ${config.chainId}) to your wallet and try again`);
-    } catch {
+    } catch (err) {
+      console.warn('[deposit] chain switch rejected or failed', err);
       setError(`Switch your wallet to ${config.name} and try again`);
     }
   }, [config.chainId, config.name, connector, switchChainAsync]);

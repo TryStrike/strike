@@ -1,14 +1,6 @@
 /**
- * History state slice for Zustand store
- * Manages bet history and persistence
- *
- * Note: bet history is managed off-chain.
- * Blockchain events are only for deposit/withdrawal tracking.
- *
- * `bet_history` is only readable through GET /api/bets/history (the /api/db
- * gateway does not expose that table), and every read here is bounded by
- * limit/offset — never a "give me everything" query. This slice is read-only
- * with respect to the ledger; the only writes are the local localStorage cache.
+ * Bet history: the session's recent rounds, and bounded pages of the ledger from
+ * GET /api/bets/history. Read-only with respect to the ledger.
  */
 
 import { StateCreator } from "zustand";
@@ -87,15 +79,14 @@ export interface HistoryState {
   historyError: string | null;
 
   // Actions
-  fetchHistory: (playerAddress: string) => Promise<void>;
   addBet: (bet: BetRecord) => void;
   clearError: () => void;
   loadBetHistoryPage: (args: LoadBetHistoryArgs) => Promise<BetHistoryPage>;
   resetBetHistory: () => void;
 }
 
-// Maximum bets to store in localStorage
-const MAX_STORED_BETS = 50;
+/** Session rounds kept for the recent-rounds list. */
+const MAX_RECENT_BETS = 50;
 /** Server clamps at 200 (MAX_HISTORY_LIMIT in the route); keep the client in step. */
 export const HISTORY_PAGE_SIZES = [25, 50, 100] as const;
 const DEFAULT_HISTORY_LIMIT = 50;
@@ -231,71 +222,6 @@ export const createHistorySlice: StateCreator<HistoryState> = (set, get) => ({
   historyError: null,
 
   /**
-   * Fetch bet history from Supabase, with localStorage fallback
-   * @param playerAddress - The player's wallet address
-   */
-  fetchHistory: async (playerAddress: string) => {
-    try {
-      set({ isLoading: true, error: null });
-
-      // Try fetching from Supabase first
-      try {
-        const res = await fetch(`/api/bets/history?wallet=${encodeURIComponent(playerAddress)}&limit=50`);
-        if (res.ok) {
-          const { bets: serverBets } = await res.json();
-          if (serverBets && serverBets.length > 0) {
-            // Map Supabase rows to BetRecord format
-            const mappedBets: BetRecord[] = serverBets.map((row: BetHistoryRow) => ({
-              id: row.id,
-              timestamp: new Date(row.resolved_at as string).getTime(),
-              amount: row.amount.toString(),
-              won: row.won,
-              payout: row.payout.toString(),
-              startPrice: parseFloat(String(row.strike_price)) || 0,
-              endPrice: parseFloat(String(row.end_price)) || 0,
-              actualChange: (parseFloat(String(row.end_price)) || 0) - (parseFloat(String(row.strike_price)) || 0),
-              target: {
-                id: row.mode === 'binomo' ? 'classic' : row.mode === 'draw' ? 'draw' : 'box',
-                label: `${row.direction} ${row.multiplier}x`,
-                multiplier: parseFloat(String(row.multiplier)) || 1.9,
-                priceChange: 0,
-                direction: row.direction as 'UP' | 'DOWN',
-              }
-            }));
-
-            set({
-              bets: mappedBets,
-              isLoading: false,
-              error: null
-            });
-
-            // Also cache in localStorage
-            saveBetsToLocalStorage(mappedBets.slice(0, MAX_STORED_BETS));
-            return;
-          }
-        }
-      } catch (fetchError) {
-        console.warn('Failed to fetch from Supabase, falling back to localStorage:', fetchError);
-      }
-
-      // Fallback to localStorage
-      const cachedBets = loadBetsFromLocalStorage();
-
-      set({
-        bets: cachedBets,
-        isLoading: false,
-        error: null
-      });
-    } catch (error) {
-      console.error("Error fetching history:", error);
-      set({
-        isLoading: false,
-        error: error instanceof Error ? error.message : "Failed to fetch history"
-      });
-    }
-  },
-
-  /**
    * Add a new bet to history
    * Used when a bet is placed to immediately update UI
    * @param bet - The bet record to add
@@ -319,10 +245,7 @@ export const createHistorySlice: StateCreator<HistoryState> = (set, get) => ({
     // Sort by timestamp (newest first)
     updatedBets.sort((a, b) => b.timestamp - a.timestamp);
 
-    set({ bets: updatedBets });
-
-    // Persist to localStorage
-    saveBetsToLocalStorage(updatedBets.slice(0, MAX_STORED_BETS));
+    set({ bets: updatedBets.slice(0, MAX_RECENT_BETS) });
   },
 
   /**
@@ -360,7 +283,7 @@ export const createHistorySlice: StateCreator<HistoryState> = (set, get) => ({
       // Newest page, no filters → also refresh the lightweight recent-rounds list.
       const unfiltered = !args.filters || Object.values(args.filters).every((v) => !v || v === 'ALL');
       if (offset === 0 && unfiltered && page.rows.length > 0) {
-        const mapped: BetRecord[] = page.rows.slice(0, MAX_STORED_BETS).map((row) => ({
+        const mapped: BetRecord[] = page.rows.slice(0, MAX_RECENT_BETS).map((row) => ({
           id: row.id,
           timestamp: new Date(row.resolved_at ?? row.created_at ?? 0).getTime(),
           amount: String(row.amount),
@@ -378,7 +301,6 @@ export const createHistorySlice: StateCreator<HistoryState> = (set, get) => ({
           },
         }));
         set({ bets: mapped });
-        saveBetsToLocalStorage(mapped);
       }
 
       return page;
@@ -413,35 +335,3 @@ export const createHistorySlice: StateCreator<HistoryState> = (set, get) => ({
     });
   },
 });
-
-/**
- * Save bets to localStorage
- * @param bets - Array of bet records to save
- */
-const saveBetsToLocalStorage = (bets: BetRecord[]): void => {
-  try {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('overflow_bet_history', JSON.stringify(bets));
-    }
-  } catch (error) {
-    console.error("Error saving bets to localStorage:", error);
-  }
-};
-
-/**
- * Load bets from localStorage
- * @returns Array of bet records from localStorage
- */
-const loadBetsFromLocalStorage = (): BetRecord[] => {
-  try {
-    if (typeof window !== 'undefined') {
-      const data = localStorage.getItem('overflow_bet_history');
-      if (data) {
-        return JSON.parse(data);
-      }
-    }
-  } catch (error) {
-    console.error("Error loading bets from localStorage:", error);
-  }
-  return [];
-};

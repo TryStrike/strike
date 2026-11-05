@@ -11,7 +11,6 @@
 //! and the bet history use (`crate::bets`). A dashboard can therefore never show
 //! an "earned" reward ahead of a qualifying trade.
 
-use rand::RngCore;
 use serde_json::Value;
 
 use crate::admin_writes::{json_like, take_utf16, utf16_len};
@@ -89,7 +88,7 @@ pub fn random_code_suffix(length: usize) -> String {
     let mut out = String::with_capacity(length);
     while out.len() < length {
         let mut byte = [0u8; 1];
-        rand::rngs::OsRng.fill_bytes(&mut byte);
+        getrandom::fill(&mut byte).expect("OS randomness");
         if let Some(symbol) = alphabet.get(usize::from(byte[0] & 31)) {
             out.push(char::from(*symbol));
         }

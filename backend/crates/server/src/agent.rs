@@ -1,10 +1,9 @@
 //! One task per running agent session, and the hub its feed listens on.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use once_cell::sync::Lazy;
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, watch, Notify};
 
@@ -34,7 +33,7 @@ pub struct Approval {
     pub answered: Arc<Notify>,
 }
 
-static LIVE: Lazy<Mutex<HashMap<String, Live>>> = Lazy::new(Mutex::default);
+static LIVE: LazyLock<Mutex<HashMap<String, Live>>> = LazyLock::new(Mutex::default);
 
 fn live() -> std::sync::MutexGuard<'static, HashMap<String, Live>> {
     LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())

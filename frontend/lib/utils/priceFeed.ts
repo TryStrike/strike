@@ -97,132 +97,28 @@ export type AssetType = keyof typeof PRICE_FEED_IDS;
 // Prices are fetched through our backend route (backend/crates/core/src/prices.rs).
 const PRICES_ENDPOINT = '/api/prices/latest';
 
-// Cache the last successful multi-asset snapshot so the UI can render even if the price API is slow.
-let lastAllPricesCache: Record<string, number> = {};
+/** The landing hero reads this for an instant first paint. Never fed back in as a live tick. */
 const PRICE_CACHE_STORAGE_KEY = 'strike_last_price_cache_v1';
 
-// Hydrate cache from localStorage (client-side only) to avoid long loader waits.
-if (typeof window !== 'undefined') {
-  try {
-    const raw = window.localStorage.getItem(PRICE_CACHE_STORAGE_KEY);
-    if (raw) lastAllPricesCache = JSON.parse(raw) as Record<string, number>;
-  } catch {
-    // Ignore cache errors and fall back to empty cache.
+/** Every asset's latest price. Throws on any failure: old prices must never pass as live ones. */
+async function fetchAllPrices(): Promise<Record<string, number>> {
+  // GET (all assets) so the response is cacheable across visitors.
+  const res = await fetch(PRICES_ENDPOINT, { signal: AbortSignal.timeout(6_000) });
+  if (!res.ok) throw new Error(`${PRICES_ENDPOINT} answered ${res.status}`);
+  const prices = ((await res.json()) as { prices?: Record<string, unknown> }).prices ?? {};
+  const results: Record<string, number> = {};
+  for (const sym of Object.keys(PRICE_FEED_IDS)) {
+    const px = Number(prices[sym]);
+    if (Number.isFinite(px) && px > 0) results[sym] = px;
   }
-}
-
-interface PriceData {
-  price: number;
-  confidence: number;
-  timestamp: number;
-  expo: number;
-  /** True only on fallback ticks (last-known / cached price re-stamped as "now").
-   *  Optional so existing consumers that ignore it keep working unchanged. */
-  stale?: boolean;
-}
-
-class PythPriceFeed {
-  private lastPrice: number | null = null;
-  private asset: AssetType;
-
-  constructor(asset: AssetType = 'BTC') {
-    this.asset = asset;
-  }
-
-  /**
-   * Fetch current price from the backend
-   */
-  async fetchPrice(): Promise<PriceData> {
+  if (Object.keys(results).length > 0) {
     try {
-      const endpoint =
-        typeof window === 'undefined'
-          ? `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}${PRICES_ENDPOINT}`
-          : PRICES_ENDPOINT;
-      const response = await fetch(`${endpoint}?asset=${encodeURIComponent(this.asset)}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const payload = await response.json();
-      const price = Number(payload?.prices?.[this.asset]);
-      if (!Number.isFinite(price) || price <= 0) {
-        throw new Error(`No price data received for ${this.asset}`);
-      }
-
-      this.lastPrice = price;
-
-      return {
-        price,
-        confidence: 0,
-        timestamp: Date.now() / 1000,
-        expo: -8
-      };
-    } catch (error) {
-      console.error(`Error fetching ${this.asset} price:`, error);
-      if (this.lastPrice !== null) {
-        return {
-          price: this.lastPrice,
-          confidence: 0,
-          timestamp: Date.now() / 1000,
-          expo: -8,
-          stale: true,
-        };
-      }
-      // Fallback to last-known multi-asset cache if available.
-      const cached = lastAllPricesCache[this.asset as string];
-      if (cached && cached > 0) {
-        return {
-          price: cached,
-          confidence: 0,
-          timestamp: Date.now() / 1000,
-          expo: -8,
-          stale: true,
-        };
-      }
-      throw error;
+      window.localStorage.setItem(PRICE_CACHE_STORAGE_KEY, JSON.stringify(results));
+    } catch {
+      // Private mode or quota: the cache is only a first-paint nicety.
     }
   }
-
-  static async fetchAllPrices(): Promise<Record<string, number>> {
-    const symbols = Object.keys(PRICE_FEED_IDS) as string[];
-    const results: Record<string, number> = {};
-
-    try {
-      const endpoint =
-        typeof window === 'undefined'
-          ? `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}${PRICES_ENDPOINT}`
-          : PRICES_ENDPOINT;
-      // GET (all assets) so the response is CDN-cacheable across visitors.
-      const response = await fetch(endpoint, { signal: AbortSignal.timeout(6_000) });
-      if (response.ok) {
-        const payload = await response.json();
-        const prices = payload?.prices || {};
-        for (const sym of symbols) {
-          const px = Number(prices[sym]);
-          if (Number.isFinite(px) && px > 0) results[sym] = px;
-        }
-      }
-
-    } catch (err) {
-      console.error('Error in fetchAllPrices:', err);
-      // If the fetch fails, return last known prices so the chart can render.
-      return lastAllPricesCache;
-    }
-
-    // Update cache when we have some data.
-    if (Object.keys(results).length > 0) {
-      lastAllPricesCache = { ...lastAllPricesCache, ...results };
-      if (typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem(PRICE_CACHE_STORAGE_KEY, JSON.stringify(lastAllPricesCache));
-        } catch {
-          // Ignore storage write failures (private mode, quota, etc.)
-        }
-      }
-    }
-
-    // If nothing returns, fall back to last known snapshot.
-    return Object.keys(results).length > 0 ? results : lastAllPricesCache;
-  }
+  return results;
 }
 
 export const startMultiPythPriceFeed = (
@@ -231,15 +127,20 @@ export const startMultiPythPriceFeed = (
   let isActive = true;
   /** Prevents overlapping batch calls (stacked requests → timeouts / canceled rows on mobile). */
   let inFlight = false;
+  let failing = false;
 
   const run = async () => {
     if (!isActive || inFlight) return;
     inFlight = true;
     try {
-      const prices = await PythPriceFeed.fetchAllPrices();
+      const prices = await fetchAllPrices();
+      if (failing) console.info('[prices] poll recovered');
+      failing = false;
       if (isActive) callback(prices);
-    } catch {
-      // fetchAllPrices already falls back to cache
+    } catch (err) {
+      // Logged once per outage, not once a second. The chart's stale badge covers the UI.
+      if (!failing) console.error('[prices] poll failed:', err);
+      failing = true;
     } finally {
       inFlight = false;
     }
@@ -254,9 +155,4 @@ export const startMultiPythPriceFeed = (
     isActive = false;
     clearInterval(intervalId);
   };
-};
-
-export const fetchPrice = async (asset: AssetType = 'BTC'): Promise<PriceData> => {
-  const feed = new PythPriceFeed(asset);
-  return await feed.fetchPrice();
 };

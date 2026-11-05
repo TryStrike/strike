@@ -76,7 +76,7 @@ async fn start_with(env: &[(&str, &str)]) -> Server {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("server did not start");
+    panic!("server did not start within 30s");
 }
 
 impl Server {

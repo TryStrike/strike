@@ -8,13 +8,12 @@
 
 export async function ensureBalanceSession(): Promise<void> {
   if (typeof window === 'undefined') return;
+  // Without this cookie every bet, deposit and withdrawal answers 401, so a failure is loud.
   try {
-    await fetch('/api/balance/session', {
-      method: 'POST',
-      credentials: 'include',
-    });
-  } catch {
-    // Non-fatal; user may retry on next navigation. Balance calls will 401 until cookie exists.
+    const res = await fetch('/api/balance/session', { method: 'POST', credentials: 'include' });
+    if (!res.ok) console.error(`[session] balance session mint answered ${res.status}`);
+  } catch (err) {
+    console.error('[session] balance session mint failed', err);
   }
 }
 

@@ -108,7 +108,9 @@ pub fn mint_balance_session_with(secret: Option<&str>) -> Option<String> {
     // An empty secret is falsy in the TS code, which mints nothing.
     let secret = secret.filter(|s| !s.is_empty())?;
     let exp = now_seconds() + SESSION_TTL_SECONDS;
-    let n = hex::encode(rand::random::<[u8; 16]>());
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).expect("OS randomness");
+    let n = hex::encode(nonce);
     let payload = URL_SAFE_NO_PAD.encode(
         serde_json::to_vec(&SessionPayload {
             v: SESSION_VERSION,

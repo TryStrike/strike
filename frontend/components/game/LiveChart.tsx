@@ -1,17 +1,21 @@
 'use client';
 
-import React, { useMemo, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { line, curveMonotoneX } from 'd3-shape';
 import { useStore } from '@/lib/store';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { AssetType } from '@/lib/utils/priceFeed';
-import { usePriceStream } from '@/lib/hooks/usePriceStream';
 import { motion, AnimatePresence } from 'framer-motion';
 import { playWinSound, playLoseSound } from '@/lib/utils/sounds';
 import { useToast } from '@/lib/hooks/useToast';
 import { CaretDown, X, MagnifyingGlass, Star, TrendUp, Waveform, ArrowsDownUp, Pulse } from '@phosphor-icons/react';
 
+
+/** React refresh rate for the chart; motion between renders runs at full frame rate. */
+const RENDER_MS = 100;
+/** How fast the tip catches up to a new tick. */
+const TIP_EASE_MS = 90;
 const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight';
 
 interface LiveChartProps {
@@ -177,7 +181,7 @@ const STOCK_DOMAIN_MAP: Record<string, string> = {
   CAC: 'euronext.com',           // CAC 40
 };
 
-// ── Y-domain math, pure and unit-tested ──────────────────────────────────────
+// ── Y-domain math, pure ─────────────────────────────────────────────────────
 // The "no jumping of graph on changing the token" rule: on an asset switch the
 // domain SNAPS to the new asset's own data; it never lerps from the previous
 // asset's domain, because two unrelated price domains have nothing to
@@ -193,8 +197,8 @@ export interface YDomainBounds {
 export function computeYDomainTarget(
   points: readonly { price: number }[],
   price: number,
+  tick: number,
   paddingFactor = 0.35,
-  minSpanFactor = 0.00002,
 ): YDomainBounds {
   let low = price;
   let high = price;
@@ -206,7 +210,9 @@ export function computeYDomainTarget(
   const padding = spread > 0 ? spread * paddingFactor : Math.max(price * 0.0002, 1e-8);
   let min = low - padding;
   let max = high + padding;
-  const minSpan = price * minSpanFactor;
+  // Floor: 3 bps of price or 20 price ticks, whichever is wider. A one-tick bounce
+  // must read as a wiggle, never as a full-height swing, and a box cell must span real ticks.
+  const minSpan = Math.max(price * 0.0003, tick * 20);
   if (max - min < minSpan) {
     const mid = (max + min) / 2;
     min = mid - minSpan / 2;
@@ -373,14 +379,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const lastResult = useStore((state) => state.lastResult);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
-  // Server-pushed ticks for the selected asset. They are fed into
-  // updateAllPrices — the exact ingest path the 1s poller already uses — so
-  // history appends, settlement, y-domain seeding on token switch, tip
-  // clamping and lastTickAt stall detection all behave identically, just
-  // earlier. When SSE cannot deliver (no EventSource, proxy stripping, silent
-  // stream), the hook transparently falls back to that same poller.
-  const updateAllPrices = useStore((state) => state.updateAllPrices);
-  const { mode: feedMode, connected: streamLive } = usePriceStream(selectedAsset, updateAllPrices);
+  // The app-wide feed (app/providers.tsx) fills the store; this only reads its state for the badge.
+  const { mode: feedMode, connected: streamLive } = useStore((state) => state.priceFeed);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -391,6 +391,26 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   // Settlement always uses the real store price.
   const [tip, setTip] = useState<{ asset: AssetType | null; price: number }>({ asset: null, price: 0 });
   const tipPrice = tip.asset === selectedAsset && tip.price > 0 ? tip.price : currentPrice;
+
+  // Motion. React re-renders the chart at RENDER_MS; between renders every time-positioned
+  // layer slides on a GPU transform at full frame rate, and the tip eases to each new tick.
+  const nowRef = useRef(now);
+  const ppsRef = useRef(0);
+  const reducedRef = useRef(false);
+  const tipPriceRef = useRef(tipPrice);
+  const easedTipRef = useRef(0);
+  const easedAssetRef = useRef(selectedAsset);
+  const lastPointRef = useRef<{ timestamp: number; price: number } | null>(null);
+  const tipGroupRef = useRef<SVGGElement>(null);
+  const tailRef = useRef<SVGLineElement>(null);
+  const scrollEls = useRef(new Set<HTMLElement | SVGElement>());
+  const scrollLayer = useCallback((el: HTMLElement | SVGElement | null) => {
+    if (!el) return;
+    scrollEls.current.add(el);
+    return () => {
+      scrollEls.current.delete(el);
+    };
+  }, []);
   const [isAssetDropdownOpen, setIsAssetDropdownOpen] = useState(false);
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
@@ -638,29 +658,53 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   // same condition that dims the chart line).
   const feedState = feedStalled ? 'stale' : feedMode === 'stream' && streamLive ? 'live' : 'polling';
 
-  // Animation Loop - Optimized for performance
+  // Writes the between-render motion straight to the DOM: no React work per frame.
+  const applyMotion = useCallback((dt: number) => {
+    const s = scalesRef.current;
+    if (!s) return;
+    const dx = reducedRef.current ? 0 : (-(Date.now() - nowRef.current) * ppsRef.current) / 1000;
+    for (const el of scrollEls.current) {
+      if (el instanceof SVGElement) el.setAttribute('transform', `translate(${dx},0)`);
+      else el.style.transform = `translate3d(${dx}px,0,0)`;
+    }
+    const target = tipPriceRef.current;
+    const eased = easedTipRef.current;
+    easedTipRef.current =
+      reducedRef.current || !eased || dt <= 0 ? target : eased + (target - eased) * (1 - Math.exp(-dt / TIP_EASE_MS));
+    const y = s.yScale(easedTipRef.current);
+    tipGroupRef.current?.setAttribute('transform', `translate(0,${y})`);
+    const tail = tailRef.current;
+    const last = lastPointRef.current;
+    if (tail) {
+      tail.setAttribute('x1', String(last ? s.xScale(last.timestamp) + dx : s.tipX));
+      tail.setAttribute('y1', String(last ? s.yScale(last.price) : y));
+      tail.setAttribute('x2', String(s.tipX));
+      tail.setAttribute('y2', String(y));
+    }
+  }, []);
+
   useEffect(() => {
+    reducedRef.current = prefersReducedMotion;
     if (prefersReducedMotion) {
-      // No decorative idle frames; only keep the time axis loosely accurate.
       const id = setInterval(() => setNow(Date.now()), 1000);
       return () => clearInterval(id);
     }
-    let frameId: number;
-    let lastTime = Date.now();
-
-    const animate = () => {
-      const currentTime = Date.now();
-      // Throttle the scrolling clock to ~15fps (64ms) for performance.
-      if (currentTime - lastTime > 64) {
-        setNow(currentTime);
-        lastTime = currentTime;
+    let frameId = 0;
+    let last = performance.now();
+    let lastRender = Date.now();
+    const animate = (t: number) => {
+      const wall = Date.now();
+      if (wall - lastRender >= RENDER_MS) {
+        lastRender = wall;
+        setNow(wall);
       }
-
+      applyMotion(t - last);
+      last = t;
       frameId = requestAnimationFrame(animate);
     };
     frameId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(frameId);
-  }, [prefersReducedMotion]);
+  }, [prefersReducedMotion, applyMotion]);
 
   // Configuration - Responsive + Timeframe
   const isMobile = dimensions.width < 640;
@@ -692,7 +736,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     for (const point of priceHistory) {
       if (point.timestamp >= cutoff) visiblePoints.push(point);
     }
-    let { min: targetMin, max: targetMax } = computeYDomainTarget(visiblePoints, currentPrice);
+    let { min: targetMin, max: targetMax } = computeYDomainTarget(visiblePoints, currentPrice, 10 ** -currentAssetConfig.decimals);
 
     const mobileZoomFactor = isMobile ? 0.75 : 1.0;
     if (mobileZoomFactor !== 1) {
@@ -734,10 +778,20 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const scalesRef = useRef(scales);
   const currentPriceRef = useRef(currentPrice);
 
-  useEffect(() => {
+  // Same commit as the new positions, so a render never shows one frame of stale offset.
+  useLayoutEffect(() => {
     scalesRef.current = scales;
     currentPriceRef.current = currentPrice;
-  }, [scales, currentPrice]);
+    nowRef.current = now;
+    ppsRef.current = pixelsPerSecond;
+    tipPriceRef.current = tipPrice;
+    // A new asset snaps; easing from the old asset's price would sweep across the chart.
+    if (easedAssetRef.current !== selectedAsset) {
+      easedAssetRef.current = selectedAsset;
+      easedTipRef.current = 0;
+    }
+    applyMotion(0);
+  });
 
 
 
@@ -948,16 +1002,9 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     // where the price actually changed lets the curve flow instead of stepping.
     const pointsToRender = visiblePoints.filter((p, i) => i === 0 || p.price !== visiblePoints[i - 1].price);
 
-    // Always include current live point (the latest real tick, snapped — no easing)
-    if (currentPrice > 0) {
-      // Store points are stamped Date.now() while `now` is the RAF clock; if a tick landed
-      // after the last RAF update the tip would go backwards in x and kink curveMonotoneX.
-      // Clamp the tip timestamp to strictly after the last rendered point.
-      const lastTs = pointsToRender.length > 0 ? pointsToRender[pointsToRender.length - 1].timestamp : 0;
-      pointsToRender.push({ timestamp: Math.max(now, lastTs + 16), price: tipPrice });
-    }
-
-    // Need at least 2 points for a line
+    // The path ends at the last real tick. The live tail from there to the eased tip dot
+    // is drawn every frame by applyMotion.
+    lastPointRef.current = pointsToRender.length > 0 ? pointsToRender[pointsToRender.length - 1] : null;
     if (pointsToRender.length < 2) return '';
 
     try {
@@ -971,7 +1018,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       console.error("Chart line generation error:", err);
       return '';
     }
-  }, [scales, priceHistory, currentPrice, now, tipPrice]);
+  }, [scales, priceHistory, currentPrice, now]);
 
 
   // TECHNICAL INDICATORS CALCULATION
@@ -1361,20 +1408,21 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       {/* Box Mode: Grid Cells layer */}
       {gameMode === 'box' && (
         <div className="absolute inset-0 z-5 overflow-hidden pointer-events-none">
+          <div ref={scrollLayer} className="absolute inset-0 will-change-transform">
           {betCells.map((cell: any) => {
             // Visual styling based on status
             let opacity = 0.9;
             let canBet = cell.status === 'future';
             let tone = cell.isBlitzBoosted
               ? 'bg-down-soft border-down/30 text-down'
-              : 'bg-white border-line text-faint hover:bg-up-soft hover:text-up';
+              : 'bg-white border-line text-faint';
 
             if (cell.status === 'won') {
               return (
                 <div
                   key={cell.id}
                   className="absolute flex items-center justify-center bg-up pointer-events-none"
-                  style={{ left: cell.x, top: cell.y, width: cell.width, height: cell.height }}
+                  style={{ left: 0, top: 0, transform: `translate3d(${cell.x}px,${cell.y}px,0)`, width: cell.width, height: cell.height }}
                 >
                   <span className="font-jet text-[10px] font-medium text-white">
                     {cell.multiplier}x
@@ -1387,7 +1435,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 <div
                   key={cell.id}
                   className="absolute border-b border-r border-line bg-white pointer-events-none"
-                  style={{ left: cell.x, top: cell.y, width: cell.width, height: cell.height }}
+                  style={{ left: 0, top: 0, transform: `translate3d(${cell.x}px,${cell.y}px,0)`, width: cell.width, height: cell.height }}
                 />
               );
             } else if (cell.status === 'active') {
@@ -1444,10 +1492,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
               <div
                 key={cell.id}
                 onClick={handleClick}
-                className={`absolute border-b border-r flex items-center justify-center transition-colors duration-150 ${tone} ${canBet ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                className={`absolute border-b border-r flex items-center justify-center ${tone} ${canBet ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
                 style={{
-                  left: cell.x,
-                  top: cell.y,
+                  left: 0,
+                  top: 0,
+                  transform: `translate3d(${cell.x}px,${cell.y}px,0)`,
                   width: cell.width,
                   height: cell.height,
                   opacity
@@ -1474,6 +1523,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             );
 
           })}
+          </div>
         </div>
       )}
 
@@ -1576,6 +1626,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
           {/* Active draw bet rectangles */}
           <svg className="absolute inset-0 w-full h-full z-20 pointer-events-none" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}>
+            <g ref={scrollLayer}>
             {activeBets
               .filter((bet: any) =>
                 bet.mode === 'draw' &&
@@ -1628,12 +1679,14 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   </g>
                 );
               })}
+            </g>
           </svg>
         </>
       )}
 
       {/* Classic mode: Active Bets SVG Overlay - Strike and Expiration lines */}
       <svg className="absolute inset-0 w-full h-full z-20 pointer-events-none">
+        <g ref={scrollLayer}>
         {gameMode === 'binomo' && scales && activeBets.map((bet: any) => {
           if (bet.status !== 'active') return null;
 
@@ -1699,6 +1752,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             </g>
           );
         })}
+        </g>
       </svg>
 
       {/* SVG Layer for Chart - ON TOP (no asset-switch remount: the switch re-seeds
@@ -1732,8 +1786,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
               })}
             </g>
 
-            {/* X-Axis Time Ticks */}
-            <g className="x-axis">
+            {/* X-Axis Time Ticks: anchored to wall-clock times so they scroll with the chart */}
+            <g className="x-axis" ref={scrollLayer}>
               {(() => {
                 // Dynamic tick interval based on pixelsPerSecond
                 // We want at least 120px between time labels to prevent overlap
@@ -1750,20 +1804,18 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 const secondsPast = scales.tipX / pixelsPerSecond;
                 const secondsFuture = (dimensions.width - scales.tipX) / pixelsPerSecond;
 
-                const startSec = Math.floor(-secondsPast / tickInterval) * tickInterval;
-                const endSec = Math.ceil(secondsFuture / tickInterval) * tickInterval;
+                const stepMs = tickInterval * 1000;
+                const first = Math.floor((now - secondsPast * 1000) / stepMs) * stepMs;
+                const lastTs = now + (secondsFuture + tickInterval) * 1000;
 
-                const ticks = [];
-                for (let s = startSec; s <= endSec; s += tickInterval) {
-                  ticks.push(s);
-                }
+                const ticks: number[] = [];
+                for (let ts = first; ts <= lastTs; ts += stepMs) ticks.push(ts);
 
-                return ticks.map((sec) => {
-                  const ts = now + sec * 1000;
+                return ticks.map((ts) => {
                   const x = scales.xScale(ts);
-                  if (x < 0 || x > dimensions.width) return null;
+                  if (x < -120 || x > dimensions.width + 120) return null;
                   return (
-                    <g key={`x-tick-${sec}`}>
+                    <g key={`x-tick-${ts}`}>
                       <line x1={x} y1={0} x2={x} y2={dimensions.height} stroke="var(--ink)" strokeOpacity="0.05" strokeWidth="1" />
                       <text
                         x={x + 5}
@@ -1780,22 +1832,28 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
               })()}
             </g>
 
-            {chartPath && currentPrice > 0 && (
+            {currentPrice > 0 && (
               <>
                 {/* Main line — dimmed (opacity only, no layout shift) while the feed is stalled */}
-                <path
-                  d={chartPath}
-                  fill="none"
+                <g
+                  ref={scrollLayer}
+                  opacity={feedStalled ? 0.35 : 1}
+                  style={{ transition: 'opacity 0.4s ease' }}
+                >
+                  {chartPath && (
+                    <path d={chartPath} fill="none" stroke="var(--up)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  )}
+                </g>
+                <line
+                  ref={tailRef}
                   stroke="var(--up)"
                   strokeWidth="2"
                   strokeLinecap="round"
-                  strokeLinejoin="round"
                   opacity={feedStalled ? 0.35 : 1}
-                  style={{ transition: 'opacity 0.4s ease' }}
                 />
 
-                {/* Current price: dashed guide, tip dot, right-axis tag */}
-                <g transform={`translate(0, ${scales.yScale(tipPrice)})`}>
+                {/* Current price: dashed guide, tip dot, right-axis tag. Positioned by applyMotion. */}
+                <g ref={tipGroupRef}>
                   <line
                     x1={0}
                     y1={0}
@@ -1822,7 +1880,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
                 {/* TECHNICAL INDICATORS RENDER */}
                 {indicatorPaths && (
-                  <g className="indicators-layer">
+                  <g className="indicators-layer" ref={scrollLayer}>
                     {/* Moving Average */}
                     {activeIndicators['ma'] && indicatorPaths.ma && (
                       <path

@@ -9,18 +9,16 @@ license = "MIT"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws", "macros", "query"] }
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
+axum = { version = "0.8", features = ["macros", "query"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
 rusqlite = { version = "0.37", features = ["bundled", "functions", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde-with-float"] }
-rust_decimal_macros = "1"
 hmac = "0.12"
 sha2 = "0.10"
-rand = "0.8"
+getrandom = "0.4"
 hex = "0.4"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -31,12 +29,16 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
-secrecy = "0.10"
-axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
-headers = "0.4"
 once_cell = "1"
 futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 strike-core = { path = "crates/core" }
 
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
