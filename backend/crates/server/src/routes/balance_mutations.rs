@@ -527,12 +527,8 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
     }
 
     // From here a tx hash is burned: every exit either credits it or releases it.
-    // Tiered platform/protocol fee — move the fee portion from the treasury to
-    // the dedicated collector wallet. A failure here must NOT block the user's
-    // deposit, so it is logged and the deposit proceeds without a fee tx.
-    let fee_tx = collect_platform_fee(&currency, fee_amount).await;
-    let combined_tx_hash =
-        ledger::combined_tx_hash(&Value::String(tx_hash.clone()), fee_tx.as_deref());
+    // The fee stays in the treasury; it is only booked, never sent anywhere.
+    let combined_tx_hash = tx_hash.clone();
 
     // Credit only into the address the on-chain Transfer was attributed to.
     let user_key = address::canonical(if verification.payer_address.is_empty() {
@@ -604,52 +600,6 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
         net_deposit_amount.to_f64().unwrap_or(f64::NAN),
         &iso_ms(now_ms()),
     ))
-}
-
-/// `collectPlatformFeeFromTreasury`: the treasury -> collector-wallet transfer for
-/// `fee_amount`. `None` is the TS `null` (no fee, no configured wallet, or a
-/// transfer that threw) and never blocks the deposit.
-async fn collect_platform_fee(currency: &str, fee_amount: Decimal) -> Option<String> {
-    let fee_units = ledger::floor_to_token(fee_amount);
-    if fee_units <= Decimal::ZERO {
-        return None;
-    }
-    // `getPlatformFeeWalletAddress`: only USDC has a collector wallet. Every
-    // failure below is logged and swallowed: the fee is the platform's cut, and
-    // losing it must never cost a player their deposit.
-    let fee_wallet = if currency == "USDC" {
-        config().platform_fee_wallet.clone()
-    } else {
-        None
-    };
-    let Some(fee_wallet) = fee_wallet else {
-        tracing::warn!(
-            "[platformFee] Fee wallet not configured for {currency}. Skipping fee collection."
-        );
-        return None;
-    };
-
-    let treasury = match eth::Treasury::from_config() {
-        Ok(treasury) => treasury,
-        Err(err) => {
-            tracing::error!("[deposit] Fee collection failed (non-blocking): {err}");
-            return None;
-        }
-    };
-    let value = match eth::parse_units(&fee_units.to_string(), ledger::USDC_DECIMALS) {
-        Ok(value) => value,
-        Err(err) => {
-            tracing::error!("[deposit] Fee collection failed (non-blocking): {err}");
-            return None;
-        }
-    };
-    match treasury.withdraw_token_to(&fee_wallet, value).await {
-        Ok(hash) => Some(hash),
-        Err(err) => {
-            tracing::error!("[deposit] Fee collection failed (non-blocking): {err}");
-            None
-        }
-    }
 }
 
 /// The `operation_type='platform_fee'` audit row. Its hash is derived from the

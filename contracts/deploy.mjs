@@ -94,8 +94,9 @@ async function main() {
     `0x${artifact.evm.bytecode.object}`,
     wallet
   );
+  const owner = process.env.ARC_OWNER_ADDRESS || wallet.address;
   const operator = process.env.ARC_OPERATOR_ADDRESS || wallet.address;
-  const treasury = await factory.deploy(net.usdc, net.eurc, net.tokenMessenger, operator);
+  const treasury = await factory.deploy(net.usdc, net.eurc, net.tokenMessenger, owner, operator);
   console.log(`\nDeploying… tx ${treasury.deploymentTransaction().hash}`);
   await treasury.waitForDeployment();
 
@@ -111,7 +112,7 @@ async function main() {
     usdc: net.usdc,
     eurc: net.eurc,
     tokenMessenger: net.tokenMessenger,
-    owner: wallet.address,
+    owner,
     operator,
     txHash: receipt.hash,
     gasUsed: receipt.gasUsed.toString(),

@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, routing::post, Json, Router};
 use strike_core::error::ApiError;
-use strike_core::eth::{PayError, Rpc, Sent, Transfer, Treasury};
+use strike_core::eth::{reference, PayError, Rpc, Sent, Transfer, Treasury};
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 
@@ -171,6 +171,7 @@ fn pay_to(amount: u128) -> Vec<Transfer> {
     vec![Transfer {
         to: PLAYER.to_string(),
         amount,
+        reference: reference(1),
     }]
 }
 
@@ -392,9 +393,12 @@ async fn dropping_the_request_cannot_stop_a_send_halfway() {
 #[tokio::test]
 async fn a_reverted_payout_is_a_failure() {
     let (chain, treasury) = start(1_000).await;
-    assert!(treasury.withdraw_token_to(PLAYER, 10).await.is_ok());
+    let commits = Arc::default();
+    let (_, sent) = pay(&treasury, pay_to(10), &commits).await.unwrap();
+    assert!(treasury.confirm(&sent[0]).await.is_ok());
     chain.lock().unwrap().reverts = true;
-    let err: ApiError = treasury.withdraw_token_to(PLAYER, 10).await.unwrap_err();
+    let (_, sent) = pay(&treasury, pay_to(10), &commits).await.unwrap();
+    let err: ApiError = treasury.confirm(&sent[0]).await.unwrap_err();
     assert!(err.to_string().contains("reverted"));
 }
 

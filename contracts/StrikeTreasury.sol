@@ -20,7 +20,7 @@ interface ITokenMessengerV2 {
 }
 
 /**
- * @title StrikeTreasury v2
+ * @title StrikeTreasury
  * @notice House treasury for Strike binary options on Arc, settling in USDC or EURC.
  *
  * Deposits are plain token transfers to this address. The backend credits them
@@ -94,16 +94,18 @@ contract StrikeTreasury {
         _;
     }
 
-    constructor(address usdc_, address eurc_, address tokenMessenger_, address operator_) {
-        if (usdc_ == address(0) || eurc_ == address(0) || tokenMessenger_ == address(0) || operator_ == address(0)) {
-            revert ZeroAddress();
-        }
-        owner = msg.sender;
+    /// The owner is passed in, not taken from the deployer, so a shared deploy wallet never owns it.
+    constructor(address usdc_, address eurc_, address tokenMessenger_, address owner_, address operator_) {
+        if (
+            usdc_ == address(0) || eurc_ == address(0) || tokenMessenger_ == address(0) || owner_ == address(0)
+                || operator_ == address(0)
+        ) revert ZeroAddress();
+        owner = owner_;
         operator = operator_;
         usdc = IERC20(usdc_);
         eurc = IERC20(eurc_);
         tokenMessenger = ITokenMessengerV2(tokenMessenger_);
-        emit OwnershipTransferred(address(0), msg.sender);
+        emit OwnershipTransferred(address(0), owner_);
         emit OperatorSet(operator_);
     }
 

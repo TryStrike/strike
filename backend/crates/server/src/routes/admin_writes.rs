@@ -558,7 +558,7 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
     let Some(gross) = exact_amount(amount) else {
         return Ok(error(StatusCode::BAD_REQUEST, "Invalid withdrawal amount"));
     };
-    let (fee_amount, net_amount) = match plan_payout(&currency, gross, fee_from_request) {
+    let (_, net_amount) = match plan_payout(&currency, gross, fee_from_request) {
         Ok(plan) => plan,
         Err(message) => return Ok(error(StatusCode::BAD_REQUEST, message)),
     };
@@ -572,37 +572,16 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
             ));
         }
     };
-    let fee_wallet = config()
-        .platform_fee_wallet
-        .as_deref()
-        .filter(|w| !w.trim().is_empty());
-    let fee_base = match (fee_amount > Decimal::ZERO, fee_wallet) {
-        (true, Some(_)) => base_units(fee_amount),
-        _ => Ok(0),
+    let net_base = match base_units(net_amount) {
+        Ok(net) => net,
+        Err(err) => return Ok(error(StatusCode::BAD_REQUEST, err.to_string())),
     };
-    let (fee_base, net_base) = match (fee_base, base_units(net_amount)) {
-        (Ok(fee), Ok(net)) => (fee, net),
-        (Err(err), _) | (_, Err(err)) => {
-            return Ok(error(StatusCode::BAD_REQUEST, err.to_string()))
-        }
-    };
-    // The fee goes first, as the TS sent it.
-    let mut transfers = Vec::with_capacity(2);
-    if let Some(wallet) = fee_wallet.filter(|_| fee_base > 0) {
-        transfers.push(Transfer {
-            to: wallet.to_string(),
-            amount: fee_base,
-        });
-    } else if fee_amount > Decimal::ZERO {
-        tracing::warn!(
-            "[platformFee] Fee wallet not configured for USDC. Skipping fee collection."
-        );
-    }
-    let has_fee = transfers.len() == 1;
-    transfers.push(Transfer {
+    // The fee stays in the treasury: only the net amount leaves, tagged with the request id.
+    let transfers = vec![Transfer {
         to: user_address.clone(),
         amount: net_base,
-    });
+        reference: eth::reference(id as u64),
+    }];
 
     // One turn of the treasury queue: reads, then claim and debit in one commit,
     // then the broadcasts. Exactly one concurrent accept gets `Debited`, and only
@@ -672,16 +651,13 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
         mark_needs_reconciliation(id, &format!("chain_payout_error:sent={hashes:?}: {err}")).await;
         return Ok(payout_parked());
     }
-    // Fee and net share one withdrawBatch transaction.
     let combined = hashes[0].to_string();
-    let fee_tx_hash = has_fee.then(|| combined.clone());
 
-    let finalize_failure =
-        match withdrawals::finalize(db::db().await?, id, combined, fee_tx_hash).await {
-            Ok(true) => None,
-            Ok(false) => Some("row no longer accepted".to_string()),
-            Err(err) => Some(err.to_string()),
-        };
+    let finalize_failure = match withdrawals::finalize(db::db().await?, id, combined, None).await {
+        Ok(true) => None,
+        Ok(false) => Some("row no longer accepted".to_string()),
+        Err(err) => Some(err.to_string()),
+    };
     if let Some(reason) = finalize_failure {
         mark_needs_reconciliation(id, &format!("tx_hash_writeback_failed:{reason}")).await;
         return Ok(error(

@@ -4,7 +4,6 @@
 //! Deliberately avoids a full Ethereum SDK: the surface the backend needs is
 //! six RPC methods, one log topic, and one transaction type.
 
-use std::convert::Infallible;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -653,28 +652,52 @@ pub async fn verify_deposit(
 // treasury payouts
 // ---------------------------------------------------------------------------
 
-/// `withdrawBatch(address[],uint256[])` calldata: two dynamic arrays, head offsets first.
-fn withdraw_batch_call_data(transfers: &[Transfer]) -> String {
-    let word = |value: u128| {
-        let mut w = [0u8; 32];
-        w[16..].copy_from_slice(&value.to_be_bytes());
-        w
-    };
-    let n = transfers.len() as u128;
-    let mut data = selector("withdrawBatch(address[],uint256[])").to_vec();
-    data.extend_from_slice(&word(0x40));
-    data.extend_from_slice(&word(0x40 + 0x20 * (n + 1)));
-    data.extend_from_slice(&word(n));
-    for t in transfers {
-        // `prepare` has already checked every address is 20 bytes.
-        data.extend_from_slice(&[0u8; 12]);
-        data.extend_from_slice(
-            &hex::decode(t.to.strip_prefix("0x").unwrap_or(&t.to)).unwrap_or_default(),
-        );
+fn word_u128(value: u128) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[16..].copy_from_slice(&value.to_be_bytes());
+    w
+}
+
+/// An address the caller has already checked is 20 bytes, as an ABI word.
+fn word_address(address: &str) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    let bytes = hex::decode(address.strip_prefix("0x").unwrap_or(address)).unwrap_or_default();
+    w[32 - bytes.len()..].copy_from_slice(&bytes);
+    w
+}
+
+/// `payout(address,address,uint256,bytes32)` for one recipient, otherwise
+/// `payoutBatch(address,address[],uint256[],bytes32[])`: one transaction either way.
+fn payout_call_data(token: &str, transfers: &[Transfer]) -> String {
+    let mut data = Vec::new();
+    if let [only] = transfers {
+        data.extend_from_slice(&selector("payout(address,address,uint256,bytes32)"));
+        data.extend_from_slice(&word_address(token));
+        data.extend_from_slice(&word_address(&only.to));
+        data.extend_from_slice(&word_u128(only.amount));
+        data.extend_from_slice(&only.reference);
+        return format!("0x{}", hex::encode(data));
     }
-    data.extend_from_slice(&word(n));
+    let n = transfers.len() as u128;
+    let array_len = 0x20 * (n + 1);
+    data.extend_from_slice(&selector(
+        "payoutBatch(address,address[],uint256[],bytes32[])",
+    ));
+    data.extend_from_slice(&word_address(token));
+    data.extend_from_slice(&word_u128(0x80));
+    data.extend_from_slice(&word_u128(0x80 + array_len));
+    data.extend_from_slice(&word_u128(0x80 + 2 * array_len));
+    data.extend_from_slice(&word_u128(n));
     for t in transfers {
-        data.extend_from_slice(&word(t.amount));
+        data.extend_from_slice(&word_address(&t.to));
+    }
+    data.extend_from_slice(&word_u128(n));
+    for t in transfers {
+        data.extend_from_slice(&word_u128(t.amount));
+    }
+    data.extend_from_slice(&word_u128(n));
+    for t in transfers {
+        data.extend_from_slice(&t.reference);
     }
     format!("0x{}", hex::encode(data))
 }
@@ -684,6 +707,15 @@ fn withdraw_batch_call_data(transfers: &[Transfer]) -> String {
 pub struct Transfer {
     pub to: String,
     pub amount: u128,
+    /// Bet or withdrawal id, emitted in the `Payout` event for reconciliation.
+    pub reference: [u8; 32],
+}
+
+/// A numeric id as the 32-byte `ref` the treasury emits.
+pub fn reference(id: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..].copy_from_slice(&id.to_be_bytes());
+    word
 }
 
 /// A broadcast transfer: `Treasury::confirm` finishes it.
@@ -772,34 +804,21 @@ impl Treasury {
         &self.address
     }
 
-    fn call_data_with_uint(selector_bytes: [u8; 4], to: &str, amount: u128) -> String {
-        let mut data = Vec::with_capacity(68);
-        data.extend_from_slice(&selector_bytes);
-        // address argument: 32-byte left-padded word
-        let addr_hex = to.strip_prefix("0x").unwrap_or(to).to_lowercase();
-        data.extend_from_slice(&[0u8; 12]);
-        data.extend_from_slice(&hex::decode(addr_hex).unwrap_or_default());
-        // uint256 argument: a u128 is 16 bytes, the ABI word is 32.
-        data.extend_from_slice(&[0u8; 16]);
-        data.extend_from_slice(&amount.to_be_bytes());
-        format!("0x{}", hex::encode(data))
-    }
-
     /// Reads `owner()` from the treasury and checks it is our signer, so a key
     /// mismatch fails before any gas is spent.
-    pub async fn assert_owner_matches(&self) -> ApiResult<()> {
-        let data = format!("0x{}", hex::encode(selector("owner()")));
+    pub async fn assert_operator_matches(&self) -> ApiResult<()> {
+        let data = format!("0x{}", hex::encode(selector("operator()")));
         let raw = self.rpc.eth_call(&self.contract, &data).await?;
         let hex = raw.strip_prefix("0x").unwrap_or(&raw);
-        let owner = if hex.len() >= 40 {
+        let operator = if hex.len() >= 40 {
             to_checksum(&format!("0x{}", &hex[hex.len() - 40..]))
         } else {
             String::new()
         };
-        if canonical(&owner) != canonical(&self.address) {
+        if canonical(&operator) != canonical(&self.address) {
             return Err(ApiError::unavailable(format!(
-                "ARC_TREASURY_SECRET_KEY ({}) is not the StrikeTreasury owner ({})",
-                self.address, owner
+                "ARC_TREASURY_SECRET_KEY ({}) is not the StrikeTreasury operator ({})",
+                self.address, operator
             )));
         }
         Ok(())
@@ -919,7 +938,7 @@ impl Treasury {
             }
             total += transfer.amount;
         }
-        self.assert_owner_matches().await?;
+        self.assert_operator_matches().await?;
         if self.treasury_token_balance().await? < total {
             return Err(ApiError::unavailable(
                 "Treasury has insufficient USDC for this withdrawal",
@@ -946,17 +965,8 @@ impl Treasury {
         // max fee; keeping max_fee at 2x base is the standard safe guess.
         let (max_fee, priority_fee) = (gas_price * 2, gas_price / 10);
 
-        // One transaction however many recipients: a fee and its net payout land
-        // together or not at all, on one nonce.
-        let data = if let [only] = transfers {
-            Self::call_data_with_uint(
-                selector("withdrawTokenTo(address,uint256)"),
-                &only.to,
-                only.amount,
-            )
-        } else {
-            withdraw_batch_call_data(transfers)
-        };
+        // One transaction however many recipients, on one nonce.
+        let data = payout_call_data(&self.usdc, transfers);
         let estimate = json!([{
             "from": self.address,
             "to": self.contract,
@@ -1008,29 +1018,6 @@ impl Treasury {
             )));
         }
         Ok(())
-    }
-
-    /// Pays `amount` base units out of the treasury via
-    /// `withdrawTokenTo(address,uint256)`, with no ledger step, and returns the
-    /// mined tx hash.
-    pub async fn withdraw_token_to(&self, to: &str, amount: u128) -> ApiResult<String> {
-        let transfer = Transfer {
-            to: to.to_string(),
-            amount,
-        };
-        let no_commit = || async { Ok::<(), Infallible>(()) };
-        let ((), mut sent) = self
-            .pay(vec![transfer], no_commit)
-            .await
-            .map_err(|failure| match failure {
-                PayError::Preflight(error) | PayError::Send { error, .. } => ApiError::Other(error),
-                PayError::Refused(never) => match never {},
-            })?;
-        let sent = sent
-            .pop()
-            .ok_or_else(|| ApiError::Other("treasury sent nothing".to_string()))?;
-        self.confirm(&sent).await?;
-        Ok(sent.hash)
     }
 }
 
@@ -1130,34 +1117,33 @@ mod tests {
     }
 
     #[test]
-    fn payout_calldata_is_two_full_abi_words() {
-        let data = Treasury::call_data_with_uint(
-            selector("withdrawTokenTo(address,uint256)"),
-            "0xb46b14d5da2438a7821b141722cd25cd7ff1e225",
-            450_000,
+    fn payout_calldata_matches_ethers() {
+        let usdc = "0x3600000000000000000000000000000000000000";
+        let one = [Transfer {
+            to: "0xb46b14d5da2438a7821b141722cd25cd7ff1e225".into(),
+            amount: 450_000,
+            reference: reference(42),
+        }];
+        assert_eq!(
+            payout_call_data(usdc, &one),
+            "0xfbd15a3c0000000000000000000000003600000000000000000000000000000000000000000000000000000000000000b46b14d5da2438a7821b141722cd25cd7ff1e225000000000000000000000000000000000000000000000000000000000006ddd0000000000000000000000000000000000000000000000000000000000000002a"
         );
-        assert_eq!(data.len(), 2 + 2 * (4 + 32 + 32));
-        assert!(data.ends_with(
-            "000000000000000000000000b46b14d5da2438a7821b141722cd25cd7ff1e225\
-             000000000000000000000000000000000000000000000000000000000006ddd0"
-        ));
-    }
-
-    #[test]
-    fn withdraw_batch_calldata_matches_ethers() {
-        // ethers Interface.encodeFunctionData("withdrawBatch", [[0x…aa, 0x…bb], [1, 9]])
-        let expected = "0xcb94aa26000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000000000000000000000000000000000000000000000000000bb000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000009";
-        let transfers = [
+        let two = [
             Transfer {
                 to: "0x00000000000000000000000000000000000000aa".into(),
                 amount: 1,
+                reference: reference(7),
             },
             Transfer {
                 to: "0x00000000000000000000000000000000000000bb".into(),
                 amount: 9,
+                reference: reference(8),
             },
         ];
-        assert_eq!(withdraw_batch_call_data(&transfers), expected);
+        assert_eq!(
+            payout_call_data(usdc, &two),
+            "0x47e281a80000000000000000000000003600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000140000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000000000000000000000000000000000000000000000000000bb000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000008"
+        );
     }
 
     #[test]

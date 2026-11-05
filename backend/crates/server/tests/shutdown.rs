@@ -20,7 +20,6 @@ use serde_json::{json, Value};
 const PASSWORD: &str = "shutdown-test-password";
 const SECRET: &str = "shutdown-test-secret";
 const TREASURY: &str = "0x00000000000000000000000000000000000000c0";
-const FEE_WALLET: &str = "0x00000000000000000000000000000000000000fe";
 const USDC: &str = "0x3600000000000000000000000000000000000000";
 const DEPOSIT_TX: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const UNIT: i64 = 10_000_000_000;
@@ -161,7 +160,6 @@ async fn start() -> Server {
         .env("NEXT_PUBLIC_ARC_RPC_ENDPOINT", rpc_url)
         .env("NEXT_PUBLIC_TREASURY_ADDRESS", TREASURY)
         .env("NEXT_PUBLIC_ARC_USDC_ADDRESS", USDC)
-        .env("NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC", FEE_WALLET)
         .env(
             "ARC_TREASURY_SECRET_KEY",
             format!("0x{}", hex::encode([7u8; 32])),
@@ -397,30 +395,28 @@ async fn sigterm_waits_for_a_payout_nobody_is_listening_to() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hung_up_deposit_is_still_credited_after_a_slow_fee_transfer() {
+async fn a_deposit_credits_without_waiting_on_any_treasury_transfer() {
     let s = start().await;
-    let hung_up = s
+    // The node stays slow: any treasury broadcast would never get a receipt.
+    let res = s
         .http
         .post(format!("{}/api/balance/deposit", s.url))
         .bearer_auth(SECRET)
-        .timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(5))
         .json(&json!({
             "userAddress": s.node.player, "amount": 10, "currency": "USDC", "txHash": DEPOSIT_TX,
         }))
         .send()
-        .await;
-    assert!(hung_up.unwrap_err().is_timeout());
-    let credited = || -> i64 {
-        s.db()
-            .query_row(
-                "SELECT count(*) FROM user_balances WHERE balance > 0",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
-    };
-    assert_eq!(credited(), 0, "still waiting on the fee transfer");
-
-    s.node.pending.store(false, Ordering::SeqCst);
-    eventually("the deposit is credited", || credited() == 1).await;
+        .await
+        .expect("a deposit must not wait on the chain");
+    assert!(res.status().is_success(), "{}", res.status());
+    let credited: i64 = s
+        .db()
+        .query_row(
+            "SELECT count(*) FROM user_balances WHERE balance > 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(credited, 1);
 }
