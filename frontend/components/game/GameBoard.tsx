@@ -50,7 +50,7 @@ export const GameBoard: React.FC = () => {
   const [selectedDuration, setSelectedDuration] = useState<number>(5);
   const ticket = useCopilotView((s) => s.ticket);
   const clearTicket = useCopilotView((s) => s.clearTicket);
-  const [filledFrom, setFilledFrom] = useState(ticket);
+  const [filledFrom, setFilledFrom] = useState<typeof ticket>(null);
   if (ticket && ticket !== filledFrom) {
     setFilledFrom(ticket);
     setBetAmount(String(ticket.amount));
