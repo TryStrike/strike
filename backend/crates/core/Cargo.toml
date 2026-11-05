@@ -1,0 +1,32 @@
+[package]
+name = "strike-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+rand.workspace = true
+hex.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+k256.workspace = true
+tiny-keccak.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+dotenvy.workspace = true
+once_cell.workspace = true
+futures.workspace = true
+secrecy.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

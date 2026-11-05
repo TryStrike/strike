@@ -1,0 +1,19 @@
+{
+  "secrets": {
+    "internal": "parity-internal-secret",
+    "settlement": "parity-settlement-secret",
+    "dashboard": "parity-dashboard-password"
+  },
+  "adminTtlSeconds": 2592000,
+  "typescript": {
+    "session": "eyJ2IjoxLCJleHAiOjE3OTU5NzEzNzYsIm4iOiIwMjkyMDhiM2M5ZGQ2ZTI3YzJhY2NlYTM5MzBkY2QxMCJ9.SPTb3GtZa5kWubwxJayzaESZKdAZvQPwoRAxmcroMgk",
+    "settlement": "eyJiZXRJZCI6ImJldC1wYXJpdHktMSIsInVzZXJBZGRyZXNzIjoiMHgxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwiY3VycmVuY3kiOiJVU0RDIiwibWF4UGF5b3V0Ijo3LjI1LCJpYXQiOjE3OTMzNzkzNzYsImV4cCI6MTc5NTk3MTM3Nn0.2JL-sVv2D8vQXaryVioMqDY3snhV5WBWpZ6rgC2eLLE",
+    "admin": "eyJpYXQiOjE3OTMzNzkzNzYsInNpZyI6Ijk4YTdhOTBiZWEwMzI3MGQ1OWJlZTQ2NjQ3MjVmNmUxN2RmYmZmN2RkZGRlNGQ0NTlkYmM4YzlmNTUxMGFjYjEifQ"
+  },
+  "expected": {
+    "betId": "bet-parity-1",
+    "userAddress": "0x1111111111111111111111111111111111111111",
+    "currency": "USDC",
+    "maxPayout": 7.25
+  }
+}

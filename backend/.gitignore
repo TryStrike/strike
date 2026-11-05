@@ -1,0 +1,5 @@
+/target
+
+# Written by `cargo run -p strike-core --example parity_mint` and consumed by
+# the verifier straight after; vectors.json is the committed half of the pair.
+/parity/rust-tokens.json
