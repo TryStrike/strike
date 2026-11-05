@@ -1,28 +1,5 @@
 'use client';
 
-/**
- * /history — the player's settled-round ledger.
- *
- * The URL query string is the single source of truth for the view: filters,
- * page size and offset all live there, so a reload, a shared link or the
- * browser back button reproduces exactly the same page. Control edits land in
- * a local draft first and are written to the URL through a short debounce;
- * the fetch below is driven purely by the *committed* URL, never the draft,
- * so typing never fires a request per keystroke.
- *
- * Paging is server-side offset paging: the page/offset go to
- * GET /api/bets/history and the response's own `total` (PostgREST exact count)
- * and `hasMore` drive the pager — nothing is sliced out of a big client-side
- * array. Everything here is read-only: the only path to `bet_history` from
- * the browser is that route (plus the per-round GET /api/bets/<id> proof),
- * and every request is bounded by the server's limit/offset caps. CSV export
- * walks at most HISTORY_EXPORT_CAP rows, in bounded pages.
- *
- * Failure taxonomy (see components/history/historyFeed): 401 → an
- * "authorise this session" state, 400 → a "filters were rejected" state,
- * 5xx/network → a retryable "could not read the ledger" state, and ONLY a
- * successful empty page renders the empty state.
- */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -82,7 +59,6 @@ import {
   type BetHistoryRow,
 } from '@/lib/store/historySlice';
 
-/** A successfully loaded page, tagged with the wallet + URL it answers. */
 interface LoadedPage {
   wallet: string;
   urlKey: string;
@@ -96,7 +72,6 @@ interface ShownError {
   message: string;
 }
 
-/** Everything below is keyed by "wallet + URL + retry" — one identity per query. */
 interface FeedState {
   key: string;
   status: 'idle' | 'loading' | 'ready' | 'error';
@@ -116,20 +91,14 @@ function HistoryPageInner() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  // The committed view = what the URL says. The fetch only ever follows it.
   const urlView = useMemo<HistoryView>(
     () => parseHistoryView(searchParams ?? new URLSearchParams()),
     [searchParams]
   );
   const urlKey = searchParams?.toString() ?? '';
 
-  // Controls edit a draft; the draft is written to the URL behind a short
-  // debounce (see the effect below), and the fetch follows only the *URL*.
   const [draft, setDraft] = useState<HistoryView>(urlView);
 
-  // The URL moved underneath us (commit landed, back/forward, shared link):
-  // re-sync the draft. Adjusting during render (not in an effect) is the
-  // React-blessed way to keep derived state honest without a second cascade.
   const [draftUrlKey, setDraftUrlKey] = useState(urlKey);
   if (draftUrlKey !== urlKey) {
     setDraft(urlView);
@@ -138,9 +107,6 @@ function HistoryPageInner() {
 
   const draftKey = useMemo(() => viewKey(draft), [draft]);
 
-  // Debounced commit: when the draft has run ahead of the URL, replace it
-  // after a quiet period. Rapid edits re-arm the same timer, so a burst of
-  // control changes produces exactly one URL write and one server query.
   useEffect(() => {
     if (draftKey === urlKey) return;
     const handle = setTimeout(() => {
@@ -158,14 +124,11 @@ function HistoryPageInner() {
     setDraft((prev) => applyViewPatch(prev, clearFiltersPatch()));
   }, []);
 
-  // --- data for the committed URL ---------------------------------------
   const [reloadToken, setReloadToken] = useState(0);
   const authKey = isConnected && address ? `${address}|${urlKey}|${reloadToken}` : `anon|${urlKey}`;
 
   const [feed, setFeed] = useState<FeedState>(EMPTY_FEED);
   if (feed.key !== authKey) {
-    // New query identity: drop the previous answer instead of letting it
-    // masquerade as this URL's data, and show the loading surface at once.
     setFeed({
       key: authKey,
       status: isConnected && address ? 'loading' : 'idle',
@@ -188,15 +151,13 @@ function HistoryPageInner() {
 
     loadHistoryViewPage(address, urlView, controller.signal)
       .then((page: BetHistoryPage) => {
-        if (seq !== seqRef.current) return; // a newer load won
+        if (seq !== seqRef.current) return;
         setFeed({
           key,
           status: 'ready',
           loaded: { wallet: address, urlKey, rows: page.rows, total: page.total, hasMore: page.hasMore },
           error: null,
         });
-        // Mirror the bounded read into the store so the slice surface and the
-        // trade panel's recent-rounds list stay truthful caches of this query.
         useStore.setState({
           historyRows: page.rows,
           historyTotal: page.total,
@@ -220,7 +181,6 @@ function HistoryPageInner() {
       });
 
     return () => controller.abort();
-    // `reloadToken` (inside authKey) re-fires the exact same request for Retry.
   }, [isConnected, address, urlView, urlKey, authKey, reset]);
 
   const loading = feed.status === 'loading';
@@ -315,7 +275,6 @@ function HistoryPageInner() {
       />
 
       <main className="mx-auto max-w-[1200px] px-5 pb-16 pt-8 sm:px-8">
-        {/* Heading */}
         <header className="mb-7 flex flex-wrap items-end justify-between gap-4">
           <div>
             <div className="mb-2 flex items-center gap-2 font-jet text-[11px] uppercase tracking-[0.14em] text-faint">
@@ -351,7 +310,6 @@ function HistoryPageInner() {
           </div>
         </header>
 
-        {/* Summary strip — real money only; practice rounds never count here. */}
         <section aria-label="Round summary" className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat
             label="Rounds loaded"
@@ -450,7 +408,6 @@ function HistoryPageInner() {
   );
 }
 
-/** Distinct, honest surfaces per failure class — none of them says "no bets yet". */
 const HistoryErrorCard: React.FC<{
   error: ShownError;
   onClearFilters: () => void;
@@ -506,7 +463,6 @@ const HistoryErrorCard: React.FC<{
   );
 };
 
-/** The list body when the fetch failed: a named error, not an empty ledger. */
 const HistoryErrorBody: React.FC = () => (
   <div className="flex flex-col items-center gap-2 rounded-3xl border border-dashed border-down/30 bg-down-soft/60 px-6 py-12 text-center">
     <WarningCircle size={22} className="text-down" />
@@ -518,7 +474,6 @@ const HistoryErrorBody: React.FC = () => (
   </div>
 );
 
-/** Hidden-by-toggle but present: say so instead of pretending the page is empty. */
 const HistoryAllPracticeState: React.FC<{ count: number; onShow: () => void }> = ({ count, onShow }) => (
   <div className="flex flex-col items-center gap-3 rounded-3xl border border-dashed border-line bg-white/60 px-6 py-12 text-center">
     <p className="text-[15px] font-semibold text-ink">
@@ -560,11 +515,6 @@ const Stat: React.FC<{
   </div>
 );
 
-/**
- * useSearchParams makes this route unconditionally dynamic; the Suspense
- * boundary below is what lets it prerender at all (same shell pattern as
- * app/dashboard/page.tsx).
- */
 export default function HistoryPage() {
   return (
     <Suspense

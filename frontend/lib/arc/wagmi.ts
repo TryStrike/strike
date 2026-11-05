@@ -6,7 +6,6 @@ import { BRAND } from '@/lib/brand';
 
 const arcConfig = getArcConfig();
 
-/** Arc — the only network this platform settles on. */
 export const arc = defineChain({
   id: arcConfig.chainId,
   name: arcConfig.name,
@@ -26,7 +25,6 @@ export const config = createConfig(
       [arc.id]: http(arcConfig.rpcEndpoint),
     },
 
-    // ConnectKit ships an Aave Account connector, on by default. It is not an Arc wallet and throws while idle.
     enableAaveAccount: false,
     walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'dummy-id',
 

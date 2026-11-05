@@ -1,11 +1,5 @@
 'use client';
 
-/**
- * Top-of-dashboard overview: real/demo betting economics (per-chain native
- * token tables — never a mixed-$ total), asset count and dwell-time stats.
- * Fetches /api/admin/stats + /api/admin/currencies itself so it can render
- * skeletons / errors independently of the tabs.
- */
 
 import { isArcAsset } from '@/lib/arc/config';
 import { EmptyState, ErrorState, fmtPnL, SkeletonRows, StatBox } from './AdminUi';
@@ -17,7 +11,6 @@ interface CurrencyApi {
     totalTokens?: number;
 }
 
-/** Human-readable mean session length for terminal stats. */
 function fmtAvgSession(seconds: number | undefined, sampleCount: number | undefined): string {
     if (!sampleCount || seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return '—';
     const s = Math.round(seconds);
@@ -29,7 +22,6 @@ function fmtAvgSession(seconds: number | undefined, sampleCount: number | undefi
     return `${r}s`;
 }
 
-/** Ledger token ticker for bet_history.network. */
 function tokenSymbolForNetwork(net: string): string {
     const u = (net ?? '').trim().toUpperCase();
     return isArcAsset(u) ? u : 'USDC';
@@ -105,8 +97,6 @@ export default function OverviewStatsPanel({
     const currencies = useAdminFetch<CurrencyApi>('/api/admin/currencies', { nonce, onUnauthorized });
 
     const s = stats.data;
-    // A failed/pending currencies fetch must not render as "0 market assets" —
-    // show the em-dash placeholder so the number is visibly unavailable.
     const marketCount = currencies.data?.tokens
         ? currencies.data.tokens.length.toLocaleString()
         : '—';
@@ -130,7 +120,6 @@ export default function OverviewStatsPanel({
 
     const modeBlock = (mode: 'real' | 'demo') => {
         const m = s[mode];
-        // Present-but-zero renders as 0; missing/failed renders as '—'.
         const count = (n: number | undefined) => (typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : '—');
         return (
             <div className="space-y-6">

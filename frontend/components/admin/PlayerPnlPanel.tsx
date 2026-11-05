@@ -1,12 +1,5 @@
 'use client';
 
-/**
- * Player P&L panel: per-wallet financial summary backed by the paginated
- * /api/admin/player-ledger endpoint (filters + total come from the URL via
- * DashFilters). Banned wallets are highlighted and can be unbanned only after
- * the operator types the confirmation phrase — the unban call also zeroes the
- * wallet balance, so it is treated as a money-path action.
- */
 
 import { useCallback, useMemo, useState } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
@@ -49,7 +42,6 @@ type SortCol =
     | 'total_fees_paid';
 
 const fmt = (n: number | null | undefined, dec = 6) => {
-    // Number(null) is 0 — a missing ledger value must not render as a real zero.
     if (n === null || n === undefined) return '—';
     const v = Number(n);
     if (!Number.isFinite(v)) return '—';
@@ -88,8 +80,6 @@ export default function PlayerPnlPanel({
         [bans.data],
     );
 
-    // Ordering happens over the loaded page; the server owns filtering + totals
-    // so a page never mixes rows from outside the active window.
     const rows = useMemo(() => {
         const page = [...(ledger.data?.players ?? [])];
         const col = sort.col;

@@ -1,12 +1,5 @@
 import { StateCreator } from 'zustand';
 
-/**
- * The pending referral claim (a ref code someone shared with us, not yet bound).
- * Stored under the same key as before so codes captured by an earlier release
- * survive the upgrade. `null` / absent means "nothing to attach" — once a claim
- * is successfully sent to the server it is cleared so a refresh cannot re-attach
- * it (a second attempt would also be a server-side no-op).
- */
 const PENDING_KEY = 'referred_by';
 
 function readPendingCode(): string | null {
@@ -22,28 +15,15 @@ function readPendingCode(): string | null {
 function writePendingCode(code: string): void {
     try {
         window.localStorage.setItem(PENDING_KEY, code);
-    } catch {
-        /* storage unavailable — in-memory pending state still works for this tab */
-    }
+    } catch {}
 }
 
 function removePendingCode(): void {
     try {
         window.localStorage.removeItem(PENDING_KEY);
-    } catch {
-        /* ignore */
-    }
+    } catch {}
 }
 
-/**
- * Attribution claims already accepted by the server in THIS browser session,
- * keyed `address|code`. localStorage cannot carry this (a consumed code is
- * deleted), but a still-open tab re-POSTs the same claim when the visitor
- * refreshes a `/?ref=…` link or the sync effect re-runs after a route change.
- * The server would reject it anyway (`referred_by IS NULL`), so this guard is
- * about not making the request at all — and about a re-mounted ReferralSync
- * never re-crediting a referrer.
- */
 const acceptedClaims = new Set<string>();
 
 function claimKey(address: string, code: string): string {
@@ -55,34 +35,18 @@ function canonical(address: string): string {
     return t.startsWith('0x') ? t.toLowerCase() : t;
 }
 
-/**
- * Counts POSTs that carried a claim. A connect sync uses this to decide whether
- * the create/load step already spoke for the pending code: if it did, the late
- * attach is skipped for this run — including when that attempt FAILED, so one
- * connect never fires two attribution POSTs back to back.
- */
 let claimAttempts = 0;
 
 export type ReferralFriendStatus = 'pending' | 'qualified';
 
 export interface ReferralFriend {
-    /** Already truncated server-side; the browser never sees a full referee address. */
     address: string;
     joinedAt: string | null;
-    /**
-     * `pending` = joined but no real-money bet in the ledger yet, so NO reward has
-     * been earned. `qualified` = the server saw at least one non-demo bet.
-     */
     status: ReferralFriendStatus;
     realBets: number;
     firstRealBetAt: string | null;
 }
 
-/**
- * Server-computed headline numbers behind the friend list. `joined` is the DB
- * total; `qualified` / `pending` always describe the page that was returned, so a
- * truncated list can never be read as "these are all my nodes".
- */
 export interface ReferralTotals {
     joined: number;
     pageJoined: number;
@@ -97,14 +61,6 @@ interface RegistrationResult {
     referral_count: number;
 }
 
-/**
- * Shared POST /api/referral call. The server decides create-with-referrer,
- * late-bind (only when referred_by IS NULL), or no-op, so re-sending the same
- * claim never double-increments. Returns null on any non-2xx / network failure
- * so the caller keeps the pending code for a later retry, and `'claimed'` when
- * this session already landed that exact claim — the request is then skipped
- * entirely rather than replayed.
- */
 async function postRegistration(
     address: string,
     referredByCode: string | null
@@ -134,7 +90,6 @@ async function postRegistration(
     }
 }
 
-/** Public board entry: the address is already truncated server-side, no code. */
 export interface ReferralLeaderboardEntry {
     user_address: string;
     referral_count: number;
@@ -146,10 +101,8 @@ export interface ReferralState {
     referralCount: number;
     referralLeaderboard: ReferralLeaderboardEntry[];
     referralFriends: ReferralFriend[];
-    /** Server-side totals behind the friend list (joined / qualified / pending). */
     referralTotals: ReferralTotals | null;
     isLoadingReferrals: boolean;
-    /** Last friends/leaderboard refresh failed — the UI must say so, not show zeros. */
     referralLoadError: string | null;
 
     setReferredBy: (code: string) => void;
@@ -157,7 +110,6 @@ export interface ReferralState {
     fetchReferralInfo: (address: string) => Promise<void>;
     createReferralCode: (address: string) => Promise<string>;
     attachReferralIfPending: (address: string) => Promise<boolean>;
-    /** One connect-time pass: load/create, late-attach only if nothing was sent yet. */
     syncOnConnect: (address: string) => Promise<void>;
     fetchReferralFriends: (address: string) => Promise<void>;
     fetchReferralLeaderboard: () => Promise<void>;
@@ -173,10 +125,6 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
     isLoadingReferrals: false,
     referralLoadError: null,
 
-    /**
-     * Capture a shared ref code. First capture wins so a single visitor can only
-     * ever attach one referrer; later links on the same device are ignored.
-     */
     setReferredBy: (code: string) => {
         const clean = (code || '').trim();
         if (!clean) return;
@@ -206,8 +154,6 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
                     referralLoadError: null,
                 });
             } else {
-                // No record yet — create one server-side; this path also attaches
-                // any pending referrer and consumes it exactly once.
                 await get().createReferralCode(address);
             }
         } catch (error) {
@@ -221,30 +167,19 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
         const data = await postRegistration(address, pending);
         if (!data) return '';
         if (data === 'claimed') {
-            // This session already bound that exact claim; drop the local copy so
-            // nothing replays it, and keep the code we already hold.
             if (pending) get().clearReferredBy();
             return get().referralCode ?? '';
         }
         set({ referralCode: data.referral_code, referralCount: data.referral_count ?? 0 });
-        // The claim reached the server (created, bound, or no-op) — consume it so a
-        // refresh never re-attaches.
         if (pending) get().clearReferredBy();
         return data.referral_code ?? '';
     },
 
-    /**
-     * Bind a still-pending referrer to an EXISTING record (late attribution).
-     * Runs after fetchReferralInfo: if that call created the record it already
-     * consumed the code, so this is a no-op; it only fires when a record predates
-     * the link click. Safe to call repeatedly — the server binds at most once, and
-     * a claim this session already landed is never sent again at all.
-     */
     attachReferralIfPending: async (address: string) => {
         const pending = get().referredBy;
         if (!pending) return false;
         const data = await postRegistration(address, pending);
-        if (!data) return false; // keep pending for the next connect; never loses the claim
+        if (!data) return false;
         if (data === 'claimed') {
             get().clearReferredBy();
             return false;
@@ -254,12 +189,6 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
         return true;
     },
 
-    /**
-     * The whole connect-time pass, in one place so a re-mounted ReferralSync runs
-     * the same sequence and cannot overlap itself: load or create the record, then
-     * late-attach ONLY if that step did not already carry the claim (whether it
-     * succeeded or failed — a failed claim stays in storage for the next connect).
-     */
     syncOnConnect: async (address: string) => {
         const attemptsBefore = claimAttempts;
         await get().fetchReferralInfo(address);
@@ -310,10 +239,6 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
     },
 });
 
-/**
- * Defensive read of the friend rows: a missing/unknown status stays `pending`,
- * because an unverified node must never render as a reward already earned.
- */
 function normaliseFriends(rows: unknown[]): ReferralFriend[] {
     return rows.map((raw) => {
         const r = (raw ?? {}) as Record<string, unknown>;
@@ -341,7 +266,6 @@ function normaliseTotals(raw: unknown): ReferralTotals | null {
     };
 }
 
-/** Test-only: forget the session's landed-claim ledger. */
 export function __resetAcceptedClaimsForTests(): void {
     acceptedClaims.clear();
 }

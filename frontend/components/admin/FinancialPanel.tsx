@@ -1,10 +1,5 @@
 'use client';
 
-/**
- * Financials panel: pending-withdrawal review queue (live intent countdown,
- * Accept disabled after the window) above the deposit/withdrawal audit list
- * with server-side filtering, pagination and CSV export.
- */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { explorerTxUrl } from '@/lib/arc/config';
@@ -21,7 +16,6 @@ interface PendingApi {
     total?: number;
 }
 
-/** How often to look again while a payout is running. */
 const UNRESOLVED_POLL_MS = 5000;
 
 interface TxApi {
@@ -38,7 +32,6 @@ export default function FinancialPanel({
     nonce: number;
     onUnauthorized: () => void;
     onPatch: (patch: Partial<DashFilters>) => void;
-    /** Called after accept/reject so sibling panels can re-sync. */
     onQueueChanged: () => void;
 }) {
     const pendingUrl = useMemo(
@@ -69,8 +62,6 @@ export default function FinancialPanel({
         const res = await adminMutation(`/api/admin/withdrawal-requests/${id}/accept`, { method: 'POST' }, onUnauthorized);
         setBusyId(null);
         if (!res.ok) {
-            // A proxy or a dropped connection answers without our JSON. That says
-            // nothing about the payout, which keeps running on the server.
             setActionError(typeof res.body?.error === 'string'
                 ? res.error
                 : 'No answer from the server. The payout may still be running: check the list below before acting again.');
@@ -98,7 +89,6 @@ export default function FinancialPanel({
     const unresolved = useMemo(() => pending.data?.unresolved ?? [], [pending.data]);
     const running = unresolved.some((w) => w.status === 'accepted');
 
-    // A payout outlives the request that started it, so its end is read from here.
     const { reload: reloadPending } = pending;
     const { reload: reloadTxs } = txs;
     useEffect(() => {
@@ -118,10 +108,6 @@ export default function FinancialPanel({
         runningIds.current = unresolved.filter((w) => w.status === 'accepted').map((w) => w.id);
     }, [pending.data, unresolved]);
 
-    // CSV export reuses the exact filter state; filename comes from the server whitelist.
-    // The pending route only understands status=pending, so its fetch pins status=''.
-    // The export route *does* accept deposit/withdrawal — pass the active filter
-    // through (anything else falls back to "any") so the CSV matches the table.
     const exportHref = `/api/admin/export?dataset=transactions&${apiExportQuery(filters, ['deposit', 'withdrawal'])}`;
 
     return (
@@ -144,7 +130,6 @@ export default function FinancialPanel({
                 )}
             />
 
-            {/* Pending queue */}
             <div className="border-b border-line">
                 {pending.error ? (
                     <ErrorState message={pending.error} onRetry={pending.reload} retrying={pending.loading} />
@@ -187,7 +172,6 @@ export default function FinancialPanel({
                 )}
             </div>
 
-            {/* Audit log transactions */}
             {txs.error ? (
                 <ErrorState message={txs.error} onRetry={txs.reload} retrying={txs.loading} />
             ) : (

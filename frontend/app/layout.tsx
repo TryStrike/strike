@@ -9,7 +9,6 @@ import { AI_ROUTE } from "@/lib/theme";
 const interTight = Inter_Tight({ variable: "--font-inter-tight", subsets: ["latin"] });
 const instrumentSerif = Instrument_Serif({ variable: "--font-instrument-serif", subsets: ["latin"], weight: "400", style: ["normal", "italic"] });
 const jetbrainsMono = JetBrains_Mono({ variable: "--font-jetbrains-mono", subsets: ["latin"] });
-// Only AI mode uses it, so it is not preloaded: the browser fetches it on first use.
 const pixelify = Pixelify_Sans({ variable: "--font-pixelify", subsets: ["latin"], preload: false });
 
 export const metadata: Metadata = {
@@ -19,7 +18,6 @@ export const metadata: Metadata = {
   openGraph: { title: BRAND.name, description: BRAND.description },
 };
 
-// Sets the AI theme before first paint on a direct load of the AI route.
 const themeBootScript = `if(location.pathname.startsWith('${AI_ROUTE}'))document.documentElement.dataset.theme='ai'`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

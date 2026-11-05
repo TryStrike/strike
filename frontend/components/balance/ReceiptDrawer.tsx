@@ -17,26 +17,17 @@ export interface ReceiptData {
   txHash?: string;
   createdAt: number;
   status?: 'confirmed' | 'pending';
-  /** withdrawal_requests.id, when the caller has it — links the receipt to
-   * the status timeline at /withdrawals. */
   requestId?: number | string | null;
 }
 
-/** A real 32-byte tx hash is 0x + 64 hex chars. Placeholders are not. Case-insensitive: hex is hex. */
 const REAL_TX_HASH = /^0x[0-9a-f]{64}$/i;
 
 export function isLinkableTxHash(hash: string | null | undefined): boolean {
   return typeof hash === 'string' && REAL_TX_HASH.test(hash.trim());
 }
 
-/**
- * Explorer link only for a genuine 32-byte hash: 'PENDING' strings, partial
- * or malformed values must never produce a dead or attacker-shaped link.
- * Arc is the only network, so the chain label is display-only here.
- */
 function explorerUrl(txHash?: string) {
   if (!txHash || txHash === 'PENDING') return null;
-  // Accept flows store `feeTx|netTx:hash`; link the net payout half.
   const { netTx } = parseCombinedTxHash(txHash);
   const candidate = (netTx ?? txHash).trim();
   return isLinkableTxHash(candidate) ? explorerTxUrl(candidate) : null;
@@ -58,10 +49,7 @@ export const ReceiptDrawer: React.FC<{
   onClose: () => void;
   receipt: ReceiptData | null;
 }> = ({ open, onClose, receipt }) => {
-  // Hooks run before the early return so their order never changes between renders.
   const [copied, setCopied] = useState(false);
-  // Prefer the net payout half of the stored `feeTx|netTx:hash` format. Only a
-  // real 32-byte hash is shown at all — placeholders are not facts.
   const tx = (() => {
     const raw = receipt?.txHash;
     if (!raw || raw === 'PENDING') return null;
@@ -70,8 +58,6 @@ export const ReceiptDrawer: React.FC<{
     return isLinkableTxHash(candidate) ? candidate : null;
   })();
 
-  // Close on Escape, mirroring Modal.tsx. onClose is kept in a ref because
-  // callers pass inline closures that change on every rerender.
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -155,7 +141,7 @@ export const ReceiptDrawer: React.FC<{
                       await navigator.clipboard.writeText(tx);
                       setCopied(true);
                       window.setTimeout(() => setCopied(false), 1500);
-                    } catch { /* ignore */ }
+                    } catch {}
                   }}
                   className="flex h-7 w-7 items-center justify-center rounded-full text-faint transition-colors hover:bg-surface hover:text-ink"
                 >

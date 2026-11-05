@@ -1,10 +1,5 @@
 'use client';
 
-/**
- * Referrals panel: server-paginated view over /api/admin/users?referrers=1 so
- * global ?q / ?status / ?currency / ?from / ?to filters and the row total are
- * computed before pagination (no post-slicing of a page).
- */
 
 import { useMemo } from 'react';
 import { explorerAddressUrl } from '@/lib/arc/config';
@@ -38,8 +33,6 @@ export default function ReferralsPanel({
     );
     const list = useAdminFetch<UsersApi>(url, { nonce, onUnauthorized });
 
-    // Rank comes from the server's referral_count-desc ordering when present;
-    // the route orders deterministically, so re-sort only inside the page.
     const rows = useMemo(() => {
         const page = [...(list.data?.users ?? [])];
         page.sort((a, b) => (b.referral?.referral_count || 0) - (a.referral?.referral_count || 0));

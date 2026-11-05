@@ -1,13 +1,8 @@
-/**
- * UI kit. Only theme tokens from app/globals.css, so light and AI mode both work.
- */
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
-/** Primary action fill. */
 export const glassPrimary = 'bg-up text-white transition-all hover:brightness-110 active:scale-[0.98]';
-/** Frosted blue tint for a selected chip/pill. */
 export const glassSelected = 'bg-up/[0.08] text-up ring-1 ring-inset ring-up/20 backdrop-blur-xl';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'up' | 'down';
@@ -44,12 +39,10 @@ export function Button({
   );
 }
 
-/** Small uppercase mono eyebrow above a control or value. */
 export function Label({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={cx('mb-2.5 font-jet text-[11px] uppercase tracking-[0.14em] text-faint', className)}>{children}</div>;
 }
 
-/** Pill-style single choice. */
 export function Segmented<T extends string | number>({
   options,
   value,
@@ -94,7 +87,6 @@ export function Segmented<T extends string | number>({
   );
 }
 
-/** Input with an optional trailing unit. */
 export function Field({ unit, className, ...props }: InputHTMLAttributes<HTMLInputElement> & { unit?: ReactNode }) {
   return (
     <div className={cx('flex h-12 items-center rounded-full px-5 bg-white ring-1 ring-ink/[0.08] focus-within:ring-ink/40', className)}>
@@ -104,7 +96,6 @@ export function Field({ unit, className, ...props }: InputHTMLAttributes<HTMLInp
   );
 }
 
-/** Tiny status chip. */
 export function Badge({ tone = 'neutral', children }: { tone?: 'neutral' | 'up' | 'down'; children: ReactNode }) {
   const t = { neutral: 'bg-surface text-muted', up: 'bg-up-soft text-up', down: 'bg-down-soft text-down' }[tone];
   return <span className={cx('inline-flex items-center rounded-full px-2 py-0.5 font-jet text-[11px] font-medium', t)}>{children}</span>;

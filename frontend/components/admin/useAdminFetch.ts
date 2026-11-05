@@ -1,11 +1,5 @@
 'use client';
 
-/**
- * Small fetch hook shared by every admin panel: GETs `url` (or does nothing
- * when url is null), exposes { data, loading, error, reload, lastFetched },
- * aborts stale requests, reports 401 upward (session expired) and never
- * renders without an inline error + retry path.
- */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -18,11 +12,8 @@ export interface AdminFetchState<T> {
 }
 
 export interface AdminFetchOptions {
-    /** Bump this to force a refetch (auto-refresh / manual Sync). */
     nonce?: number;
-    /** Called when the API answers 401 — the dashboard flips to the login gate. */
     onUnauthorized?: () => void;
-    /** Extra fetch options, e.g. POST. When provided, `url` must be stable. */
     method?: 'GET';
     skip?: boolean;
 }
@@ -90,7 +81,6 @@ export function useAdminFetch<T = any>(
     return { data, loading, error, lastFetched, reload };
 }
 
-/** POST/DELETE helper that surfaces the sanitized { error } string. */
 export async function adminMutation(
     url: string,
     init: RequestInit,

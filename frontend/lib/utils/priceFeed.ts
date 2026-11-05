@@ -1,9 +1,5 @@
-/**
- * Client price poller over /api/prices/latest
- */
 
 
-// Pyth Network Price Feed IDs (Stable/Mainnet)
 export const PRICE_FEED_IDS = {
   BTC: '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
   ETH: '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',
@@ -18,17 +14,14 @@ export const PRICE_FEED_IDS = {
   XLM: '0xb7a8eba68a997cd0210c2e1e4ee811ad2d174b3611c22d9ebf16f4cb7e9ba850',
   XTZ: '0x0affd4b8ad136a21d79bc82450a325ee12ff55a235abc242666e423b8bcffd03',
   NEAR: '0xc415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750',
-  APT: '0x03ae4db29ed4ae33d323568895aa00337e658e348b37509f5372ae51f0af00d5', // Corrected Mainnet ID
-  // Metals
+  APT: '0x03ae4db29ed4ae33d323568895aa00337e658e348b37509f5372ae51f0af00d5',
   GOLD: '0x765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2',
   SILVER: '0xf2fb02c32b055c805e7238d628e5e9dadef274376114eb1f012337cabe93871e',
-  // FX
   EUR: '0xa995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b',
   GBP: '0x84c2dde9633d93d1bcad84e7dc41c9d56578b7ec52fabedc1f335d673df0a7c1',
   JPY: '0xef2c98c804ba503c6a707e38be4dfbb16683775f195b091252bf24693042fd52',
   AUD: '0x67a6f93030420c1c9e3fe37c1ab6b77966af82f995944a9fefce357a22854a80',
   CAD: '0x3112b03a41c910ed446852aacf67118cb1bec67b2cd0b9a214c58cc0eaa2ecca',
-  // Stocks
   AAPL: '0x49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688',
   GOOGL: '0x5a48c03e9b9cb337801073ed9d166817473697efff0d138874e0f6a33d6d5aa6',
   AMZN: '0xb5d0e0fa58a1f8b81498ae670ce93c872d14434b72c364885d4fa1b257cbb07a',
@@ -37,14 +30,11 @@ export const PRICE_FEED_IDS = {
   TSLA: '0x16dad506d7db8da01c87581c87ca897a012a153557d4d578c3b9c9e1bc0632f1',
   META: '0x78a3e3b8e676a8f73c439f5d749737034b139bbbe899ba5775216fba596607fe',
   NFLX: '0x8376cfd7ca8bcdf372ced05307b24dced1f15b1afafdeff715664598f15a3dd2',
-  // Commodities
   WTI: '0x6a60b0d1ea6809b47dbe599f24a71c8bda335aa5c77e503e7260cde5ba2f4694',
   BRENT: '0x27f0d5e09a830083e5491795cac9ca521399c8f7fd56240d09484b14e614d57a',
-  // Indices
   SPX: '0x9cecbb4f3744f4201aab46431e5587a931dfb6e02567f7c3d73f93b3c9fdeead',
   NDX: '0x1b79d5b75253c291cc72d40cc874f468d07c1e6c149ee298a00d8075cb10c2c0',
   DJI: '0x57cff3a9a4d4c87b595a2d1bd1bac0240400a84677366d632ab838bbbe56f763',
-  // More Crypto
   LINK: '0x8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221',
   AVAX: '0x93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7',
   DOT: '0xca3eed9b267293f6595901c734c7525ce8ef49adafe8284606ceb307afa2ca5b',
@@ -74,7 +64,6 @@ export const PRICE_FEED_IDS = {
   ALGO: '0xfa17ceaf30d19ba51112fdcc750cc83454776f47fb0112e4af07f15f4bb1ebc0',
   EGLD: '0xee326a761a4b53629a29fc64bf47dda18cb2eea0bef22da7144dbdc130d112fc',
   FLOW: '0x2fb245b9a84554a0f15aa123cbb5f64cd263b59e9a87d80148cbffab50c69f30',
-  // More Stocks
   AMD: '0x7178689d88cdd76574b64438fc57f4e57efaf0bf5f9593ee19c10e46a3c5b5cf',
   BABA: '0xffeec5e9688e8ab6c2d436981931a654c1d19ac6e69738d703fac6994acb1efa',
   DIS: '0x703e36203020ae6761e6298975764e266fb869210db9b35dd4e4225fa68217d0',
@@ -94,15 +83,11 @@ export const PRICE_FEED_IDS = {
 
 export type AssetType = keyof typeof PRICE_FEED_IDS;
 
-// Prices are fetched through our backend route (backend/crates/core/src/prices.rs).
 const PRICES_ENDPOINT = '/api/prices/latest';
 
-/** The landing hero reads this for an instant first paint. Never fed back in as a live tick. */
 const PRICE_CACHE_STORAGE_KEY = 'strike_last_price_cache_v1';
 
-/** Every asset's latest price. Throws on any failure: old prices must never pass as live ones. */
 async function fetchAllPrices(): Promise<Record<string, number>> {
-  // GET (all assets) so the response is cacheable across visitors.
   const res = await fetch(PRICES_ENDPOINT, { signal: AbortSignal.timeout(6_000) });
   if (!res.ok) throw new Error(`${PRICES_ENDPOINT} answered ${res.status}`);
   const prices = ((await res.json()) as { prices?: Record<string, unknown> }).prices ?? {};
@@ -114,9 +99,7 @@ async function fetchAllPrices(): Promise<Record<string, number>> {
   if (Object.keys(results).length > 0) {
     try {
       window.localStorage.setItem(PRICE_CACHE_STORAGE_KEY, JSON.stringify(results));
-    } catch {
-      // Private mode or quota: the cache is only a first-paint nicety.
-    }
+    } catch {}
   }
   return results;
 }
@@ -125,7 +108,6 @@ export const startMultiPythPriceFeed = (
   callback: (prices: Record<string, number>) => void
 ): (() => void) => {
   let isActive = true;
-  /** Prevents overlapping batch calls (stacked requests → timeouts / canceled rows on mobile). */
   let inFlight = false;
   let failing = false;
 
@@ -138,7 +120,6 @@ export const startMultiPythPriceFeed = (
       failing = false;
       if (isActive) callback(prices);
     } catch (err) {
-      // Logged once per outage, not once a second. The chart's stale badge covers the UI.
       if (!failing) console.error('[prices] poll failed:', err);
       failing = true;
     } finally {

@@ -1,17 +1,11 @@
 'use client';
 
-/**
- * Shared fallback bodies for Next.js route files (loading.tsx / error.tsx /
- * not-found.tsx). Keeping the markup here means every app/<segment> file is a
- * three-line wrapper and all route states stay visually consistent.
- */
 
 import React from 'react';
 import { House } from '@phosphor-icons/react';
 import { StateScreen } from './StateScreen';
 import { SkeletonCard, SkeletonChartBlock, SkeletonStatTile, SkeletonTable } from './Skeleton';
 
-/** Full-viewport light panel so fallbacks read correctly on the dark body. */
 export const FallbackShell: React.FC<{ children: React.ReactNode; className?: string }> = ({
   children,
   className = '',
@@ -23,7 +17,6 @@ export const FallbackShell: React.FC<{ children: React.ReactNode; className?: st
 
 export type RouteShape = 'page' | 'dashboard' | 'list' | 'chart' | 'stats';
 
-/** Which skeletons approximate the segment while its page streams/loads. */
 export function routeSkeleton(shape: RouteShape) {
   switch (shape) {
     case 'dashboard':
@@ -66,7 +59,6 @@ export interface RouteLoadingProps {
   label?: string;
 }
 
-/** Body used by every app/**&#47;loading.tsx. */
 export const RouteLoading: React.FC<RouteLoadingProps> = ({ shape = 'page', label }) => (
   <FallbackShell>
     <div aria-live="polite" aria-busy="true" className="sr-only">
@@ -79,11 +71,9 @@ export const RouteLoading: React.FC<RouteLoadingProps> = ({ shape = 'page', labe
 export interface RouteErrorProps {
   error: unknown;
   reset: () => void;
-  /** Contextual hint, e.g. "Prices may have moved mid-round." */
   hint?: string;
 }
 
-/** Body used by every app/**&#47;error.tsx. Raw error is sanitized by StateScreen. */
 export const RouteError: React.FC<RouteErrorProps> = ({ error, reset, hint }) => (
   <FallbackShell>
     <StateScreen
@@ -97,7 +87,6 @@ export const RouteError: React.FC<RouteErrorProps> = ({ error, reset, hint }) =>
   </FallbackShell>
 );
 
-/** Body for app/not-found.tsx. */
 export const RouteNotFound: React.FC = () => (
   <FallbackShell>
     <StateScreen

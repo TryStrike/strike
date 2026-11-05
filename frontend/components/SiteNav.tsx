@@ -32,23 +32,19 @@ function AiModeButton({ className }: { className?: string }) {
   );
 }
 
-/** Exact match or a segment below it (e.g. /trade/… still marks /trade active). */
 function isActive(pathname: string | null, href: string) {
   return pathname === href || (pathname !== null && pathname.startsWith(`${href}/`));
 }
 
-/** Light nav shared by the landing page and the trade screen. `right` fills the right column. */
 export function SiteNav({ right, sticky, wide }: { right: ReactNode; sticky?: boolean; wide?: boolean }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close the mobile menu on navigation.
   useEffect(() => {
     setMenuOpen(false);
   }, [pathname]);
 
-  // Escape / outside-click dismissal while open.
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (e: KeyboardEvent) => {

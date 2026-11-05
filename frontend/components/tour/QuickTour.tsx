@@ -23,13 +23,12 @@ import {
 } from './tourProgress';
 
 interface TourStep {
-    /** Anchor selector: a real element carrying data-tour="<name>". */
     target: string;
     title: string;
     content: string;
-    howTo?: string[];   // numbered action steps shown below the content
-    win?: string;       // "you win when…" line (rule, not a promise)
-    note?: string;      // honest caveat (fees, draws, stake risk)
+    howTo?: string[];
+    win?: string;
+    note?: string;
     position: 'top' | 'bottom' | 'left' | 'right';
 }
 
@@ -44,7 +43,6 @@ const FOCUSABLE_SELECTOR = [
     '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-/** Own `prefers-reduced-motion` read so the tour never depends on motion-lib internals. */
 function usePrefersReducedMotion(): boolean {
     const [reduced, setReduced] = useState(false);
     useEffect(() => {
@@ -59,10 +57,6 @@ function usePrefersReducedMotion(): boolean {
     return reduced;
 }
 
-/**
- * Portal host at the end of <body> while the tour is open; removed on close
- * so an interrupted tour can never leave an orphaned overlay behind.
- */
 function useTourHost(active: boolean): HTMLElement | null {
     const [host, setHost] = useState<HTMLElement | null>(null);
     useEffect(() => {
@@ -85,11 +79,6 @@ function useTourHost(active: boolean): HTMLElement | null {
     return host;
 }
 
-/**
- * While the tour is open the rest of the page is taken out of the a11y tree
- * and the tab order (`aria-hidden` + `inert` on every body child except the
- * tour's own portal host). Prior attribute values are restored on close.
- */
 function useInertRestOfPage(isOpen: boolean, host: HTMLElement | null): void {
     useEffect(() => {
         if (!isOpen || !host || typeof document === 'undefined') return;
@@ -113,7 +102,6 @@ function useInertRestOfPage(isOpen: boolean, host: HTMLElement | null): void {
 export const QuickTour: React.FC<{
     isOpen: boolean;
     onClose: () => void;
-    /** Resume from sessionStorage for the connected wallet (default: true). */
     resumable?: boolean;
 }> = ({ isOpen, onClose, resumable = true }) => {
     const [currentStep, setCurrentStep] = useState(0);
@@ -135,10 +123,8 @@ export const QuickTour: React.FC<{
     const host = useTourHost(isOpen);
     useInertRestOfPage(isOpen, host);
 
-    // Per-wallet storage scope: hashed address, never the raw one.
     const scope = useMemo(() => normalizeTourScope(address), [address]);
 
-    // Honest sources for anything numeric/geographic in the copy.
     const networkName = getArcConfig().name;
     const feeLabel = getFeePercentLabel(userTier);
 
@@ -225,9 +211,6 @@ export const QuickTour: React.FC<{
         },
     ], [isConnected, networkName, feeLabel]);
 
-    // ── Persistence: resume, record, dismiss (per wallet scope) ────────────
-    // On (re)open — or when the connected wallet changes — restore the step
-    // persisted for THAT wallet; a finished/dismissed tour restarts from 0.
     useEffect(() => {
         if (!isOpen) return;
         const storage = safeStorage();
@@ -242,9 +225,6 @@ export const QuickTour: React.FC<{
         // eslint-disable-next-line react-hooks/exhaustive-deps -- only on open / wallet change
     }, [isOpen, scope]);
 
-    // Persist the resume index, but only once the current step actually
-    // belongs to the current wallet scope (prevents a wallet switch mid-open
-    // from writing another wallet's step into the new scope).
     useEffect(() => {
         if (!isOpen || !resumable) return;
         if (loadedScopeRef.current !== scope) return;
@@ -256,13 +236,9 @@ export const QuickTour: React.FC<{
         markTourSeen(storage, scope);
         clearTourProgress(storage, scope);
         if (opts?.dismissed || dontShowAgain) setTourDismissed(storage, scope, true);
-        // NB: no setCurrentStep(0) here — it would re-trigger the persist
-        // effect and re-write the progress key we just cleared. The read
-        // effect restores 0 on the next open.
         onClose();
     }, [scope, dontShowAgain, onClose]);
 
-    // ── View state changes (tabs/modes) driven by the current step ─────────
     useEffect(() => {
         if (!isOpen) return;
 
@@ -276,7 +252,6 @@ export const QuickTour: React.FC<{
         if (step.target === '[data-tour="deposit-section"]') setActiveTab('wallet');
     }, [currentStep, isOpen, steps, setGameMode, setActiveTab]);
 
-    // ── Anchor measurement: real elements only, with a graceful fallback ───
     const measure = useCallback(() => {
         const step = steps[currentStep];
         if (!step) {
@@ -289,8 +264,6 @@ export const QuickTour: React.FC<{
             setAnchorMissing(false);
             setTargetRect(element.getBoundingClientRect());
         } else {
-            // Anchor absent (e.g. board not rendered until a wallet connects):
-            // degrade to a plain card instead of hiding the tour or crashing.
             setTargetRect(null);
             setAnchorMissing(true);
         }
@@ -306,14 +279,12 @@ export const QuickTour: React.FC<{
             if (!step) return;
             const element = document.querySelector(step.target);
             if (element && typeof element.scrollIntoView === 'function') {
-                // Tall wallet column: "center" can scroll the viewport such that the tooltip clips; "nearest" keeps more UI in view.
                 const block =
                     step.target === '[data-tour="deposit-section"]' ? 'nearest' : 'center';
                 element.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block, inline: 'nearest' });
             }
         };
 
-        // A couple of retries: mode switches re-mount anchors after animations.
         const timers = [
             setTimeout(() => { scrollOnce(); measure(); }, 300),
             setTimeout(measure, 700),
@@ -329,7 +300,6 @@ export const QuickTour: React.FC<{
         };
     }, [isOpen, host, currentStep, steps, measure, reduceMotion]);
 
-    // ── Keyboard: arrows navigate steps, Esc closes, Tab is trapped ────────
     const goNext = useCallback(() => {
         setCurrentStep((s) => {
             if (s < steps.length - 1) return s + 1;
@@ -371,7 +341,6 @@ export const QuickTour: React.FC<{
                     setCurrentStep(Math.max(0, steps.length - 1));
                     return;
                 case 'Tab': {
-                    // Focus trap inside the popover while the tour is open.
                     const popover = popoverRef.current;
                     if (!popover) return;
                     const focusable = Array.from(
@@ -405,8 +374,6 @@ export const QuickTour: React.FC<{
         };
     }, [isOpen, host, steps.length, goNext, goBack, finishTour]);
 
-    // Move focus into the card on open and on every step change, and restore
-    // the launcher's focus when the tour goes away.
     useEffect(() => {
         if (!isOpen) return;
         restoreFocusRef.current = document.activeElement;
@@ -426,8 +393,6 @@ export const QuickTour: React.FC<{
     }, [isOpen, host, currentStep]);
 
     if (!isOpen) return null;
-    // The portal host is created in an effect right after open; render the
-    // card into it on the following commit (never against a null container).
     if (!host) return null;
 
     const currentStepData = steps[currentStep];
@@ -435,11 +400,9 @@ export const QuickTour: React.FC<{
 
     const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
     const tooltipWidth = isMobile ? Math.min(window.innerWidth - 32, 300) : 340;
-    // Layout estimate for viewport math (real card is taller; must not under-estimate or the bottom clips).
     const tooltipLayoutHeight = isMobile ? 360 : 420;
     const anchored = host !== null && targetRect !== null && !anchorMissing;
 
-    // Calculate clamped position
     const calculatePosition = () => {
         const padding = 16;
         const gap = 16;
@@ -447,8 +410,6 @@ export const QuickTour: React.FC<{
         const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
 
         if (!anchored || !targetRect) {
-            // Unanchored fallback: bottom-center above the mobile tab bar /
-            // viewport bottom on desktop. A plain card — no spotlight.
             return {
                 left: Math.max(padding, (vw - tooltipWidth) / 2),
                 top: Math.max(padding, vh - tooltipLayoutHeight - padding),
@@ -468,7 +429,6 @@ export const QuickTour: React.FC<{
             top = targetRect.top;
         }
 
-        // Mobile: pick side with more room
         if (isMobile) {
             const spaceAbove = targetRect.top - padding;
             const spaceBelow = vh - padding - targetRect.bottom;
@@ -476,7 +436,6 @@ export const QuickTour: React.FC<{
             top = preferBottom ? targetRect.bottom + gap : targetRect.top - tooltipLayoutHeight - gap;
         }
 
-        // If "top" placement would go above viewport, flip below (and vice versa when possible).
         if (!preferBottom && top < padding) {
             top = targetRect.bottom + gap;
             preferBottom = true;
@@ -492,7 +451,6 @@ export const QuickTour: React.FC<{
         left = Math.max(padding, Math.min(left, vw - tooltipWidth - padding));
         top = Math.max(padding, Math.min(top, vh - tooltipLayoutHeight - padding));
 
-        // Arrow sits on the edge of the tooltip that faces the highlight.
         const tooltipBelowTarget = preferBottom;
         return { left, top, tooltipBelowTarget };
     };
@@ -511,7 +469,6 @@ export const QuickTour: React.FC<{
 
     return createPortal(
         <div className="fixed inset-0 z-[120] pointer-events-none font-tight">
-            {/* Dimmed background with a hole over the target (only when anchored) */}
             <svg className="absolute inset-0 w-full h-full pointer-events-auto" aria-hidden="true">
                 <defs>
                     <mask id="tour-mask">
@@ -537,7 +494,6 @@ export const QuickTour: React.FC<{
                 />
             </svg>
 
-            {/* Spotlight ring — anchored steps only */}
             {anchored && targetRect && (
                 reduceMotion ? (
                     <div
@@ -563,12 +519,10 @@ export const QuickTour: React.FC<{
                 )
             )}
 
-            {/* Screen-reader announcement of the current step */}
             <div aria-live="polite" role="status" className="sr-only">
                 Step {currentStep + 1} of {steps.length}: {currentStepData.title}
             </div>
 
-            {/* Step card */}
             <motion.div
                 ref={popoverRef}
                 role="dialog"
@@ -673,12 +627,6 @@ export const QuickTour: React.FC<{
     );
 };
 
-/**
- * Uncontrolled onboarding state for surfaces outside the trade page's
- * zustand-driven tour. Auto-opens once per wallet for first-run users
- * (never after "Don't show again" or a completed tour for that wallet)
- * and stays mountable anywhere. Progress lives in sessionStorage only.
- */
 export function useOnboardingTour(options?: { autoStartDelayMs?: number }) {
     const [isOpen, setIsOpen] = useState(false);
     const [dismissed, setDismissed] = useState(false);
@@ -714,11 +662,6 @@ export function useOnboardingTour(options?: { autoStartDelayMs?: number }) {
     };
 }
 
-/**
- * Self-contained launcher: a "How to play" chip + the tour itself.
- * Mount <TourLauncher /> anywhere (e.g. SiteNav right slot) on pages that do
- * not already render the store-driven <QuickTour> — avoid double-mounting.
- */
 export const TourLauncher: React.FC<{ className?: string }> = ({ className = '' }) => {
     const tour = useOnboardingTour();
     return (

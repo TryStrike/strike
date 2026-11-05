@@ -1,10 +1,5 @@
 'use client';
 
-/**
- * Shared presentation primitives for the admin dashboard panels: skeletons,
- * empty states, inline error+retry, pagination, section headers and the typed
- * confirmation control used by every danger-zone action.
- */
 
 import React, { useState } from 'react';
 
@@ -13,8 +8,6 @@ export function shortenAddress(addr: string): string {
 }
 
 export function fmtPnL(n: number | undefined | null): string {
-    // A missing/failed number must never masquerade as a real zero — '—' is
-    // the agreed "no data" rendering across the admin panels.
     if (n === undefined || n === null || !Number.isFinite(n)) return '—';
     return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
@@ -55,7 +48,6 @@ export const TabBtn = ({ active, onClick, label }: { active: boolean; onClick: (
     </button>
 );
 
-/** Rows of shimmering bars — every list panel shows this instead of a spinner. */
 export function SkeletonRows({ rows = 6, className = '' }: { rows?: number; className?: string }) {
     return (
         <div className={`space-y-3 ${className}`} role="status" aria-label="Loading">
@@ -81,7 +73,6 @@ export function EmptyState({ title, hint, action }: { title: string; hint?: stri
     );
 }
 
-/** Inline error with a Retry button — used by every panel and the withdrawal queue. */
 export function ErrorState({ message, onRetry, retrying }: { message: string; onRetry: () => void; retrying?: boolean }) {
     return (
         <div className="px-8 py-10 text-center space-y-3" role="alert">
@@ -117,10 +108,6 @@ export function PanelHeader({
     );
 }
 
-/**
- * Server-side pagination strip: shows window position and Prev/Next.
- * `onPage(offset)` is called with the new zero-based offset.
- */
 export function Pagination({
     offset, limit, total, onPage, loading,
 }: {
@@ -162,11 +149,6 @@ export function Pagination({
     );
 }
 
-/**
- * Danger-zone confirmation: the action button opens a small inline form and
- * only fires `onConfirm` once the operator has typed `phrase` exactly. Prevents
- * misclicks on bans / unbans / freezes / payouts without relying on window.confirm.
- */
 export function TypedConfirmButton({
     phrase, label, onConfirm, buttonClassName = '', disabled, busy,
 }: {

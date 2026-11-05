@@ -1,16 +1,3 @@
-/**
- * Pure, dependency-free parser for the uniform list-endpoint query params:
- *   limit, offset, q, status, currency, from, to
- *
- * Every admin list route funnels searchParams through this so that:
- *  - numeric params can never be NaN / Infinity / fractions reaching SQL,
- *  - enum params (status, currency, extra enums) fail with a 400 message
- *    instead of crashing the route with a 500,
- *  - pagination is capped (default 50, max 200).
- *
- * Returns { ok: false, error } with a client-safe message; the error strings
- * here contain no SQL, secrets or internals — they are safe to echo to the UI.
- */
 
 export const LIST_DEFAULT_LIMIT = 50;
 export const LIST_MAX_LIMIT = 200;
@@ -21,17 +8,11 @@ export const LIST_MAX_CURRENCY_LENGTH = 16;
 export interface ParsedListParams {
     limit: number;
     offset: number;
-    /** Lowercased, trimmed search term (addresses / ids). */
     q: string | null;
-    /** Validated enum value for the route's status filter. */
     status: string | null;
-    /** Uppercased currency/asset ticker. */
     currency: string | null;
-    /** ISO-8601 lower bound (inclusive) for the route's timestamp column. */
     from: string | null;
-    /** ISO-8601 upper bound (inclusive) for the route's timestamp column. */
     to: string | null;
-    /** Extra validated enum params, keyed by param name (e.g. { account: 'real' }). */
     extras: Record<string, string>;
 }
 
@@ -40,14 +21,11 @@ export type ParseListParamsResult =
     | { ok: false; error: string };
 
 export interface ListParamsOptions {
-    /** Allowed values for `status`. Unknown / missing → any status value is rejected with 400. */
     statusValues?: readonly string[];
-    /** Extra enum params, e.g. { account: ['all', 'real', 'demo'] }. */
     extraEnums?: Record<string, readonly string[]>;
     defaultLimit?: number;
 }
 
-/** Whole numbers only; rejects '', 'abc', '1.5', 'NaN', 'Infinity', '1e999', '+-3'. */
 function parseWholeNumber(raw: string): number | null {
     if (!/^\d+$/.test(raw)) return null;
     const n = Number(raw);
@@ -56,18 +34,12 @@ function parseWholeNumber(raw: string): number | null {
 }
 
 function normalizeIso(raw: string, name: string): { value?: string; error?: string } {
-    // Accept full ISO timestamps and plain dates; interpret date-only as UTC.
     const candidate = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw;
     const ms = Date.parse(candidate);
     if (!Number.isFinite(ms)) return { error: `Invalid ${name} (expected an ISO date)` };
     return { value: new Date(ms).toISOString() };
 }
 
-/**
- * Strips characters that would break a PostgREST `.or()` expression
- * (commas split clauses) and non-printables; keeps ILIKE wildcards (% _)
- * since the value is always bound as a SQL parameter anyway.
- */
 export function sanitizeQueryTerm(q: string): string {
     let out = '';
     for (const ch of q) {
@@ -78,7 +50,6 @@ export function sanitizeQueryTerm(q: string): string {
     return out.trim().slice(0, LIST_MAX_QUERY_LENGTH);
 }
 
-/** Wraps a sanitized query term as an ILIKE contains-pattern. */
 export function likePattern(sanitizedQ: string): string {
     return `%${sanitizedQ}%`;
 }
@@ -170,7 +141,6 @@ export function parseListParams(
     return { ok: true, params };
 }
 
-/** Serialises parsed params back into a URLSearchParams for the dashboard. */
 export function listParamsToQuery(params: ParsedListParams): string {
     const sp = new URLSearchParams();
     sp.set('limit', String(params.limit));
@@ -184,7 +154,6 @@ export function listParamsToQuery(params: ParsedListParams): string {
     return sp.toString();
 }
 
-/** range() end index for the QueryBuilder: [offset, offset+limit-1]. */
 export function listRange(params: ParsedListParams): { from: number; to: number } {
     return { from: params.offset, to: params.offset + params.limit - 1 };
 }

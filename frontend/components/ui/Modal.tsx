@@ -31,17 +31,10 @@ export const Modal: React.FC<ModalProps> = ({
   const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
-  // Portal target only exists after mount; rendering through createPortal on
-  // the server (or during SSR hydration) would crash, so gate on `mounted`.
-  // Tailwind tokens live in the global stylesheet, so the dialog keeps all
-  // app CSS when moved to document.body, and `fixed` positioning can no
-  // longer be trapped by a transformed/overflow-hidden ancestor.
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     setMounted(true);
   }, []);
-  // Keep onClose in a ref so the effect below depends only on isOpen —
-  // callers pass inline closures that change on every parent rerender.
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -50,17 +43,12 @@ export const Modal: React.FC<ModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    // Remember and restore the PREVIOUS inline overflow value on close.
-    // Setting 'unset' permanently clobbered any class-driven overflow from layout.
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
 
     previouslyFocusedRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
-    // jsdom (tests) has no layout, so `offsetParent` is always null there;
-    // filter on computed/attribute visibility, which is correct in browsers
-    // too (display:none / visibility:hidden / hidden subtree are untabbable).
     const isFocusable = (el: HTMLElement) => {
       if (el.hasAttribute('hidden') || el.closest('[hidden]')) return false;
       const style = window.getComputedStyle(el);
@@ -71,7 +59,6 @@ export const Modal: React.FC<ModalProps> = ({
       Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [])
         .filter((el) => isFocusable(el) || el === document.activeElement);
 
-    // Move initial focus into the dialog (first focusable, else the dialog itself).
     const focusRaf = requestAnimationFrame(() => {
       const focusable = getFocusable();
       (focusable[0] ?? dialogRef.current)?.focus();
@@ -85,7 +72,6 @@ export const Modal: React.FC<ModalProps> = ({
       }
       if (e.key !== 'Tab') return;
 
-      // Simple focus trap: cycle Tab within the dialog.
       const focusable = getFocusable();
       if (focusable.length === 0) {
         e.preventDefault();
@@ -116,12 +102,9 @@ export const Modal: React.FC<ModalProps> = ({
       cancelAnimationFrame(focusRaf);
       document.removeEventListener('keydown', handleKeyDown, true);
       document.body.style.overflow = previousOverflow;
-      // Return focus to whatever opened the dialog.
       previouslyFocusedRef.current?.focus();
       previouslyFocusedRef.current = null;
     };
-    // `mounted` is included so the trap re-arms when a dialog that was
-    // already open at mount first gets its portal (and dialogRef) rendered.
   }, [isOpen, mounted]);
 
   if (!isOpen || !mounted) return null;

@@ -1,5 +1,3 @@
-// Mock agent engine for UI review. The Rust engine replaces it (docs/prd.md, build order step 5)
-// behind the same AgentSession shape, streamed over SSE.
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type Strategy = 'momentum' | 'reversion' | 'breakout';

@@ -20,13 +20,11 @@ interface DepositModalProps {
   onError?: (error: Error) => void;
 }
 
-/** What the player needs to verify the deposit themselves. */
 export interface DepositProof {
   txHash: string;
   currency: ArcAsset;
   chain: string;
   explorerUrl: string;
-  /** Server-confirmed facts (present once the ledger credited the deposit). */
   fee?: number;
   netCredited?: number;
   newBalance?: number;
@@ -38,24 +36,12 @@ const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
 ];
 
-/**
- * The ledger credits only after MIN_CONFIRMATIONS (lib/balance/verifyArcDepositTx).
- * The server sends the real number with every reply; this is the display
- * default before the first answer arrives, never a second threshold.
- */
 const REQUIRED_CONFIRMATIONS = 3;
-/** Headroom kept on top of the estimated fee, in whole tokens (see handleMaxClick). */
 const GAS_BUFFER = 0.005;
-/** Amount + fee compared against a float balance needs a tolerance. */
 const FLOAT_EPSILON = 1e-9;
 const POLL_INTERVAL_MS = 2500;
 const MAX_POLLS = 24;
 
-/**
- * Deposit lifecycle. 'pending' is the retryable family (the deposit is fine,
- * just not credited yet); 'failed' carries `retryable` so the two families can
- * never be confused on screen.
- */
 type DepositPhase =
   | { kind: 'idle' }
   | { kind: 'signing' }
@@ -80,13 +66,11 @@ interface DepositApiResponse {
   error?: string;
   confirmations?: number;
   requiredConfirmations?: number;
-  /** Server-side facts of the credit; the receipt may show these, nothing else. */
   fee?: number;
   netCredited?: number;
   creditedAt?: string;
 }
 
-/** The ledger's own account of a completed credit, when the route supplied one. */
 export interface ServerCredit {
   fee?: number;
   netCredited?: number;
@@ -97,7 +81,6 @@ export interface ServerCredit {
 interface VerificationRecord {
   txHash: string;
   phase: TrackedPhase;
-  /** Set once the ledger confirms the credit; lets late joiners replay it. */
   credit: ServerCredit | null;
   listeners: Set<(phase: TrackedPhase) => void>;
   running: boolean;
@@ -110,10 +93,6 @@ interface VerificationInput {
   onCredited: (txHash: string, credit?: ServerCredit) => void;
 }
 
-/**
- * Shape of GET /api/arc/deposit-precheck. Every field is optional because a
- * failed or partial fetch is stored as null rather than a fake 'not ready'.
- */
 interface PreFlight {
   ready?: boolean;
   banned?: boolean;
@@ -126,13 +105,6 @@ interface PreFlight {
   balance?: number | null;
 }
 
-/**
- * One verification per tx hash, app-wide. The record outlives the modal, so a
- * resubmitted hash joins the loop that is already running instead of starting a
- * second one, and a hash that already credited reports 'credited' rather than
- * an error. The ledger itself is idempotent (deposit_locks), so this is about
- * not hammering it and not confusing the player.
- */
 const verifications = new Map<string, VerificationRecord>();
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -142,7 +114,6 @@ const decimalPlaces = (value: string): number => {
   return fraction.length;
 };
 
-/** Plain-language progress for each retryable reason the verifier can return. */
 function pendingNote(code: string | undefined, status: number): string {
   switch (code) {
     case 'tx_not_found':
@@ -160,7 +131,6 @@ function pendingNote(code: string | undefined, status: number): string {
   }
 }
 
-/** What the player should actually do, per terminal reason. */
 const TERMINAL_GUIDANCE: Record<string, string> = {
   tx_reverted:
     'The transfer reverted on Arc, so no USDC left your wallet and nothing was credited. Deposit again — if it reverts a second time, check the explorer link below.',
@@ -199,8 +169,6 @@ async function runVerification(
       const response = await fetch('/api/balance/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // The balance routes authorise the HttpOnly session cookie minted by
-        // /api/balance/session; without this the credit answers 401.
         credentials: 'include',
         body: JSON.stringify({
           userAddress: input.userAddress,
@@ -217,8 +185,6 @@ async function runVerification(
       body = null;
     }
 
-    // Credited, or already on the ledger from an earlier attempt — both are the
-    // same end state for the player, so never render the 409 as an error.
     if ((status === 200 && body?.success) || body?.duplicate || status === 409) {
       const credit: ServerCredit = {
         fee: typeof body?.fee === 'number' ? body.fee : undefined,
@@ -232,9 +198,6 @@ async function runVerification(
       return;
     }
 
-    // A missing balance session is ours to fix, not the player's problem: mint
-    // the cookie and retry the very same hash once. Still the one crediting
-    // path, so a retry can never double-credit (deposit_locks).
     if (status === 401 && !sessionRefreshed) {
       sessionRefreshed = true;
       await ensureBalanceSession();
@@ -253,8 +216,6 @@ async function runVerification(
       requiredConfirmations = body.requiredConfirmations;
     }
 
-    // The retryable family: keep watching the same hash. Server-side faults
-    // count here too — the route releases the lock when nothing was credited.
     if (body?.retryable === true || status === 0 || (status >= 500 && status < 600)) {
       publish({
         kind: 'pending',
@@ -267,8 +228,6 @@ async function runVerification(
       continue;
     }
 
-    // Everything else is a refusal the ledger will repeat: stop, explain, and
-    // tell the player what to do instead of leaving the deposit hanging.
     publish({
       kind: 'failed',
       txHash: record.txHash,
@@ -281,9 +240,6 @@ async function runVerification(
     return;
   }
 
-  // Out of patience on a deposit that is still not rejected: this is NOT a
-  // failure. Release the record so 'Check again' can start a fresh verification
-  // of the same hash.
   publish({
     kind: 'failed',
     txHash: record.txHash,
@@ -315,17 +271,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   const [phase, setPhase] = useState<DepositPhase>({ kind: 'idle' });
   const [walletBalance, setWalletBalance] = useState(0);
   const [balanceState, setBalanceState] = useState<'loading' | 'ready' | 'error'>('loading');
-  /** Estimated transfer fee in whole tokens; the reserve adds GAS_BUFFER on top. */
   const [gasFee, setGasFee] = useState<number | null>(null);
   const [feeState, setFeeState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [precheck, setPrecheck] = useState<PreFlight | null>(null);
   const [recheckKey, setRecheckKey] = useState(0);
 
-  // getArcConfig() rebuilds its object (and the assets map) on every call, so it
-  // must be memoised: kept as a render-time value it would be a new dependency
-  // for the balance and fee effects below, which then re-fire on every render —
-  // the balance check would flip back to 'loading' constantly and the pre-flight
-  // would refuse to sign even with funds on screen.
   const config = useMemo(getArcConfig, []);
   const asset: ArcAsset = 'USDC';
   const assetConfig = config.assets[asset];
@@ -369,15 +319,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       record.listeners.add(handlePhase);
       setPhase(record.phase);
 
-      // Late joiner: this hash already credited while another modal instance
-      // owned the loop. Replay the confirmation so this player sees the credit
-      // and the balance refreshes for them too — a read, never a second POST.
       if (record.phase.kind === 'credited' && !record.running) {
         input.onCredited(txHash, record.credit ?? undefined);
         return;
       }
 
-      // Duplicate protection: a verification for this hash is already in flight.
       if (!record.running) {
         record.running = true;
         void runVerification(record, input).finally(() => {
@@ -390,21 +336,16 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   useEffect(
     () => () => {
-      // Read the ref at cleanup time: at mount the record may not exist yet,
-      // and a value captured then would unhook nothing on unmount.
       const record = activeRecord.current;
       if (record) record.listeners.delete(handlePhase);
     },
     [handlePhase]
   );
 
-  // Reopening after a finished deposit starts from a clean slate; a verification
-  // that is still running (or that failed) keeps showing its real state.
   useEffect(() => {
     if (isOpen) setPhase((current) => (current.kind === 'credited' ? { kind: 'idle' } : current));
   }, [isOpen]);
 
-  /** Reads the connected wallet's balance of the selected asset. */
   useEffect(() => {
     if (!isOpen || !address) return;
     let cancelled = false;
@@ -439,13 +380,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     };
   }, [isOpen, address, asset, assetConfig, config.chainId, config.name, config.rpcEndpoint, recheckKey]);
 
-  /**
-   * On Arc the native gas token and the deposited ERC-20 are the same USDC
-   * balance (18 vs 6 decimals — see lib/arc/config.ts). Transferring the
-   * full balance would leave nothing to pay for the transfer itself, so Max
-   * reserves the estimated tx fee plus a small buffer, and the pre-flight
-   * refuses anything that would leave the fee unpaid.
-   */
   const estimateGasFee = useCallback(
     async (wholeTokens: number): Promise<number> => {
       try {
@@ -454,8 +388,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           name: config.name,
         });
         const value = ethers.parseUnits(wholeTokens.toString(), assetConfig.decimals);
-        // The loose string-ABI contract type leaves estimateGas unindexed; the
-        // call shape is fixed by ERC20_ABI above.
         const readonlyContract: any = new ethers.Contract(
           assetConfig.address,
           ERC20_ABI,
@@ -465,10 +397,8 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         const feeData = await provider.getFeeData();
         const gasPrice = feeData.gasPrice ?? feeData.maxFeePerGas;
         if (gasPrice == null) return 0.01;
-        // Gas is priced in 18-decimal native USDC; convert to the deposit unit.
         return parseFloat(ethers.formatUnits(gas * gasPrice, 18));
       } catch (err) {
-        // If the node is unreachable, keep a conservative flat headroom.
         console.warn('[deposit] gas estimate failed, reserving 0.01 USDC', err);
         return 0.01;
       }
@@ -482,7 +412,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     ]
   );
 
-  // Live gas check for the pre-flight panel (Max still estimates on click).
   useEffect(() => {
     if (!isOpen || balanceState !== 'ready' || walletBalance <= 0) {
       setFeeState('loading');
@@ -502,12 +431,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     };
   }, [isOpen, balanceState, walletBalance, estimateGasFee, recheckKey]);
 
-  /**
-   * Server-side pre-flight: the two things the browser cannot establish —
-   * whether this wallet may deposit at all, and whether this deployment is
-   * configured to credit it. Advisory: if it cannot be reached the deposit is
-   * not blocked, because the on-chain verifier is still authoritative.
-   */
   useEffect(() => {
     if (!isOpen || !address) {
       setPrecheck(null);
@@ -542,7 +465,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     if (!value.trim()) return 'Enter an amount';
     const parsed = parseFloat(value);
     if (!Number.isFinite(parsed) || parsed <= 0) return 'Amount must be greater than zero';
-    // Token guard: USDC has 6 decimals, so finer precision can never arrive.
     if (decimalPlaces(value) > assetConfig.decimals) {
       return `${asset} supports at most ${assetConfig.decimals} decimal places`;
     }
@@ -557,7 +479,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     return null;
   };
 
-  /** Everything that must be true before a signature is asked for. */
   const preFlightError = (): string | null => {
     const amountError = validate(amount);
     if (amountError) return amountError;
@@ -578,7 +499,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
-    // Digits with at most one decimal point.
     if (value !== '' && !/^\d*\.?\d*$/.test(value)) return;
     setAmount(value);
     setError(null);
@@ -629,8 +549,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const markCredited = useCallback(
     async (txHash: string, creditedAmount: number, walletAddress: string, credit?: ServerCredit) => {
-      // Always re-read the ledger after a credit: the server value is the truth,
-      // the cached balance is whatever it was before the deposit landed.
       await fetchBalance(walletAddress);
       toast.success(
         `Successfully deposited ${creditedAmount.toFixed(4)} ${asset}! Balance updated.`
@@ -666,8 +584,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     try {
       const provider = new ethers.BrowserProvider(await resolveWalletProvider());
 
-      // Offer the switch rather than just refusing, then confirm it landed —
-      // this native USDC transfer must not be signed on another network.
       if (Number((await provider.getNetwork()).chainId) !== config.chainId) {
         await switchToArc();
       }
@@ -679,8 +595,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       const signer = await provider.getSigner();
       const from = await signer.getAddress();
       if (from.toLowerCase() !== walletAddress.toLowerCase()) {
-        // Attribution is by Transfer-log payer: signing with another account
-        // would pay gas for a deposit the ledger can never credit to us.
         throw new Error(
           `The wallet asked to sign (${shortenAddress(from)}) is not the account you are signed in with (${shortenAddress(
             walletAddress
@@ -697,8 +611,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
       if (!tx.hash) throw new Error('The wallet returned a transaction without a hash');
 
-      // The backend re-verifies the transaction on-chain before crediting; this
-      // keeps watching the same hash and reports n/3 progress.
       submitted.current = { txHash: tx.hash, amount: depositAmount, userAddress: walletAddress };
       const txHash = tx.hash;
       startVerification(txHash, {
@@ -720,7 +632,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     }
   };
 
-  /** Re-check the same hash: never a second payment, never a fresh signature. */
   const recheckSameTx = () => {
     const last = submitted.current;
     if (!last) return;

@@ -1,11 +1,5 @@
 'use client';
 
-/**
- * Inventory panel: active price feeds per category. The feed list comes from a
- * compile-time constant (no DB pagination is possible), so ?q / ?limit /
- * ?offset are applied to the loaded array — still deep-linked so a view of the
- * 40th feed is shareable.
- */
 
 import { useMemo } from 'react';
 import { apiListQuery, type DashFilters } from './dashQuery';
@@ -26,7 +20,6 @@ export default function MarketsPanel({
     onUnauthorized: () => void;
     onPatch: (patch: Partial<DashFilters>) => void;
 }) {
-    // ?q= is reused as the symbol filter; the API itself ignores list params.
     const url = useMemo(() => `/api/admin/currencies?${apiListQuery(filters)}`, [filters]);
     const list = useAdminFetch<CurrencyApi>(url, { nonce, onUnauthorized });
 

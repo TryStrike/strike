@@ -1,7 +1,3 @@
-/**
- * Game Sound Manager
- * Handles playing win and lose sounds using Web Audio API
- */
 
 export const playWinSound = () => {
     if (typeof window === 'undefined') return;
@@ -22,10 +18,9 @@ export const playWinSound = () => {
         oscillator.connect(gainNode);
         gainNode.connect(audioCtx.destination);
 
-        // Modern "Success Pop" - Clean, short, and optimistic
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(440, audioCtx.currentTime); // A4
-        oscillator.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.05); // Snap to A5
+        oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.05);
 
         gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
         gainNode.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 0.01);
@@ -47,7 +42,6 @@ export const playLoseSound = () => {
 
         const audioCtx = new AudioContextClass();
 
-        // Auto-resume context if suspended (browser policy)
         if (audioCtx.state === 'suspended') {
             audioCtx.resume();
         }
@@ -58,10 +52,9 @@ export const playLoseSound = () => {
         oscillator.connect(gainNode);
         gainNode.connect(audioCtx.destination);
 
-        // Modern "Muted Pop" - Clean, short, and subtle
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(220, audioCtx.currentTime); // A3
-        oscillator.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 0.1); // Slide down to A2
+        oscillator.frequency.setValueAtTime(220, audioCtx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 0.1);
 
         gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
         gainNode.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 0.01);

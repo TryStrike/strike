@@ -1,19 +1,9 @@
 'use client';
 
-/**
- * MoneyText — fixed-decimal currency rendering with deterministic
- * half-away-from-zero rounding (never JS banker's rounding surprises like
- * (1.005).toFixed(2) === "1.00"), thousands grouping and an optional symbol.
- */
 
 import React from 'react';
 import { cx } from './kit';
 
-/**
- * Pure: round `value` to `decimals` places, half away from zero, and group
- * thousands. Accepts numbers and numeric strings (e.g. wei-scaled decimal
- * strings from the backend). Non-finite input → the zero form.
- */
 export function formatMoney(
   value: number | string,
   decimals: number = 2,
@@ -27,13 +17,8 @@ export function formatMoney(
 
   const abs = Math.abs(num);
 
-  // Half-away-from-zero rounding at dp places, via string exponent shift to
-  // dodge binary-float edge cases (1.005, 0.145, …).
   const shifted = shiftDecimal(abs, dp);
-  // Math.round is half-up; `abs` is non-negative so that is half-away-from-zero.
   const rounded = shiftDecimal(Math.round(shifted), -dp);
-  // A value that rounds to zero must never render as "-0.00" — the sign was
-  // only cosmetic, and "-0" reads as a bug (and breaks delta semantics).
   const negative = num < 0 && rounded !== 0;
   const fixed = rounded.toFixed(dp);
 
@@ -45,11 +30,6 @@ export function formatMoney(
   return `${prefix}${symbol}${body}`;
 }
 
-/**
- * Pure: move the decimal point `dp` places to the RIGHT (negative dp moves
- * it left), using digit-string surgery so values like 1.005 land exactly on
- * 100.5 instead of 100.49999999999999.
- */
 export function shiftDecimal(x: number, dp: number): number {
   if (x === 0 || dp === 0 || !Number.isFinite(x)) return x;
   const neg = x < 0;
@@ -69,22 +49,14 @@ export function shiftDecimal(x: number, dp: number): number {
 }
 
 export interface MoneyTextProps {
-  /** Amount in the display unit (not cents) — number or numeric string. */
   value: number | string;
   decimals?: number;
-  /** Prefix symbol, e.g. "$". Empty string renders bare. */
   symbol?: string;
-  /** Always show + for positive values. */
   showSign?: boolean;
-  /** Color by sign: green up / orange down, using theme tokens. */
   colorBySign?: boolean;
   className?: string;
 }
 
-/**
- * Pure: the sign the VIEWER actually sees after rounding to `decimals`.
- * A value like -0.004 renders as 0.00, so it must stay colour-neutral.
- */
 export function moneyTone(value: number | string, decimals = 2): 'up' | 'down' | 'flat' {
   const dp = Math.max(0, Math.min(18, Math.trunc(decimals) || 0));
   const num = typeof value === 'string' ? parseFloat(value.replace(/[, ]/g, '')) : value;

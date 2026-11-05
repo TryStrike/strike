@@ -1,7 +1,3 @@
-/**
- * Shared shapes for the admin dashboard panels (extracted from the old
- * monolithic page; field names mirror the API responses).
- */
 
 import { isArcAsset } from '@/lib/arc/config';
 
@@ -15,11 +11,9 @@ export interface ModeStats {
     totalVolume: number;
     totalBets: number;
     platformPnL: number;
-    /** House edge Σ(stake−payout) per `bet_history.network` in that chain's native units */
     platformPnLByNetwork?: Record<string, NetworkPnLRow>;
     totalUsers: number;
     totalReferrals: number;
-    /** Mean session length from `user_sessions` (ping tracker); seconds. */
     averageSessionSeconds?: number;
     sessionSampleCount?: number;
 }
@@ -96,7 +90,6 @@ export interface TreasuryBalanceApiRow {
     error: string | null;
 }
 
-/** A row of /api/admin/withdrawal-requests/pending (signed_at powers the countdown). */
 export interface PendingWithdrawal {
     id: number;
     user_address: string;
@@ -112,7 +105,6 @@ export interface PendingWithdrawal {
     signed_at?: number | string | null;
 }
 
-/** Debited but not settled: a payout still running, or one parked for an operator. */
 export interface UnresolvedWithdrawal {
     id: number;
     user_address: string;
@@ -132,7 +124,6 @@ export interface Paged<T> {
 
 export const MARKET_CATEGORY_ORDER = ['Crypto', 'Forex', 'Metals', 'Stocks', 'Commodities'] as const;
 
-/** Ledger token ticker for bet_history.network. */
 export function tokenSymbolForNetwork(net: string): string {
     const u = (net ?? '').trim().toUpperCase();
     try {

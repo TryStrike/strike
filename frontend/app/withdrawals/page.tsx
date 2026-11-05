@@ -32,21 +32,6 @@ import {
 import { formatRemaining, windowMinutes } from '@/lib/withdrawals/expiry';
 import { formatUsdc, formatWhen, shortHash } from '@/lib/withdrawals/format';
 
-/**
- * Player withdrawal status timeline.
- *
- * Read-only by construction: every request this page makes is a GET. There is
- * no path here that re-submits a stored intent, so refreshing or retrying can
- * never create (or duplicate) a withdrawal request — a new request is only
- * ever made from /trade with a fresh signature and a fresh `signedAt`.
- *
- * The list is server-paged (limit/offset against the ledger, ordered newest
- * first) and scoped by a wallet-signed read proof, so the API can only ever
- * return this wallet's rows. Statuses are shown exactly as the ledger records
- * them; the only derived state is the documented 10-minute signing window
- * (lib/withdrawals/expiry.ts), which explains WHY an untouched pending row
- * will never move — it never claims anything was paid.
- */
 
 type WithdrawalRow = {
   id: number;
@@ -54,8 +39,6 @@ type WithdrawalRow = {
   amount: number | string;
   fee_amount: number | string;
   net_amount: number | string;
-  /** Schema allows pending/accepted/rejected/paid_needs_reconciliation;
-   * unknown values fall back to a sane view (lib/withdrawals/status.ts). */
   status: string;
   requested_at: string;
   decided_at?: string | null;
@@ -110,9 +93,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(value);
-        } catch {
-          /* clipboard unavailable (http, permissions): value is still visible */
-        }
+        } catch {}
         setCopied(true);
         timer.current = setTimeout(() => setCopied(false), 1500);
       }}
@@ -255,12 +236,9 @@ export default function WithdrawalsPage() {
   const [query, setQuery] = useState('');
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  // Cached read proof: signing prompts the wallet, so it is signed once per
-  // ~9 minutes and reused across refresh/polling. Cleared on any 401.
   const proofCache = useRef<{ value: string; issuedAt: number; forAddress: string } | null>(null);
   const inFlight = useRef(false);
   useEffect(() => {
-    // Address change ⇒ the old proof is for a different wallet; drop it.
     proofCache.current = null;
   }, [address]);
 
@@ -296,7 +274,6 @@ export default function WithdrawalsPage() {
       }
     } catch (e) {
       if (e instanceof ReadAuthNeededError) throw e;
-      // User rejected the signature request — surface a deliberate retry path.
       throw new ReadAuthNeededError('rejected');
     } finally {
       setSigningInProgress(false);
@@ -329,9 +306,6 @@ export default function WithdrawalsPage() {
       try {
         let { res, body } = await request(false);
 
-        // A lapsed/malformed cached proof: re-sign once silently and replay
-        // the same read-only GET. An invalid signature is not retryable by
-        // re-reading — it needs the deliberate Authorize flow below.
         if (res.status === 401 && body?.code && body.code !== 'read_auth_invalid_signature') {
           ({ res, body } = await request(true));
         }
@@ -384,9 +358,6 @@ export default function WithdrawalsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, isConnected]);
 
-  // Poll only while at least one request can still move. Terminal rows
-  // (paid, rejected, needs-reconciliation, expired signatures) stop the timer;
-  // the Refresh button stays available regardless.
   const pollingActive = hasOpenWithdrawals(rows);
   useEffect(() => {
     if (!address || !pollingActive) return;
@@ -394,7 +365,6 @@ export default function WithdrawalsPage() {
     return () => clearInterval(int);
   }, [address, pollingActive, load]);
 
-  // Deep link from the receipt drawer: /withdrawals?request=<id> expands that row.
   useEffect(() => {
     const raw = new URLSearchParams(window.location.search).get('request');
     const id = Number(raw);

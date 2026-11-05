@@ -46,9 +46,6 @@ export const GameBoard: React.FC = () => {
   const { connector } = useAccount();
 
   const [betAmount, setBetAmount] = useState<string>('0.1');
-  // Default box-mode settings (when user lands on /trade):
-  // - Quick Amount: 0.1
-  // - Expiration Time: 5s
   const [selectedDuration, setSelectedDuration] = useState<number>(5);
 
   const [blitzCountdown, setBlitzCountdown] = useState<string>('');
@@ -57,7 +54,6 @@ export const GameBoard: React.FC = () => {
 
   const toast = useToast();
 
-  // Refresh the wallet figure whenever the ledger asset changes.
   useEffect(() => {
     if (!isConnected || !address) return;
     void refreshWalletBalance();
@@ -65,10 +61,8 @@ export const GameBoard: React.FC = () => {
 
   const currencySymbol = 'USDC';
 
-  // Blitz entry is paid to the platform fee collector, not the treasury.
   const blitzEntryFee = 1;
   const blitzEntryCurrencySymbol = currencySymbol;
-  // Connection status
   const isWalletConnected = !!address;
 
   const handleEnterBlitz = async () => {
@@ -134,7 +128,6 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  // Update Blitz Timer every second
   useEffect(() => {
     const interval = setInterval(() => {
       updateBlitzTimer();
@@ -156,25 +149,20 @@ export const GameBoard: React.FC = () => {
 
 
 
-  // Sync selectedDuration with store's timeframeSeconds
   useEffect(() => {
-    // Classic: duration picker affects both betting window & grid
     if (gameMode === 'binomo') {
       setTimeframeSeconds(selectedDuration);
       return;
     }
 
-    // Box/Draw: keep draw sizing/parity stable with the reference behavior
     if (gameMode === 'draw') {
       setTimeframeSeconds(5);
       return;
     }
 
-    // Box keeps the existing behavior
     setTimeframeSeconds(selectedDuration);
   }, [selectedDuration, setTimeframeSeconds, gameMode]);
 
-  // Multiplier mapping based on duration
   const getMultiplier = (duration: number) => {
     switch (duration) {
       case 5: return 1.75;
@@ -188,14 +176,11 @@ export const GameBoard: React.FC = () => {
 
   const handleStrikeBet = async (direction: 'UP' | 'DOWN') => {
     if (!address || !isWalletConnected || gameMode !== 'binomo') return;
-    // Read the live flag (not the render snapshot): a second click/keydown that
-    // lands before rerenders must not start a duplicate placement.
     if (useStore.getState().isPlacingBet) return;
 
     try {
       const multiplier = getMultiplier(selectedDuration);
 
-      // House balance only — /api/balance/bet deducts house balance; no on-chain stake per bet.
       await placeBetFromHouseBalance(
         betAmount,
         `${direction}-${multiplier}-${selectedDuration}`,
@@ -221,15 +206,12 @@ export const GameBoard: React.FC = () => {
       error.includes('Insufficient house') ||
       error.includes('balance'));
 
-  // Session strip: rounds settled since this page opened.
   const [sessionStart] = useState(() => Date.now());
   const sessionBets = bets.filter((b) => b.timestamp >= sessionStart);
   const sessionPnl = sessionBets.reduce((sum, b) => sum + (b.won ? parseFloat(b.payout) - parseFloat(b.amount) : -parseFloat(b.amount)), 0);
   let streak = 0;
   while (streak < sessionBets.length && sessionBets[streak].won) streak++;
 
-  // Price-feed stall banner. Polled from getState() (lastTickAt changes every
-  // second and must not rerender the board); the boolean only flips at the edge.
   const lastResult = useStore((s) => s.lastResult);
   const [feedDelayed, setFeedDelayed] = useState(false);
   useEffect(() => {
@@ -242,8 +224,6 @@ export const GameBoard: React.FC = () => {
     return () => clearInterval(id);
   }, []);
 
-  // Screen-reader round status: settles and insufficient-balance errors only —
-  // never per-tick prices.
   const [srMessage, setSrMessage] = useState('');
   useEffect(() => {
     if (!lastResult) return;
@@ -261,14 +241,12 @@ export const GameBoard: React.FC = () => {
     }
   }, [error, isBalanceError]);
 
-  // Keyboard trading: ↑ / ↓ place Higher / Lower, 1–5 pick an amount preset.
   const betRef = React.useRef(handleStrikeBet);
   useEffect(() => {
     betRef.current = handleStrikeBet;
   });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ignore OS key auto-repeat — holding ↑ must not fire a burst of bets.
       if (e.repeat) return;
       const el = e.target as HTMLElement | null;
       if (
@@ -291,29 +269,15 @@ export const GameBoard: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [gameMode, isWalletConnected, isPlacingBet]);
 
-  // ── Settlement proof wiring ────────────────────────────────────────────────
-  // A settled round is described by its history row (strike / end price / money)
-  // plus the result the engine just published (asset + currency). Anything the
-  // row cannot know — the click-time round end, the idempotency key, ledger
-  // operations and real chain hashes — is filled in read-only by
-  // GET /api/bets/[id] when the panel opens.
   const lastSettledBet = useMemo(() => matchSettledRound(bets, lastResult), [bets, lastResult]);
   const resultProof = useMemo<SettlementProofInput | null>(() => {
     if (!lastResult) return null;
-    // A settled round ALWAYS offers a proof: the history row is preferred for
-    // strike/direction detail, but lastResult now carries the server bet id
-    // too, so even a round whose row was lost (history reload, filtered
-    // storage) still opens GET /api/bets/<id> and reads the row back.
     const betId = lastSettledBet?.id ?? lastResult.betId ?? null;
     if (!betId) return null;
     const row = lastSettledBet;
-    // The engine stamps the asset on the session row it writes at resolve
-    // time; BetRecord's public type does not carry it, so read it defensively.
     const rowAsset = (row as unknown as { asset?: string | null } | null)?.asset ?? null;
     return {
       betId,
-      // lastResult carries the asset the round ran on, so the panel looks the
-      // feed history up under the right key even after the user switches.
       asset: lastResult.asset ?? rowAsset ?? null,
       mode: row?.target?.id ?? null,
       direction: row?.target?.direction ?? null,
@@ -321,7 +285,6 @@ export const GameBoard: React.FC = () => {
       stake: row ? parseFloat(row.amount) : lastResult.amount,
       payout: row ? parseFloat(row.payout) : lastResult.payout,
       won: row ? row.won : lastResult.won,
-      // end_price on the history row is what the client held at resolution.
       recordedEndPrice: row?.endPrice || null,
       strikePrice: row?.startPrice || null,
       resolvedAt: lastResult.timestamp,
@@ -329,9 +292,6 @@ export const GameBoard: React.FC = () => {
     };
   }, [lastSettledBet, lastResult]);
 
-  // Proof entry points for the resolved-bet list (newest rounds first). Their
-  // asset/endTime are not on the row, so the panel reads them from the proof
-  // endpoint and falls back to the recorded value with a caveat if it cannot.
   const listProofs = useMemo(
     () =>
       bets.slice(0, 5).map((bet) => ({
@@ -351,12 +311,9 @@ export const GameBoard: React.FC = () => {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col lg:flex-row">
-      {/* Chart */}
       <div className="relative min-h-[420px] flex-1 lg:min-h-0">
         <LiveChart betAmount={betAmount} />
         <WinBurst />
-        {/* Persistent status region: text only appears on a stall, so the
-            announcement fires (mounting a fresh live region is unreliable). */}
         <div className="absolute left-1/2 top-2 z-[45] -translate-x-1/2">
           <div
             role="status"
@@ -375,19 +332,15 @@ export const GameBoard: React.FC = () => {
         </div>
       </div>
 
-      {/* Screen-reader announcements: round results + balance errors only. */}
       <div aria-live="polite" className="sr-only">
         {srMessage}
       </div>
 
-      {/* Trade sidebar */}
       <aside
         className="w-full shrink-0 overflow-y-auto border-t border-line bg-gradient-to-b from-white to-surface/60 lg:w-[380px] lg:border-l lg:border-t-0"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <div className="flex flex-col gap-7 p-6">
-          {/* Result moment: the round that just closed, with its settlement
-              breakdown one keystroke (Enter/Space) away. */}
           {resultProof && (
             <SettlementProof
               bet={resultProof}
@@ -516,7 +469,6 @@ export const GameBoard: React.FC = () => {
             </div>
           )}
 
-          {/* Balance */}
           <div className="border-y border-line py-6" data-tour="deposit-section">
             {isWalletConnected && address ? (
               <div className="flex flex-col gap-3" data-tour="wallet-tab">
@@ -533,7 +485,6 @@ export const GameBoard: React.FC = () => {
             )}
           </div>
 
-          {/* Blitz */}
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-sm font-semibold">
@@ -563,8 +514,6 @@ export const GameBoard: React.FC = () => {
 
           <MiniHistory />
 
-          {/* Resolved-bet list: open the proof for any round in this session.
-              The chip itself prints the resolve clock, so no formatting here. */}
           {listProofs.length > 0 && (
             <div data-testid="settlement-proof-list">
               <Label>Settlement proofs</Label>

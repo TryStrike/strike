@@ -1,19 +1,10 @@
-// Magic UI Dither Field (magicui.design/docs/components/dither-field), vendored.
 "use client"
 
 import { useEffect, useRef, useState, type CSSProperties } from "react"
 
 import { cx } from "@/components/ui/kit"
 
-/**
- * Each pattern is the GLSL body of `float pattern(vec2 p, vec2 size, float t)`.
- * `p` is the position in CSS pixels from the bottom-left corner, `size` is
- * the field size in CSS pixels and `t` is the time in seconds. Return the
- * light level, where 0 is dark and 1 is full light. Add an entry here to add
- * a pattern; the `pattern` prop type follows.
- */
 const PATTERNS = {
-  // A low sun on the bottom edge, with haze bands that drift up through it.
   horizon: `
     float r = max(min(size.x * 0.42, size.y * 0.8), 90.0);
     vec2 d = (p - vec2(0.5 * size.x, -0.15 * r)) / vec2(1.25 * r, r);
@@ -28,7 +19,6 @@ const PATTERNS = {
     float sides = smoothstep(0.0, 0.2, p.x / size.x) * smoothstep(1.0, 0.8, p.x / size.x);
     return (sun * (1.0 + haze) + haze * 0.35 + ground) * sides * (1.0 + 0.04 * sin(t * 0.4));
   `,
-  // A soft orb in the middle that breathes and wanders a little.
   glow: `
     vec2 c = 0.5 * size + vec2(sin(t * 0.21), cos(t * 0.17)) * 0.05 * size;
     float r = 0.5 * min(size.x, size.y);
@@ -36,7 +26,6 @@ const PATTERNS = {
     float n = fbm(p / 170.0 + vec2(t * 0.05, -t * 0.04));
     return exp(-1.7 * d * d) * (0.75 + 0.45 * n) + 0.12 * n * exp(-d);
   `,
-  // Curtains of light that hang from the top and sway.
   aurora: `
     float sway = fbm(vec2(p.x / 600.0, t * 0.05));
     float d = p.y / size.y - (0.45 + 0.35 * (sway - 0.5));
@@ -45,7 +34,6 @@ const PATTERNS = {
     float shimmer = fbm(vec2(p.x / 40.0 - t * 0.05, 3.0));
     return curtain * (0.25 + 0.75 * smoothstep(0.3, 0.75, rays)) * (0.6 + 0.5 * shimmer);
   `,
-  // Slow diagonal swells, like dunes or contour lines.
   waves: `
     vec2 q = p / 32.0;
     float warp = fbm(q * 0.09 + vec2(t * 0.035, t * 0.02));
@@ -53,7 +41,6 @@ const PATTERNS = {
     float crest = s * s * s * s;
     return crest * (0.5 + 0.5 * p.y / size.y) + 0.12 * warp;
   `,
-  // Drifting clouds that fill the whole area evenly.
   clouds: `
     float n = fbm(p / 210.0 + vec2(t * 0.03, t * 0.012));
     float m = fbm(p / 80.0 - vec2(t * 0.02, 0.0));
@@ -63,55 +50,19 @@ const PATTERNS = {
 
 export type DitherPattern = keyof typeof PATTERNS
 
-/** One colour, or a `[low, mid, high]` ramp from dim dots to bright dots. */
 export type DitherColor = string | readonly [string, string, string]
 
 export interface DitherFieldProps extends Omit<
   React.ComponentPropsWithoutRef<"div">,
   "color"
 > {
-  /**
-   * The procedural light field that the dots follow.
-   * @default "horizon"
-   */
   pattern?: DitherPattern
-  /**
-   * An image or video URL to dither instead of the pattern. Bright areas get
-   * more dots. URLs ending in .mp4, .webm, .ogv, .mov or .m4v (or
-   * `data:video/` URLs) play as muted, looping video. Remote files must allow
-   * CORS.
-   */
   src?: string
-  /**
-   * Any CSS colour, including `var(--primary)` and `currentColor`, or a
-   * `[low, mid, high]` ramp. One colour fades from 35% to full opacity.
-   * @default "currentColor"
-   */
   color?: DitherColor
-  /**
-   * The size of one dot in CSS pixels. Dots snap to whole device pixels.
-   * @default 1
-   */
   dotSize?: number
-  /**
-   * Brightness of the field. 0 shows only the pointer glow; above 1 fills more.
-   * @default 0.75
-   */
   intensity?: number
-  /**
-   * Animation speed multiplier. `0` holds a still frame.
-   * @default 1
-   */
   speed?: number
-  /**
-   * Frame rate cap. The dots read as a still texture, so 30 is plenty.
-   * @default 30
-   */
   fps?: number
-  /**
-   * Brighten the field around the mouse, the pen or a held finger.
-   * @default true
-   */
   interactive?: boolean
 }
 
@@ -120,7 +71,6 @@ type Rgba = [number, number, number, number]
 type Media = HTMLImageElement | HTMLVideoElement
 
 type Renderer = {
-  /** Sizes the dot grid (canvas pixels) and the field (CSS pixels). */
   resize: (dotsX: number, dotsY: number, cssX: number, cssY: number) => void
   setRamp: (ramp: Rgba[]) => void
   setIntensity: (intensity: number) => void
@@ -177,7 +127,6 @@ void main() {
   outColor = vec4(clamp(v, 0.0, 1.0), 0.0, 0.0, 1.0);
 }`
 
-// Image and video: luminance under a cover fit, so bright areas get more dots.
 const MEDIA_PATTERN = `
 uniform sampler2D uMedia;
 uniform vec2 uMediaSize;
@@ -238,7 +187,6 @@ void main() {
   outColor = vec4(c.rgb * c.a, c.a) * on;
 }`
 
-/** The light field renders at this fraction of the CSS size, then blooms. */
 const FIELD_SCALE = 0.6
 const POINTER_EASE = 6
 const VIDEO_FILE = /^data:video\/|\.(mp4|webm|ogv|mov|m4v)(\?|#|$)/i
@@ -278,12 +226,6 @@ function createTexture(gl: WebGL2RenderingContext, mipmaps: boolean) {
   return texture
 }
 
-/**
- * Two passes: the light field renders small into a mipmapped texture, then
- * the dither pass reads it with a bloom from the blurred mip levels and
- * thresholds it into dots, one canvas pixel per dot. Returns null when the
- * shaders do not compile, so the caller can fall back.
- */
 function createRenderer(
   gl: WebGL2RenderingContext,
   patternSource: string
@@ -302,7 +244,6 @@ function createRenderer(
   const mediaTexture = createTexture(gl, false)
   const framebuffer = gl.createFramebuffer()
   let media: Media | null = null
-  // Images upload once; video uploads a new frame on every draw.
   let mediaStale = false
   let view = [1, 1]
   let fieldView = [1, 1]
@@ -412,11 +353,6 @@ function createRenderer(
 const toRamp = (color: DitherColor) =>
   typeof color === "string" ? [color, color, color] : [...color]
 
-/**
- * Resolves CSS colours (`var(--x)`, `currentColor`, `oklch()`) in the
- * context of `host`, then reads them back as straight RGBA through a
- * 1x1 canvas. A single colour fades from 35% to full opacity.
- */
 function resolveRamp(host: HTMLElement, color: DitherColor): Rgba[] {
   const probe = document.createElement("span")
   probe.style.display = "none"
@@ -469,11 +405,6 @@ function loadMedia(
 const ease = (from: number, to: number, rate: number, dt: number) =>
   from + (to - from) * (1 - Math.exp(-rate * dt))
 
-/**
- * An animated ordered-dither background. A soft light field, or an image or
- * video, is thresholded against an 8x8 Bayer matrix into crisp square dots
- * coloured from a three-stop ramp. Children render above the dots.
- */
 export function DitherField({
   pattern = "horizon",
   src,
@@ -489,17 +420,12 @@ export function DitherField({
 }: DitherFieldProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const layerRef = useRef<HTMLDivElement>(null)
-  // The GL context only exists while the field is near the viewport, so a
-  // page with many fields stays under the browser's cap of live contexts.
   const [near, setNear] = useState(false)
   const [fallback, setFallback] = useState(false)
-  // Bumped when the browser restores a lost WebGL context.
   const [contextKey, setContextKey] = useState(0)
-  // Read every frame, so changing them never rebuilds the GL state.
   const live = useRef({ color, intensity, speed, fps, interactive })
   live.current = { color, intensity, speed, fps, interactive }
   const repaint = useRef(() => {})
-  // Kept across rebuilds, so a field that scrolls back into view resumes.
   const time = useRef(10)
   const shown = useRef(false)
   const colorKey = toRamp(color).join("|")
@@ -545,7 +471,6 @@ export function DitherField({
       return
     }
     setFallback(false)
-    // A field that comes back into view skips the fade-in.
     if (shown.current) canvas.dataset.ready = ""
     layer.appendChild(canvas)
 
@@ -571,17 +496,12 @@ export function DitherField({
       draw()
     }
     repaint.current = paint
-    // Theme changes can arrive in bursts; resolve the colours once a frame.
     let paintFrame = 0
     const schedulePaint = () => {
       cancelAnimationFrame(paintFrame)
       paintFrame = requestAnimationFrame(paint)
     }
 
-    // One dot is a whole number of device pixels, so dots stay crisp
-    // squares on any screen. The canvas may overhang the root by under a
-    // dot; the root clips it. Layout size, so transforms on a parent (an
-    // entrance animation, say) do not shrink the grid.
     const resize = () => {
       const width = root.clientWidth
       const height = root.clientHeight
@@ -600,8 +520,6 @@ export function DitherField({
       draw()
     }
 
-    // Animate only while the tab is visible and motion is allowed.
-    // Otherwise hold the last frame.
     const sync = () => {
       const running =
         ready && !lost && !document.hidden && !reducedMotion.matches
@@ -620,9 +538,6 @@ export function DitherField({
       frame = requestAnimationFrame(tick)
       const { speed, fps, interactive } = live.current
       if (previous && now - previous < 1000 / Math.max(fps, 1) - 2) return
-      // Real time since the last drawn frame, so a low fps keeps the same
-      // speed. The clock restarts on resume, and a stalled main thread
-      // cannot jump the field by more than 2 s.
       const dt = previous ? Math.min((now - previous) / 1000, 2) : 0
       previous = now
       time.current += dt * speed
@@ -665,8 +580,6 @@ export function DitherField({
     const video = media instanceof HTMLVideoElement ? media : null
 
     const onPointer = (event: PointerEvent) => {
-      // A finger only counts while it is down. Hover events from a lifted
-      // finger would leave the glow stuck where it last tapped.
       if (event.pointerType === "touch" && event.buttons === 0) return
       if (!pointer.on) {
         const box = root.getBoundingClientRect()
@@ -680,15 +593,10 @@ export function DitherField({
     const onLeave = () => {
       pointer.on = false
     }
-    // Lifting the finger, or the browser taking over the touch to scroll,
-    // fades the glow out. The listeners are passive, so scrolling is never
-    // blocked.
     const onTouchEnd = (event: PointerEvent) => {
       if (event.pointerType === "touch") pointer.on = false
     }
 
-    // A move to a screen with another pixel ratio changes the dot size
-    // without resizing the element.
     let ratioQuery: MediaQueryList | null = null
     const watchRatio = () => {
       ratioQuery?.removeEventListener("change", onRatio)
@@ -702,7 +610,6 @@ export function DitherField({
       watchRatio()
     }
 
-    // A lost context shows the CSS dots until the browser gives it back.
     const onLost = (event: Event) => {
       event.preventDefault()
       lost = true
@@ -712,7 +619,6 @@ export function DitherField({
     const onRestored = () => setContextKey((key) => key + 1)
 
     const resizeObserver = new ResizeObserver(resize)
-    // Theme switches usually toggle a class or attribute on <html>.
     const themeObserver = new MutationObserver(schedulePaint)
     const darkQuery = window.matchMedia("(prefers-color-scheme: dark)")
 
@@ -725,8 +631,6 @@ export function DitherField({
       attributes: true,
       attributeFilter: ["class", "data-theme"],
     })
-    // The root's own class or style can change `currentColor` or a CSS
-    // variable in the ramp, for example text-red-500 to text-blue-500.
     themeObserver.observe(root, {
       attributes: true,
       attributeFilter: ["class", "style"],

@@ -13,14 +13,7 @@ import { isConnectingPhase } from '@/lib/wallet/connectMachine';
 import { copyTextToClipboard, displayNameForWallet, truncateAddress } from '@/lib/wallet/addressDisplay';
 import { loadRecentWallets, saveRecentWallets } from '@/lib/wallet/recentWallets';
 
-/**
- * A connect attempt with no provider answer for this long is abandoned: the
- * user closed the wallet popup, dismissed ConnectKit, or walked away. The
- * watchdog clears the spinner; a late success still resolves to `authed`
- * because the state machine allows failed -> CONNECT_SUCCESS.
- */
 const CONNECT_TIMEOUT_MS = 60_000;
-/** Allow re-opening the picker mid-"connecting" once an attempt looks stale. */
 const STALE_CONNECT_MS = 8_000;
 
 function Spinner() {
@@ -64,7 +57,6 @@ export const WalletConnect: React.FC = () => {
     })),
   );
 
-  // Hydrate recent wallets from sessionStorage (client-only, dies with the tab).
   const hydratedRef = useRef(false);
   useEffect(() => {
     if (hydratedRef.current) return;
@@ -73,15 +65,12 @@ export const WalletConnect: React.FC = () => {
     if (stored.length > 0) setRecentWallets(stored);
   }, [setRecentWallets]);
 
-  // The store address (set by WalletSync) is the source of truth. Also adopts
-  // an already-restored session on mount (idle -> authed).
   useEffect(() => {
     if (address && connectPhase !== 'authed') {
       dispatchConnectEvent({ type: 'CONNECT_SUCCESS' });
     }
   }, [address, connectPhase, dispatchConnectEvent]);
 
-  // Remember the wallet for one-tap reconnect.
   const recordedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!wagmiConnected || !wagmiAddress || !connector) return;
@@ -92,14 +81,12 @@ export const WalletConnect: React.FC = () => {
     saveRecentWallets(useStore.getState().recentWallets);
   }, [wagmiConnected, wagmiAddress, connector, recordRecentWallet]);
 
-  // Wallet ended an authed session -> disconnected.
   useEffect(() => {
     if (connectPhase === 'authed' && !address) {
       dispatchConnectEvent({ type: 'DISCONNECT' });
     }
   }, [connectPhase, address, dispatchConnectEvent]);
 
-  // Watchdog: a prompt that never resolves must not pin the spinner forever.
   useEffect(() => {
     if (!isConnectingPhase(connectPhase) || connectingSince === null) return;
     const remaining = CONNECT_TIMEOUT_MS - (Date.now() - connectingSince);
@@ -151,9 +138,7 @@ export const WalletConnect: React.FC = () => {
         <button
           type="button"
           onClick={() => {
-            if (pending && !stalePending) return; // double-click guard against stacked prompts
-            // The modal's option rows start the connect: dispatching here would
-            // disable them, leaving the modal with nothing clickable.
+            if (pending && !stalePending) return;
             setConnectModalOpen(true);
           }}
           disabled={disabled}
@@ -288,7 +273,6 @@ function AccountMenu({
   );
 }
 
-/** Compact one-liners for the nav; full sentences live in the modal. */
 const ERROR_SUMMARY: Record<string, string> = {
   rejected: 'Connection declined',
   no_provider: 'No wallet found',

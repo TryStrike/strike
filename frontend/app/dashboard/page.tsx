@@ -1,14 +1,5 @@
 'use client';
 
-/**
- * Admin dashboard entry.
- *
- * The panel tree lives in components/admin/AdminDashboard.tsx (plus one file
- * per panel under components/admin/*). This page stays the route entry and
- * exists mainly to give `useSearchParams` a Suspense boundary: without it the
- * prerender of /dashboard fails, because reading the query string makes the
- * route unconditionally dynamic.
- */
 
 import { Suspense } from 'react';
 import AdminDashboard from '@/components/admin/AdminDashboard';

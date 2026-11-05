@@ -1,10 +1,5 @@
 'use client';
 
-/**
- * Gameplay panel: per-mode house analytics cards (real wallets only) plus the
- * bet history list. History filtering/pagination moved server-side; the
- * real/demo account split and the global filters deep-link via URL params.
- */
 
 import { useMemo } from 'react';
 import { apiExportQuery, apiListQuery, type DashFilters } from './dashQuery';
@@ -163,7 +158,6 @@ export default function GameplayPanel({
 
     return (
         <div className="text-left space-y-6">
-            {/* Mode analytics */}
             <div className="px-8 pt-8 pb-6 space-y-6">
                 <div className="flex items-center justify-between flex-wrap gap-3">
                     <div className="space-y-1">
@@ -199,7 +193,6 @@ export default function GameplayPanel({
                 </p>
             </div>
 
-            {/* Account filter — writes ?account= so the view is shareable */}
             <div className="p-6 border-b border-line flex flex-wrap gap-6 items-center bg-surface">
                 <div className="flex gap-2 bg-ink/40 p-1 rounded-xl border border-line" role="tablist" aria-label="Account filter">
                     {(['all', 'real', 'demo'] as const).map((mode) => (
@@ -244,9 +237,6 @@ export default function GameplayPanel({
                                         </tr>
                                     ))
                                     : bets.map((b) => {
-                                        // Demo rows are `demo-` ids OR `0xDEMO` wallets
-                                        // (isDemoBetHistoryRow) — id-prefix alone mislabels
-                                        // demo-wallet rows as Real money.
                                         const isDemo = isDemoBetHistoryRow(b);
                                         const net = String(b.network || 'USDC');
                                         const tok = tokenSymbolForNetwork(net);

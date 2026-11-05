@@ -14,7 +14,6 @@ type Win = { id: string; trader: string; asset: string; payout: number };
 
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
-/** Polls a JSON endpoint; keeps the last good value on failure. */
 function usePoll<T>(url: string, ms: number) {
   const [data, setData] = useState<T | null>(null);
   useEffect(() => {
@@ -25,7 +24,6 @@ function usePoll<T>(url: string, ms: number) {
         if (!res.ok) throw new Error(`${url} answered ${res.status}`);
         if (live) setData(await res.json());
       } catch (err) {
-        // The last good value stays on screen.
         console.warn('[landing] poll failed', err);
       }
     };
@@ -39,7 +37,6 @@ function usePoll<T>(url: string, ms: number) {
   return data;
 }
 
-/** "Built on Arc" proof: live treasury balance, recent on-chain flows and recent wins. */
 export function ArcProof() {
   const treasury = usePoll<Treasury>('/api/arc/treasury', 15_000);
   const wins = usePoll<{ wins: Win[] }>('/api/bets/recent', 10_000)?.wins ?? [];

@@ -1,14 +1,3 @@
-/**
- * Deploy StrikeTreasury to Arc.
- *
- * Usage:
- *   ARC_TREASURY_SECRET_KEY=... NEXT_PUBLIC_ARC_CHAIN_ID=5042002 node contracts/deploy.mjs
- *   # --force overwrites an existing arc-<chainId>.json; without it the
- *   # script refuses to redeploy over a live treasury.
- *
- * Reads ARC_TREASURY_SECRET_KEY and NEXT_PUBLIC_ARC_* from .env.local/.env and
- * writes contracts/deployments/arc-<chainId>.json.
- */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,9 +16,6 @@ for (const file of ['.env.local', '.env']) {
   }
 }
 
-// No implicit chain default: silently landing on mainnet (5042) when only a
-// testnet deployment is intended has fund-loss consequences, so the chain id
-// must be stated in the environment.
 const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID);
 if (!Number.isInteger(chainId) || chainId <= 0) {
   console.error(
@@ -78,9 +64,6 @@ async function main() {
     throw new Error('ARC_USDC_ADDRESS is not set to a valid USDC contract address');
   }
 
-  // Overwriting the deployment record orphans the previous treasury contract
-  // and every credit/fund tracked against it. Refuse unless --force — checked
-  // before anything is deployed, not after spending gas.
   const outFile = join(__dirname, 'deployments', `arc-${net.chainId}.json`);
   if (existsSync(outFile) && !FORCE) {
     const previous = JSON.parse(readFileSync(outFile, 'utf8'));
@@ -101,9 +84,6 @@ async function main() {
 
   console.log(`Network   ${net.name} (${net.chainId})`);
   console.log(`Deployer  ${wallet.address}`);
-  // formatEther reads the *native* gas balance — on Arc that is USDC at 18
-  // decimals, which is a different unit from the 6-decimal ERC-20 USDC the
-  // treasury moves. Labelling it "USDC" alone invited the wrong comparison.
   console.log(`Balance   ${ethers.formatEther(balance)} native USDC gas units (18 decimals; not the 6-dp ERC-20 balance)`);
   console.log(`USDC      ${net.usdc}`);
   if (balance === 0n) throw new Error('Deployer has no native USDC to pay for gas');
@@ -114,7 +94,6 @@ async function main() {
     `0x${artifact.evm.bytecode.object}`,
     wallet
   );
-  // The operator is the backend's hot key; the deployer becomes the cold owner.
   const operator = process.env.ARC_OPERATOR_ADDRESS || wallet.address;
   const treasury = await factory.deploy(net.usdc, net.eurc, net.tokenMessenger, operator);
   console.log(`\nDeploying… tx ${treasury.deploymentTransaction().hash}`);
