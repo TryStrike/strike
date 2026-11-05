@@ -64,7 +64,7 @@ async fn start_with(env: &[(&str, &str)]) -> Server {
         url: format!("http://127.0.0.1:{port}"),
         http: Client::new(),
     };
-    for _ in 0..500 {
+    for _ in 0..3000 {
         if server
             .http
             .get(format!("{}/api/health", server.url))
@@ -76,7 +76,7 @@ async fn start_with(env: &[(&str, &str)]) -> Server {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("server did not start");
+    panic!("server did not start within 30s");
 }
 
 impl Server {

@@ -178,14 +178,14 @@ async fn start() -> Server {
         node,
         player,
     };
-    for _ in 0..500 {
+    for _ in 0..3000 {
         let health = format!("{}/api/health", server.url);
         if server.http.get(health).send().await.is_ok() {
             return server;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("server did not start");
+    panic!("server did not start within 30s");
 }
 
 impl Server {

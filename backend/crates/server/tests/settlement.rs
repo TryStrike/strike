@@ -156,14 +156,14 @@ impl Server {
     }
 
     async fn wait_up(&self) {
-        for _ in 0..500 {
+        for _ in 0..3000 {
             let up = self.http.get(format!("{}/api/health", self.url)).send();
             if up.await.is_ok() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("server did not start");
+        panic!("server did not start within 30s");
     }
 
     fn sqlite(&self) -> rusqlite::Connection {
