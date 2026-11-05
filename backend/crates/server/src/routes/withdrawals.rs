@@ -115,13 +115,15 @@ async fn fetch(headers: &HeaderMap, query: Paging) -> ApiResult<Response> {
     .into_response())
 }
 
-/// `parsePaging`: a non-integer or out-of-range `limit` falls back to the
-/// default rather than erroring, and `offset` is clamped rather than refused.
+/// `parsePaging`: a non-integer or below-one `limit` falls back to the default
+/// rather than erroring, an oversized one is *capped* at `MAX_PAGE_SIZE` (the TS
+/// is explicit: "oversized requests are capped, not defaulted"), and `offset` is
+/// clamped rather than refused.
 fn parse_paging(query: Paging) -> (i64, i64) {
     let raw_limit = query.limit.as_deref().and_then(parse_js_integer);
     let raw_offset = query.offset.as_deref().and_then(parse_js_integer);
     let limit = match raw_limit {
-        Some(n) if (1..=MAX_PAGE_SIZE).contains(&n) => n,
+        Some(n) if n >= 1 => n.min(MAX_PAGE_SIZE),
         _ => DEFAULT_PAGE_SIZE,
     };
     let offset = match raw_offset {
@@ -207,9 +209,12 @@ mod tests {
         };
         assert_eq!(parse_paging(q(None, None)), (20, 0));
         assert_eq!(parse_paging(q(Some("5"), Some("10"))), (5, 10));
-        // Out of range falls back to the default, it is never a 400.
+        // Below one falls back to the default; it is never a 400.
         assert_eq!(parse_paging(q(Some("0"), None)), (20, 0));
-        assert_eq!(parse_paging(q(Some("51"), None)), (20, 0));
+        assert_eq!(parse_paging(q(Some("-5"), None)), (20, 0));
+        // Above the ceiling the request is capped, not defaulted, exactly as
+        // `Math.min(rawLimit, MAX_PAGE_SIZE)` did.
+        assert_eq!(parse_paging(q(Some("51"), None)), (50, 0));
         assert_eq!(parse_paging(q(Some("2.5"), None)), (20, 0));
         assert_eq!(parse_paging(q(Some("abc"), None)), (20, 0));
         assert_eq!(parse_paging(q(Some(""), None)), (20, 0));
@@ -217,7 +222,7 @@ mod tests {
         assert_eq!(parse_paging(q(Some("50"), Some("9999"))), (50, 500));
         assert_eq!(parse_paging(q(Some("20"), Some("-1"))), (20, 0));
         // `Number("1e3")` is an integer, so it is honoured after clamping.
-        assert_eq!(parse_paging(q(Some("1e3"), None)), (20, 0));
+        assert_eq!(parse_paging(q(Some("1e3"), None)), (50, 0));
     }
 
     #[test]
