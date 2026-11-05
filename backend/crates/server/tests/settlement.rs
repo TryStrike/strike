@@ -128,14 +128,14 @@ impl Server {
         std::fs::create_dir_all(&dir).unwrap();
         let port = free_port();
         let child = spawn_server(&dir, &feed_url, port, env);
-        let server = Server {
+        let mut server = Server {
             child,
             dir,
             env: env.to_vec(),
             url: format!("http://127.0.0.1:{port}"),
             http: Client::new(),
         };
-        server.wait_up().await;
+        server.wait_up(&feed_url).await;
         server.fund(WALLET, 100);
         tokio::time::sleep(Duration::from_millis(1300)).await;
         (server, feed, feed_url)
@@ -152,7 +152,7 @@ impl Server {
         let port = free_port();
         self.child = spawn_server(&self.dir, feed_url, port, &self.env);
         self.url = format!("http://127.0.0.1:{port}");
-        self.wait_up().await;
+        self.wait_up(feed_url).await;
     }
 
     /// `(outcome, settled_by, end_source)`, the permanent record.
@@ -166,15 +166,35 @@ impl Server {
             .unwrap()
     }
 
-    async fn wait_up(&self) {
-        for _ in 0..3000 {
-            let up = self.http.get(format!("{}/api/health", self.url)).send();
-            if up.await.is_ok() {
-                return;
+    /// `free_port` releases the port before the child binds it, so under
+    /// parallel tests another process can take it first. The child then exits,
+    /// and a health check could even reach that other server, so health only
+    /// counts while this child is alive, and an exited child boots again on a
+    /// fresh port.
+    async fn wait_up(&mut self, feed_url: &str) {
+        for _ in 0..5 {
+            for _ in 0..3000 {
+                if self.child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                let up = self.http.get(format!("{}/api/health", self.url)).send();
+                if up.await.is_ok() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if self.child.try_wait().unwrap().is_none() {
+                        return;
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            if self.child.try_wait().unwrap().is_none() {
+                panic!("server did not start within 30s");
+            }
+            let port = free_port();
+            self.child = spawn_server(&self.dir, feed_url, port, &self.env);
+            self.url = format!("http://127.0.0.1:{port}");
         }
-        panic!("server did not start within 30s");
+        panic!("server exited on boot five times");
     }
 
     fn sqlite(&self) -> rusqlite::Connection {
