@@ -51,6 +51,9 @@ export interface GameState {
   /** Wall-clock of the last FRESH (non-stale) feed tick. UI shows a
    *  "price feed delayed" notice when Date.now() - lastTickAt exceeds a threshold. */
   lastTickAt: number;
+  /** The one app-wide price feed: SSE for every asset, or the 1s poll while SSE is down. */
+  priceFeed: { mode: 'stream' | 'poll'; connected: boolean };
+  setPriceFeed: (feed: { mode: 'stream' | 'poll'; connected: boolean }) => void;
   assetPrices: Record<string, number>; // Global price tracking
   assetHistories: Record<string, PricePoint[]>; // History for each asset
   rawAssetPrices: Record<string, number>; // Store original prices for delta amplification
@@ -92,7 +95,6 @@ export interface GameState {
   placeBetFromHouseBalance: (amount: string, targetId: string, userAddress: string, cellId?: string, metadata?: { priceTop?: number; priceBottom?: number; startTime?: number; endTime?: number }) => Promise<{ betId: string; remainingBalance: number; bet: ActiveBet } | void>;
   updatePrice: (price: number, asset?: AssetType) => void;
   updateAllPrices: (prices: Record<string, number>) => void;
-  startGlobalPriceFeed: (updateAllPrices: (prices: Record<string, number>) => void) => (() => void);
 
 
   addActiveBet: (bet: ActiveBet) => void;
@@ -233,6 +235,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
   selectedAsset: 'BNB',
   currentPrice: 0,
   lastTickAt: 0,
+  priceFeed: { mode: 'poll', connected: false },
+  setPriceFeed: (feed: { mode: 'stream' | 'poll'; connected: boolean }) => set({ priceFeed: feed }),
   priceHistory: [],
   assetPrices: {},
   assetHistories: {},
@@ -895,50 +899,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         });
       }
     }
-  },
-
-  /**
-   * Start global multi-asset price feed tracking
-   */
-  startGlobalPriceFeed: (updateAllPrices: (prices: Record<string, number>) => void) => {
-    return startGlobalPriceFeed(updateAllPrices);
   }
-  };
-};
-
-
-
-/**
- * Start global multi-asset price feed tracking
- */
-const startGlobalPriceFeed = (
-  updateAllPrices: (prices: Record<string, number>) => void
-): (() => void) => {
-  let stopFeedFn: (() => void) | null = null;
-  let isActive = true;
-
-  // Use a more immediate load
-  import('@/lib/utils/priceFeed').then(({ startMultiPythPriceFeed }) => {
-    if (!isActive) return;
-    
-    stopFeedFn = startMultiPythPriceFeed((prices) => {
-      if (isActive && Object.keys(prices).length > 0) {
-        // Wrap in a try-catch to prevent one bad update from freezing the feed
-        try {
-          updateAllPrices(prices);
-        } catch (e) {
-          console.error("Price update error:", e);
-        }
-      }
-    });
-  }).catch(err => {
-    console.error('Failed to start multi-asset price feed:', err);
-  });
-
-  return () => {
-    isActive = false;
-    if (stopFeedFn) {
-      stopFeedFn();
-    }
   };
 };

@@ -26,14 +26,12 @@ export const config = createConfig(
       [arc.id]: http(arcConfig.rpcEndpoint),
     },
 
-
-    // Required API Keys
+    // ConnectKit ships an Aave Account connector, on by default. It is not an Arc wallet and throws while idle.
+    enableAaveAccount: false,
     walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'dummy-id',
 
-    // Required App Info
     appName: BRAND.name,
 
-    // Optional App Info
     appDescription: BRAND.tagline,
     appUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
     appIcon: typeof window !== 'undefined' ? `${window.location.origin}/icon.svg` : '/icon.svg',

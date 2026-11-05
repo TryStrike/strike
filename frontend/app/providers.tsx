@@ -14,6 +14,7 @@ import { WalletConnectModal } from '@/components/wallet/WalletConnectModal';
 import { ReferralSync } from './ReferralSync';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 import { useThemeSync } from '@/lib/useTheme';
+import { usePriceStream } from '@/lib/hooks/usePriceStream';
 
 // Bridges the connected wallet into the Zustand store: adopt the wagmi address,
 // put the wallet on Arc, and load the balances.
@@ -92,12 +93,16 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
   useThemeSync();
 
-  // Prices and the balance session warm up in the background. Nothing waits on them.
+  // One price feed for the whole app: SSE for every asset, the poll only while SSE is down.
+  const updateAllPrices = useStore((s) => s.updateAllPrices);
+  const feed = usePriceStream(updateAllPrices);
   useEffect(() => {
-    const store = useStore.getState();
-    const stopPriceFeed = store.startGlobalPriceFeed(store.updateAllPrices);
+    useStore.getState().setPriceFeed(feed);
+  }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The balance session warms up in the background. Nothing waits on it.
+  useEffect(() => {
     void import('@/lib/balance/balanceClientHeaders').then(({ ensureBalanceSession }) => ensureBalanceSession());
-    return stopPriceFeed;
   }, []);
 
   return (

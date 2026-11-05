@@ -111,7 +111,12 @@ impl IntoResponse for ApiError {
                 status,
                 message,
                 extra,
-            } => (status, message, extra),
+            } => {
+                if status.is_server_error() {
+                    tracing::error!(status = status.as_u16(), "{message}");
+                }
+                (status, message, extra)
+            }
         };
 
         let mut body = Map::new();

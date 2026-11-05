@@ -1,6 +1,4 @@
-//! Strike backend service: the Rust replacement for the Next.js `app/api`
-//! routes. It answers the same `/api/...` paths with the same JSON so the
-//! frontend can be pointed at either implementation during the cutover.
+//! Strike backend service: every `/api/...` route the Next app proxies.
 
 mod bans;
 mod http;
@@ -10,6 +8,10 @@ mod sql;
 use std::net::SocketAddr;
 use std::path::Path;
 
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -25,17 +27,25 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    tokio::spawn(strike_core::ticks::run_flusher());
-    tokio::spawn(strike_core::withdrawals::watch_stuck());
-    tokio::spawn(strike_core::prices::run_sampler());
-    tokio::spawn(strike_core::settlement::run_sweeper());
+    // Every panic, in a handler or a background task, reaches the log with its location.
+    std::panic::set_hook(Box::new(|info| tracing::error!("panic: {info}")));
+
+    supervise("tick flusher", strike_core::ticks::run_flusher());
+    supervise(
+        "stuck-withdrawal watcher",
+        strike_core::withdrawals::watch_stuck(),
+    );
+    supervise("price sampler", strike_core::prices::run_sampler());
+    supervise("settlement sweeper", strike_core::settlement::run_sweeper());
 
     let bind = config().bind_addr.clone();
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("strike-backend listening on http://{bind}");
 
     let app = http::with_api_headers(routes::router(), config().app_url.as_deref())
-        .layer(TraceLayer::new_for_http());
+        .layer(middleware::from_fn(log_server_errors))
+        .layer(CatchPanicLayer::new())
+        .layer(TraceLayer::new_for_http().on_failure(()));
 
     axum::serve(
         listener,
@@ -49,6 +59,36 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("waiting for payouts in flight");
     strike_core::eth::payouts_drained().await;
     Ok(())
+}
+
+/// A background task that panics leaves the server answering with half its
+/// machinery dead (a dead sweeper stops paying unclaimed wins). Exit instead, so
+/// systemd restarts the whole process. A task returning on its own is logged.
+fn supervise<F>(name: &'static str, task: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        match handle.await {
+            Ok(()) => tracing::info!("{name} stopped"),
+            Err(err) => {
+                tracing::error!("{name} died: {err}. Exiting so the service restarts.");
+                std::process::exit(1);
+            }
+        }
+    });
+}
+
+/// One place that logs every 5xx, whichever handler built it.
+async fn log_server_errors(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let res = next.run(req).await;
+    if res.status().is_server_error() {
+        tracing::error!(status = res.status().as_u16(), "{method} {path} failed");
+    }
+    res
 }
 
 /// The root .env.local. A missing file is normal in containers,

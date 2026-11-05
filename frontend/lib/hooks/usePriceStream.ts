@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { startMultiPythPriceFeed, type AssetType } from '@/lib/utils/priceFeed';
+import { startMultiPythPriceFeed } from '@/lib/utils/priceFeed';
 
 export type PriceFeedMode = 'stream' | 'poll';
 
@@ -37,8 +37,8 @@ const DEFAULT_STREAM_PATH = '/api/prices/stream';
 const DEFAULT_FIRST_TICK_TIMEOUT_MS = 4000;
 const DEFAULT_MAX_RECONNECT_BACKOFF_MS = 15_000;
 
+/** Every asset's price over one SSE connection. Mount it once, in the app shell. */
 export function usePriceStream(
-  asset: AssetType,
   onTick: (prices: Record<string, number>) => void,
   options: UsePriceStreamOptions = {}
 ): { mode: PriceFeedMode; connected: boolean } {
@@ -120,6 +120,7 @@ export function usePriceStream(
     const degrade = () => {
       // Stream died or never delivered: hand the chart to the poller and keep
       // probing SSE in the background with backoff.
+      if (!stopPoll) console.warn('[prices] stream unavailable, polling until it reconnects');
       startPollFallback();
       closeEventSource();
       scheduleReconnect();
@@ -127,23 +128,30 @@ export function usePriceStream(
 
     const connect = () => {
       if (disposed) return;
-      es = new EventSource(`${streamPath}?assets=${encodeURIComponent(asset)}`);
+      es = new EventSource(streamPath);
       watchdog = setTimeout(degrade, firstTickTimeoutMs);
 
       es.onmessage = (event: MessageEvent) => {
         watchdog = clearTimer(watchdog);
         attempt = 0;
 
-        let payload: unknown;
+        let tick: { asset?: unknown; price?: unknown };
         try {
-          payload = JSON.parse(String(event.data));
-        } catch {
+          tick = JSON.parse(String(event.data));
+        } catch (err) {
+          console.error('[prices] malformed stream frame', event.data, err);
           return;
         }
-        const tick = payload as { asset?: unknown; price?: unknown };
         const price = typeof tick?.price === 'number' ? tick.price : NaN;
-        if (!Number.isFinite(price) || price <= 0) return;
-        const key = typeof tick.asset === 'string' && tick.asset ? tick.asset : asset;
+        if (!Number.isFinite(price) || price <= 0) {
+          console.error('[prices] stream frame without a usable price', event.data);
+          return;
+        }
+        if (typeof tick.asset !== 'string' || !tick.asset) {
+          console.error('[prices] stream frame without an asset', event.data);
+          return;
+        }
+        const key = tick.asset;
 
         // The stream demonstrably delivers — retire the poll fallback and
         // feed the tick through the same ingest path the poll result uses.
@@ -165,7 +173,7 @@ export function usePriceStream(
       closeEventSource();
       stopPollFallback();
     };
-  }, [asset, streamPath, firstTickTimeoutMs, maxReconnectBackoffMs]);
+  }, [streamPath, firstTickTimeoutMs, maxReconnectBackoffMs]);
 
   return { mode, connected };
 }

@@ -528,7 +528,8 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
         setServer(payload?.bet ?? null);
         setServerState('ready');
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('[proof] settlement proof fetch failed', bet.betId, err);
         if (!cancelled) setServerState('failed');
       });
     return () => {

@@ -211,8 +211,11 @@ export function useSessionTracker(
       if (res.ok) {
         const parsed: unknown = await res.json().catch(() => null);
         if (parsed && typeof parsed === 'object') data = parsed as Record<string, unknown>;
+      } else {
+        console.warn(`[session] ping answered ${res.status}`);
       }
-    } catch {
+    } catch (err) {
+      console.warn('[session] ping failed', err);
       data = null;
     }
     pingInFlightRef.current = false;

@@ -106,12 +106,12 @@ export function Marquee({ children, seconds = 40 }: { children: ReactNode; secon
     );
   }
   return (
-    <div className="group relative flex overflow-hidden [mask-image:linear-gradient(90deg,transparent,#000_8%,#000_92%,transparent)]">
+    <div className="relative flex overflow-hidden [mask-image:linear-gradient(90deg,transparent,#000_8%,#000_92%,transparent)]">
       {[0, 1].map((k) => (
         <div
           key={k}
           aria-hidden={k === 1}
-          className="flex shrink-0 items-center gap-10 pr-10 animate-[marquee_var(--d)_linear_infinite] group-hover:[animation-play-state:paused]"
+          className="flex shrink-0 items-center gap-10 pr-10 animate-[marquee_var(--d)_linear_infinite]"
           style={{ ['--d' as string]: `${seconds}s` }}
         >
           {children}
@@ -135,14 +135,14 @@ export function CountdownRing({ seconds = 5, size = 72 }: { seconds?: number; si
   const c = 2 * Math.PI * r;
   return (
     <svg width={size} height={size} viewBox="0 0 72 72" role="img" aria-label={`${left} seconds left in this round`}>
-      <circle cx="36" cy="36" r={r} fill="none" stroke="#E3E6EB" strokeWidth="6" />
+      <circle cx="36" cy="36" r={r} fill="none" stroke="var(--line)" strokeWidth="6" />
       <circle
-        cx="36" cy="36" r={r} fill="none" stroke="#2151F5" strokeWidth="6" strokeLinecap="round"
+        cx="36" cy="36" r={r} fill="none" stroke="var(--up)" strokeWidth="6" strokeLinecap="round"
         strokeDasharray={c}
         style={{ strokeDashoffset: c * (1 - left / seconds), transition: reduce ? 'none' : 'stroke-dashoffset 1s linear' }}
         transform="rotate(-90 36 36)"
       />
-      <text x="36" y="42" textAnchor="middle" className="font-[family-name:var(--font-jetbrains-mono)]" fontSize="17" fontWeight="600" fill="#0A0C10">{left}s</text>
+      <text x="36" y="42" textAnchor="middle" className="font-jet" fontSize="17" fontWeight="600" fill="var(--ink)">{left}s</text>
     </svg>
   );
 }
