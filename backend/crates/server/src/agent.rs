@@ -86,40 +86,72 @@ async fn run(mut session: Session, mut stopped: watch::Receiver<bool>) {
     live().remove(&id);
 }
 
-/// `Some(reason)` when the agent stops itself, `None` when it was stopped.
+/// `Some(reason)` when the agent stops itself, `None` when it was stopped. An
+/// open bet is always followed to its result first, even after a stop, so the
+/// session's P&L is complete when the task ends.
 async fn run_on(
     database: &Db,
     session: &mut Session,
     stopped: &mut watch::Receiver<bool>,
 ) -> ApiResult<Option<String>> {
+    let mut open: Option<String> = None;
     loop {
+        if let Some(decision_id) = &open {
+            match agent::record_result(database, decision_id).await? {
+                Some((decision, updated)) => {
+                    *session = updated;
+                    publish(&session.id, decision_frame(&decision));
+                    publish(&session.id, session_frame(session));
+                    open = None;
+                }
+                None => {
+                    tokio::time::sleep(Duration::from_millis(SETTLE_POLL_MS)).await;
+                    continue;
+                }
+            }
+        }
         if *stopped.borrow() {
             return Ok(None);
         }
-        if let Some(reason) = check(database, session, stopped).await? {
-            return Ok(Some(reason));
+        match check(database, session, stopped).await? {
+            Next::Stop(reason) => return Ok(Some(reason)),
+            Next::Opened(decision_id) => {
+                open = Some(decision_id);
+                continue;
+            }
+            Next::Idle => {}
         }
         tokio::select! {
-            _ = stopped.changed() => return Ok(None),
+            _ = stopped.changed() => {}
             _ = tokio::time::sleep(Duration::from_millis(agent::CHECK_EVERY_MS)) => {}
         }
     }
 }
 
+/// How often an open bet is looked up. The sweep settles once a second.
+const SETTLE_POLL_MS: u64 = 1_000;
+
+enum Next {
+    Idle,
+    Opened(String),
+    Stop(String),
+}
+
+/// One look at the market, with no bet open.
 async fn check(
     database: &Db,
     session: &mut Session,
     stopped: &watch::Receiver<bool>,
-) -> ApiResult<Option<String>> {
+) -> ApiResult<Next> {
     let now = now_ms();
     if now >= session.ends_at_ms {
-        return Ok(Some(agent::TIME_UP.into()));
+        return Ok(Next::Stop(agent::TIME_UP.into()));
     }
-    let Some(stake) = agent::stake(session) else {
-        return Ok(Some(agent::LIMIT_REACHED.into()));
-    };
+    if let Err(reason) = agent::stake(session, rust_decimal::Decimal::ZERO) {
+        return Ok(Next::Stop(reason.into()));
+    }
     let (direction, strike, reason) = match agent::signal(ticks::buffer(), &session.asset, now) {
-        Signal::Skip(why) => return skip(database, session, why).await,
+        Signal::Skip(why) => return note(database, session, "skipped", why).await,
         Signal::Trade {
             direction,
             strike,
@@ -127,48 +159,65 @@ async fn check(
         } => (direction, strike, reason),
     };
     if *stopped.borrow() {
-        return Ok(None);
+        return Ok(Next::Idle);
     }
 
     let decision_id = uuid::Uuid::new_v4().to_string();
+    let stake =
+        match agent::reserve(database, &session.id, &decision_id, direction, &reason, now).await? {
+            agent::Reserve::Held(stake) => stake,
+            agent::Reserve::Blocked => {
+                return note(database, session, "blocked", agent::HOUSE_LIMIT).await
+            }
+            agent::Reserve::Stop(reason) => return Ok(Next::Stop(reason.into())),
+        };
     let body = agent::bet_body(session, &decision_id, direction, strike, stake);
-    let (bet_id, rejection, stop) = match place_bet(&body).await {
-        BetOutcome::Placed { bet_id } => (Some(bet_id), None, None),
-        BetOutcome::PriceMoved => {
-            return skip(database, session, "Price moved before the bet").await
+    let refused = match place_bet(&body).await {
+        BetOutcome::Placed { bet_id } => {
+            let (decision, updated) = agent::confirm(database, &decision_id, &bet_id).await?;
+            *session = updated;
+            publish(&session.id, decision_frame(&decision));
+            publish(&session.id, session_frame(session));
+            return Ok(Next::Opened(decision_id));
         }
-        BetOutcome::PriceUnavailable => {
-            return skip(database, session, "Live price unavailable").await
-        }
-        BetOutcome::Banned => (None, Some("Wallet is banned".to_string()), Some("banned")),
-        BetOutcome::InsufficientBalance => (
-            None,
-            Some("Insufficient house balance".to_string()),
-            Some("insufficient balance"),
+        BetOutcome::PriceMoved => Refused::Skip("Price moved before the bet"),
+        BetOutcome::PriceUnavailable => Refused::Skip("Live price unavailable"),
+        BetOutcome::Banned => Refused::Stop("Wallet is banned".into(), "banned".into()),
+        BetOutcome::InsufficientBalance => Refused::Stop(
+            "Insufficient house balance".into(),
+            "insufficient balance".into(),
         ),
-        BetOutcome::Rejected(message) => (None, Some(message), None),
+        BetOutcome::Rejected(message) => Refused::Stop(message.clone(), message),
     };
-    let recorded_reason = rejection.clone().unwrap_or(reason);
-    let placed = bet_id.is_some();
-    let trade = agent::Trade {
-        decision_id,
-        direction: direction.to_string(),
-        stake,
-        reason: recorded_reason.clone(),
-        bet_id,
-    };
-    let (decision, updated) = agent::record_trade(database, &session.id, trade, now_ms()).await?;
-    *session = updated;
-    publish(&session.id, decision_frame(&decision));
-    if placed {
-        publish(&session.id, session_frame(session));
-        return Ok(None);
+    match refused {
+        Refused::Skip(why) => {
+            *session = agent::release(database, &decision_id, None).await?.1;
+            note(database, session, "skipped", why).await
+        }
+        Refused::Stop(why, reason) => {
+            let (decision, updated) = agent::release(database, &decision_id, Some(&why)).await?;
+            *session = updated;
+            if let Some(decision) = decision {
+                publish(&session.id, decision_frame(&decision));
+            }
+            Ok(Next::Stop(reason))
+        }
     }
-    Ok(Some(stop.map_or(recorded_reason, str::to_string)))
 }
 
-async fn skip(database: &Db, session: &Session, why: &str) -> ApiResult<Option<String>> {
-    let decision = agent::record_skip(database, &session.id, why, now_ms()).await?;
+/// A refusal skips the proposal, or stops the session with `(row reason, stop reason)`.
+enum Refused {
+    Skip(&'static str),
+    Stop(String, String),
+}
+
+async fn note(
+    database: &Db,
+    session: &Session,
+    verdict: &'static str,
+    why: &str,
+) -> ApiResult<Next> {
+    let decision = agent::record_note(database, &session.id, verdict, why, now_ms()).await?;
     publish(&session.id, decision_frame(&decision));
-    Ok(None)
+    Ok(Next::Idle)
 }

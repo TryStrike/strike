@@ -76,6 +76,7 @@ fn set_price(feed: &Feed, btc: f64) {
 struct Server {
     child: Child,
     dir: PathBuf,
+    env: Vec<(&'static str, &'static str)>,
     url: String,
     http: Client,
 }
@@ -96,7 +97,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn spawn_server(dir: &Path, feed_url: &str, port: u16) -> Child {
+fn spawn_server(dir: &Path, feed_url: &str, port: u16, env: &[(&str, &str)]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_strike-backend"))
         .current_dir(dir)
         .env_clear()
@@ -108,6 +109,7 @@ fn spawn_server(dir: &Path, feed_url: &str, port: u16) -> Child {
         .env("YAHOO_SPARK_ENDPOINT", format!("{feed_url}/spark"))
         // One missed sample is an outage here, so a test needs no 5 s wait.
         .env("SETTLE_TICK_TOLERANCE_MS", "1500")
+        .envs(env.iter().copied())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -117,14 +119,19 @@ fn spawn_server(dir: &Path, feed_url: &str, port: u16) -> Child {
 impl Server {
     /// A server, a funded wallet, and time for the first price sample to land.
     async fn start(btc: f64) -> (Self, Feed, String) {
+        Self::start_with(btc, &[]).await
+    }
+
+    async fn start_with(btc: f64, env: &[(&'static str, &'static str)]) -> (Self, Feed, String) {
         let (feed, feed_url) = spawn_feed(btc).await;
         let dir = std::env::temp_dir().join(format!("strike-settle-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let port = free_port();
-        let child = spawn_server(&dir, &feed_url, port);
+        let child = spawn_server(&dir, &feed_url, port, env);
         let server = Server {
             child,
             dir,
+            env: env.to_vec(),
             url: format!("http://127.0.0.1:{port}"),
             http: Client::new(),
         };
@@ -143,7 +150,7 @@ impl Server {
     /// Same database, empty rings.
     async fn restart(&mut self, feed_url: &str) {
         let port = free_port();
-        self.child = spawn_server(&self.dir, feed_url, port);
+        self.child = spawn_server(&self.dir, feed_url, port, &self.env);
         self.url = format!("http://127.0.0.1:{port}");
         self.wait_up().await;
     }
@@ -804,12 +811,22 @@ async fn a_price_move_makes_a_yolo_agent_place_a_bet_on_the_feed() {
     assert!(placed["confidence"].is_null(), "{placed}");
     assert!(placed["betId"].is_string(), "{placed}");
     assert_eq!(s.balance_of(&wallet), 95 * UNIT);
+    set_price(&feed, 102.0);
 
+    let settled = decisions
+        .until("decision", 45, |d| {
+            d["id"] == placed["id"] && !d["result"].is_null()
+        })
+        .await;
+    assert_eq!(settled["result"], "win", "{settled}");
+    assert_eq!(settled["pnl"], json!(4.5), "{settled}");
     let stopped = decisions
         .until("session", 10, |d| d["status"] == "stopped")
         .await;
-    assert_eq!(stopped["stoppedReason"], "limit reached", "{stopped}");
+    assert_eq!(stopped["stoppedReason"], "budget spent", "{stopped}");
     assert_eq!(stopped["spent"], json!(5.0), "{stopped}");
+    assert_eq!(stopped["realizedPnl"], json!(4.5), "{stopped}");
+    assert_eq!(s.balance_of(&wallet), 95 * UNIT + 95 * UNIT / 10);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -929,4 +946,152 @@ async fn a_start_is_refused_with_the_reason() {
     let (status, reply, _) = s.start_agent(&trader, &terms).await;
     assert_eq!(status, StatusCode::CONFLICT, "{reply}");
     assert_eq!(reply["error"], "Start message already used");
+}
+
+/// Fifteen seconds of a flat 100, then a move to 101 the agent trades UP.
+async fn jump_after_history(feed: &Feed) {
+    tokio::time::sleep(Duration::from_millis(16_000)).await;
+    set_price(feed, 101.0);
+}
+
+/// The first decision whose verdict is one of `verdicts`, within `secs`.
+async fn first_verdict(decisions: &mut SseFeed, verdicts: &[&str], secs: u64) -> Value {
+    decisions
+        .until("decision", secs, |d| {
+            verdicts.iter().any(|v| d["verdict"] == *v)
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_loss_stops_the_agent_at_the_stop_loss_with_one_bet_open_at_a_time() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let trader = key(12);
+    let wallet = address_of(&trader);
+    s.fund(&wallet, 100);
+    let terms = StartTerms {
+        max_per_trade: usdc(1),
+        stop_loss: usdc(1),
+        ..yolo(&trader)
+    };
+    let (_, _, cookie) = s.start_agent(&trader, &terms).await;
+    let mut decisions = s.feed(&cookie.unwrap()).await;
+
+    jump_after_history(&feed).await;
+    let placed = first_verdict(&mut decisions, &["placed"], 15).await;
+    // Back under the strike: the round loses, and the drop is a fresh DOWN
+    // signal the agent must not trade while the first bet is open.
+    set_price(&feed, 100.0);
+
+    let settled = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let (event, d) = decisions.next().await.expect("feed ended");
+            if event != "decision" {
+                continue;
+            }
+            assert!(
+                d["verdict"] != "placed" || d["id"] == placed["id"],
+                "a second bet while the first was open: {d}"
+            );
+            if d["id"] == placed["id"] && !d["result"].is_null() {
+                return d;
+            }
+        }
+    })
+    .await
+    .expect("the first bet never settled");
+    assert_eq!(settled["result"], "loss", "{settled}");
+    assert_eq!(settled["pnl"], json!(-1.0), "{settled}");
+
+    let stopped = decisions
+        .until("session", 10, |d| d["status"] == "stopped")
+        .await;
+    assert_eq!(stopped["stoppedReason"], "stop-loss reached", "{stopped}");
+    assert_eq!(stopped["spent"], json!(1.0), "{stopped}");
+    assert_eq!(stopped["realizedPnl"], json!(-1.0), "{stopped}");
+    assert_eq!(s.balance_of(&wallet), 99 * UNIT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_underfunded_wallet_stops_the_agent_with_insufficient_balance() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let trader = key(13);
+    let wallet = address_of(&trader);
+    s.sqlite()
+        .execute(
+            "INSERT INTO user_balances (user_address, currency, balance) VALUES (?1, 'USDC', ?2)",
+            rusqlite::params![wallet, UNIT / 2],
+        )
+        .unwrap();
+    let terms = StartTerms {
+        max_per_trade: usdc(1),
+        ..yolo(&trader)
+    };
+    let (_, _, cookie) = s.start_agent(&trader, &terms).await;
+    let mut decisions = s.feed(&cookie.unwrap()).await;
+
+    jump_after_history(&feed).await;
+    let rejected = first_verdict(&mut decisions, &["placed", "rejected"], 15).await;
+    assert_eq!(rejected["verdict"], "rejected", "{rejected}");
+    let stopped = decisions
+        .until("session", 5, |d| d["status"] == "stopped")
+        .await;
+    assert_eq!(
+        stopped["stoppedReason"], "insufficient balance",
+        "{stopped}"
+    );
+    assert_eq!(stopped["spent"], json!(0.0), "{stopped}");
+    assert_eq!(s.balance_of(&wallet), UNIT / 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_left_running_is_stopped_by_a_restart() {
+    let (mut s, _feed, feed_url) = Server::start(100.0).await;
+    let trader = key(14);
+    let (_, _, cookie) = s.start_agent(&trader, &yolo(&trader)).await;
+    let cookie = cookie.unwrap();
+
+    s.kill();
+    s.restart(&feed_url).await;
+
+    let mut decisions = s.feed(&cookie).await;
+    let session = decisions.until("session", 5, |_| true).await;
+    assert_eq!(session["status"], "stopped", "{session}");
+    assert_eq!(session["stoppedReason"], "server restart", "{session}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_house_cap_holds_across_agents() {
+    let (s, feed, _) = Server::start_with(100.0, &[("AGENT_MAX_OPEN_STAKE", "1.5")]).await;
+    let (alice, bob) = (key(15), key(16));
+    let mut feeds = Vec::new();
+    for trader in [&alice, &bob] {
+        s.fund(&address_of(trader), 100);
+        let terms = StartTerms {
+            max_per_trade: usdc(1),
+            ..yolo(trader)
+        };
+        let (_, _, cookie) = s.start_agent(trader, &terms).await;
+        feeds.push(s.feed(&cookie.unwrap()).await);
+    }
+    let (mut a, mut b) = (feeds.remove(0), feeds.remove(0));
+
+    jump_after_history(&feed).await;
+    let (first, second) = tokio::join!(
+        first_verdict(&mut a, &["placed", "blocked"], 15),
+        first_verdict(&mut b, &["placed", "blocked"], 15),
+    );
+    let mut verdicts = [first["verdict"].clone(), second["verdict"].clone()];
+    verdicts.sort_by_key(|v| v.to_string());
+    assert_eq!(
+        verdicts,
+        [json!("blocked"), json!("placed")],
+        "{first} {second}"
+    );
+    let blocked = if first["verdict"] == "blocked" {
+        &first
+    } else {
+        &second
+    };
+    assert_eq!(blocked["reason"], "House agent limit reached", "{blocked}");
 }

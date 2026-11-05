@@ -140,6 +140,14 @@ const VERDICT: Record<Decision['verdict'], { label: string; tone: 'up' | 'down' 
   rejected: { label: 'rejected', tone: 'down' },
 };
 
+const RESULT: Record<string, string> = {
+  win: 'won',
+  loss: 'lost',
+  tie: 'tie, stake back',
+  refund_no_price: 'refunded, no price',
+  withheld: 'withheld',
+};
+
 function DecisionRow({ d, session }: { d: Decision; session: AgentSession | null }) {
   const v = VERDICT[d.verdict];
   return (
@@ -159,7 +167,7 @@ function DecisionRow({ d, session }: { d: Decision; session: AgentSession | null
       <p className="mt-1 text-sm text-muted">{d.reason}</p>
       <p className="mt-1 font-jet text-xs text-faint">
         {d.confidence !== null && `confidence ${(d.confidence * 100).toFixed(0)}% · `}
-        {d.result && `${d.result} · `}
+        {d.result && `${RESULT[d.result] ?? d.result} · `}
         {new Date(d.createdAt).toLocaleTimeString()}
       </p>
       {d.betId && (

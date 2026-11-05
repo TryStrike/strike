@@ -84,6 +84,8 @@ pub struct Config {
     pub agent_max_per_trade: rust_decimal::Decimal,
     pub agent_max_budget: rust_decimal::Decimal,
     pub agent_max_minutes: i64,
+    /// Open stake summed across every running agent.
+    pub agent_max_open_stake: rust_decimal::Decimal,
     /// `NODE_ENV === 'production'` equivalent: strict guard behaviour.
     pub production: bool,
     pub bind_addr: String,
@@ -153,6 +155,8 @@ impl Config {
             agent_max_budget: parse_num("AGENT_MAX_BUDGET")
                 .unwrap_or(rust_decimal::Decimal::from(100)),
             agent_max_minutes: parse_num("AGENT_MAX_MINUTES").unwrap_or(30),
+            agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
+                .unwrap_or(rust_decimal::Decimal::from(200)),
             production,
             bind_addr: str_var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
         }

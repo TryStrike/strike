@@ -27,6 +27,9 @@ const MAX_START_AHEAD_MS: i64 = 10 * 60 * 1000;
 pub const USER_STOPPED: &str = "You stopped the agent";
 pub const TIME_UP: &str = "time up";
 pub const LIMIT_REACHED: &str = "limit reached";
+pub const BUDGET_SPENT: &str = "budget spent";
+pub const STOP_LOSS_REACHED: &str = "stop-loss reached";
+pub const HOUSE_LIMIT: &str = "House agent limit reached";
 pub const SERVER_RESTART: &str = "server restart";
 
 fn stake_floor() -> Decimal {
@@ -232,19 +235,32 @@ pub fn signal(ring: &TickBuffer, asset: &str, now_ms: i64) -> Signal {
     }
 }
 
-/// Mode size capped by what is left of the budget, floored to USDC's 6
-/// decimals. `None` once that is under the floor.
-pub fn stake(session: &Session) -> Option<Decimal> {
+/// The smallest of mode size, budget left and stop-loss headroom, floored to
+/// USDC's 6 decimals. `Err` carries the reason the session has to stop.
+/// Headroom counts open stakes, so a loss in flight can't overshoot it.
+pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> {
     let mode_size = if session.mode == "yolo" {
         session.max_per_trade
     } else {
         Decimal::ONE
     };
     let left = session.budget - session.spent;
+    if left <= Decimal::ZERO {
+        return Err(BUDGET_SPENT);
+    }
+    let realized_loss = (-session.realized_pnl).max(Decimal::ZERO);
+    let headroom = session.stop_loss - realized_loss - open;
+    if headroom <= Decimal::ZERO {
+        return Err(STOP_LOSS_REACHED);
+    }
     let stake = mode_size
         .min(left)
+        .min(headroom)
         .round_dp_with_strategy(USDC_DECIMALS, RoundingStrategy::ToZero);
-    (stake >= stake_floor()).then_some(stake)
+    if stake < stake_floor() {
+        return Err(LIMIT_REACHED);
+    }
+    Ok(stake)
 }
 
 /// The body the manual bet route takes, with the strike from the server tick.
@@ -303,6 +319,8 @@ pub struct Decision {
     pub reason: String,
     pub skip_count: i64,
     pub bet_id: Option<String>,
+    pub result: Option<String>,
+    pub pnl: Option<Decimal>,
 }
 
 fn money_json(value: Decimal) -> Value {
@@ -342,8 +360,8 @@ impl Decision {
             "skipCount": self.skip_count,
             "confidence": Value::Null,
             "betId": self.bet_id,
-            "result": Value::Null,
-            "pnl": Value::Null,
+            "result": self.result,
+            "pnl": self.pnl.map(money_json),
             "expiresAt": Value::Null,
         })
     }
@@ -352,7 +370,7 @@ impl Decision {
 const SESSION_COLUMNS: &str = "id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
      starts_at, ends_at, status, stopped_reason, spent, realized_pnl";
 const DECISION_COLUMNS: &str =
-    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id";
+    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl";
 
 fn money(fixed: i64) -> Decimal {
     from_fixed(fixed, MONEY_SCALE)
@@ -391,6 +409,8 @@ fn decision_row(row: &Row) -> rusqlite::Result<Decision> {
         reason: row.get(6)?,
         skip_count: row.get(7)?,
         bet_id: row.get(8)?,
+        result: row.get(9)?,
+        pnl: row.get::<_, Option<i64>>(10)?.map(money),
     })
 }
 
@@ -514,9 +534,29 @@ pub async fn stop_session(db: &Db, id: &str, reason: &str) -> ApiResult<Option<S
     .await
 }
 
-/// No task survives a restart, so no session may claim to be running.
+/// No task survives a restart, so no session may claim to be running. A
+/// reservation the crash left without a bet id gets it back from the ledger,
+/// keyed by the decision id it was placed under, or is released.
 pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     db.write(|conn| {
+        conn.execute(
+            "UPDATE agent_decisions SET bet_id = (
+               SELECT bet_id FROM balance_audit_log
+                WHERE idempotency_key = agent_decisions.id AND bet_id IS NOT NULL LIMIT 1)
+             WHERE verdict = 'placed' AND bet_id IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE agent_sessions SET spent = spent - (
+               SELECT coalesce(sum(stake), 0) FROM agent_decisions
+                WHERE session_id = agent_sessions.id AND verdict = 'placed' AND bet_id IS NULL)",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE agent_decisions SET verdict = 'rejected', reason = ?1 \
+             WHERE verdict = 'placed' AND bet_id IS NULL",
+            [SERVER_RESTART],
+        )?;
         Ok(conn.execute(
             "UPDATE agent_sessions SET status = 'stopped', stopped_reason = ?1 WHERE status = 'running'",
             [SERVER_RESTART],
@@ -525,10 +565,11 @@ pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     .await
 }
 
-/// A skip, folded into the previous row when that was the same skip.
-pub async fn record_skip(
+/// A skip or a block, folded into the previous row when that was the same one.
+pub async fn record_note(
     db: &Db,
     session_id: &str,
+    verdict: &'static str,
     reason: &str,
     now_ms: i64,
 ) -> ApiResult<Decision> {
@@ -542,8 +583,8 @@ pub async fn record_skip(
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if let Some((id, verdict, last_reason)) = last {
-            if verdict == "skipped" && last_reason == reason {
+        if let Some((id, last_verdict, last_reason)) = last {
+            if last_verdict == verdict && last_reason == reason {
                 conn.execute(
                     "UPDATE agent_decisions SET skip_count = skip_count + 1 WHERE id = ?1",
                     [&id],
@@ -554,58 +595,152 @@ pub async fn record_skip(
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO agent_decisions (id, session_id, created_at, verdict, reason) \
-             VALUES (?1, ?2, ?3, 'skipped', ?4)",
-            params![id, session_id, now_ms * 1_000, reason],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, session_id, now_ms * 1_000, verdict, reason],
         )?;
         load_decision(conn, &id)
     })
     .await
 }
 
-pub struct Trade {
-    pub decision_id: String,
-    pub direction: String,
-    pub stake: Decimal,
-    pub reason: String,
-    /// Set when the bet was placed, `None` when the bet path refused it.
-    pub bet_id: Option<String>,
+pub enum Reserve {
+    /// The stake is held: counted in `spent` and in open stake, not yet a bet.
+    Held(Decimal),
+    Blocked,
+    Stop(&'static str),
 }
 
-/// A trade that reached the bet path. A placed one adds its stake to `spent`
-/// in the same write.
-pub async fn record_trade(
+/// Placed stakes whose round hasn't settled, for one session or every agent.
+fn open_stake(conn: &Connection, session_id: Option<&str>) -> rusqlite::Result<Decimal> {
+    conn.query_row(
+        "SELECT coalesce(sum(d.stake), 0) FROM agent_decisions d \
+         LEFT JOIN bet_rounds r ON r.bet_id = d.bet_id \
+         WHERE d.verdict = 'placed' AND r.outcome IS NULL \
+           AND (?1 IS NULL OR d.session_id = ?1)",
+        [session_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(money)
+}
+
+/// Sizes the trade and holds its stake in one write, so the house cap is
+/// checked and taken atomically across every agent. Open stake is every placed
+/// decision whose round hasn't settled, held ones included.
+pub async fn reserve(
     db: &Db,
     session_id: &str,
-    trade: Trade,
+    decision_id: &str,
+    direction: &str,
+    reason: &str,
     now_ms: i64,
-) -> ApiResult<(Decision, Session)> {
-    let verdict = if trade.bet_id.is_some() {
-        "placed"
-    } else {
-        "rejected"
-    };
-    let Trade {
-        decision_id: id,
-        direction,
-        stake,
-        reason,
-        bet_id,
-    } = trade;
-    let session_id = session_id.to_string();
-    let stake = fixed(stake)?;
+) -> ApiResult<Reserve> {
+    let (session_id, id, direction, reason) = (
+        session_id.to_string(),
+        decision_id.to_string(),
+        direction.to_string(),
+        reason.to_string(),
+    );
+    let cap = config().agent_max_open_stake;
+    db.write(move |conn| {
+        let session = load_session(conn, &session_id)?;
+        let stake = match stake(&session, open_stake(conn, Some(&session_id))?) {
+            Ok(stake) => stake,
+            Err(reason) => return Ok(Reserve::Stop(reason)),
+        };
+        if open_stake(conn, None)? + stake > cap {
+            return Ok(Reserve::Blocked);
+        }
+        let held = fixed(stake)?;
+        conn.execute(
+            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6)",
+            params![id, session_id, now_ms * 1_000, direction, held, reason],
+        )?;
+        conn.execute(
+            "UPDATE agent_sessions SET spent = spent + ?2 WHERE id = ?1",
+            params![session_id, held],
+        )?;
+        Ok(Reserve::Held(stake))
+    })
+    .await
+}
+
+/// The held stake became a bet.
+pub async fn confirm(db: &Db, decision_id: &str, bet_id: &str) -> ApiResult<(Decision, Session)> {
+    let (id, bet_id) = (decision_id.to_string(), bet_id.to_string());
     db.write(move |conn| {
         conn.execute(
-            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, bet_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, session_id, now_ms * 1_000, direction, stake, verdict, reason, bet_id],
+            "UPDATE agent_decisions SET bet_id = ?2 WHERE id = ?1",
+            [&id, &bet_id],
         )?;
-        if verdict == "placed" {
-            conn.execute(
-                "UPDATE agent_sessions SET spent = spent + ?2 WHERE id = ?1",
-                params![session_id, stake],
-            )?;
-        }
-        Ok((load_decision(conn, &id)?, load_session(conn, &session_id)?))
+        let decision = load_decision(conn, &id)?;
+        let session = load_session(conn, &decision.session_id)?;
+        Ok((decision, session))
+    })
+    .await
+}
+
+/// The bet path refused the held stake. `Some(reason)` keeps the row as a
+/// rejection, `None` drops it so the skip that follows can fold as usual.
+pub async fn release(
+    db: &Db,
+    decision_id: &str,
+    rejection: Option<&str>,
+) -> ApiResult<(Option<Decision>, Session)> {
+    let (id, rejection) = (decision_id.to_string(), rejection.map(str::to_string));
+    db.write(move |conn| {
+        let held = load_decision(conn, &id)?;
+        conn.execute(
+            "UPDATE agent_sessions SET spent = spent - ?2 WHERE id = ?1",
+            params![held.session_id, held.stake.map(fixed).transpose()?],
+        )?;
+        let decision = match rejection {
+            Some(reason) => {
+                conn.execute(
+                    "UPDATE agent_decisions SET verdict = 'rejected', reason = ?2 WHERE id = ?1",
+                    [&id, &reason],
+                )?;
+                Some(load_decision(conn, &id)?)
+            }
+            None => {
+                conn.execute("DELETE FROM agent_decisions WHERE id = ?1", [&id])?;
+                None
+            }
+        };
+        Ok((decision, load_session(conn, &held.session_id)?))
+    })
+    .await
+}
+
+/// Copies a settled round's outcome onto its decision and the session's P&L,
+/// once. P&L is payout minus stake: a win's profit, a loss or withheld round's
+/// whole stake, zero for a tie or refund. `None` while the round is open.
+pub async fn record_result(db: &Db, decision_id: &str) -> ApiResult<Option<(Decision, Session)>> {
+    let id = decision_id.to_string();
+    db.write(move |conn| {
+        let settled: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT r.outcome, r.payout - r.stake FROM agent_decisions d \
+                 JOIN bet_rounds r ON r.bet_id = d.bet_id \
+                 WHERE d.id = ?1 AND r.outcome IS NOT NULL AND d.result IS NULL",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((outcome, pnl)) = settled else {
+            return Ok(None);
+        };
+        conn.execute(
+            "UPDATE agent_decisions SET result = ?2, pnl = ?3 WHERE id = ?1",
+            params![id, outcome, pnl],
+        )?;
+        let decision = load_decision(conn, &id)?;
+        conn.execute(
+            "UPDATE agent_sessions SET realized_pnl = realized_pnl + ?2 WHERE id = ?1",
+            params![decision.session_id, pnl],
+        )?;
+        let session = load_session(conn, &decision.session_id)?;
+        Ok(Some((decision, session)))
     })
     .await
 }
