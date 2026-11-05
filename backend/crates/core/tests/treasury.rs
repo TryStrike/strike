@@ -277,14 +277,17 @@ async fn parallel_payouts_each_land_once_on_their_own_nonce() {
 }
 
 #[tokio::test]
-async fn a_fee_and_a_net_transfer_take_consecutive_nonces() {
+async fn a_fee_and_a_net_transfer_go_out_as_one_transaction() {
     let (chain, treasury) = start(1_000).await;
     let commits = Arc::default();
     let (_, sent) = pay(&treasury, [pay_to(1), pay_to(9)].concat(), &commits)
         .await
         .unwrap();
-    assert_eq!(sent.len(), 2);
-    assert_eq!(chain.lock().unwrap().landed, vec![0, 1]);
+    assert_eq!(sent.len(), 1, "one withdrawBatch, one nonce");
+    let c = chain.lock().unwrap();
+    assert_eq!(c.landed, vec![0]);
+    assert_eq!(c.broadcasts, 1);
+    drop(c);
     assert_eq!(commits.load(Ordering::SeqCst), 1);
 }
 

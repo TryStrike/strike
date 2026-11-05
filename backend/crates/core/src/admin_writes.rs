@@ -203,15 +203,6 @@ pub fn plan_payout(
     Ok((amount - net, net))
 }
 
-/// `${feeTxHash}|netTx:${withdrawTxHash}` when a fee transfer ran, plain hash
-/// when it did not (no fee, or no fee wallet configured).
-pub fn combined_tx_hash(fee_tx: Option<&str>, net_tx: &str) -> String {
-    match fee_tx.filter(|h| !h.is_empty()) {
-        Some(fee) => format!("{fee}|netTx:{net_tx}"),
-        None => net_tx.to_string(),
-    }
-}
-
 // ── Reconciliation parking ───────────────────────────────────────────────────
 
 /// `NEEDS_RECONCILIATION:${reason}` sliced to 500 UTF-16 code units like JS
@@ -963,20 +954,6 @@ mod tests {
         assert_eq!(
             plan_payout("USDC", dec("0.5"), Some(dec("0.5"))).unwrap_err(),
             "Withdrawal net amount after fees must be > 0"
-        );
-    }
-
-    #[test]
-    fn combined_hash_shape() {
-        assert_eq!(
-            combined_tx_hash(Some("0xfaaa"), "0xnet"),
-            "0xfaaa|netTx:0xnet"
-        );
-        assert_eq!(combined_tx_hash(None, "0xnet"), "0xnet");
-        assert_eq!(
-            combined_tx_hash(Some(""), "0xnet"),
-            "0xnet",
-            "empty fee hash behaves as null"
         );
     }
 

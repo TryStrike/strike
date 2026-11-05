@@ -653,6 +653,32 @@ pub async fn verify_deposit(
 // treasury payouts
 // ---------------------------------------------------------------------------
 
+/// `withdrawBatch(address[],uint256[])` calldata: two dynamic arrays, head offsets first.
+fn withdraw_batch_call_data(transfers: &[Transfer]) -> String {
+    let word = |value: u128| {
+        let mut w = [0u8; 32];
+        w[16..].copy_from_slice(&value.to_be_bytes());
+        w
+    };
+    let n = transfers.len() as u128;
+    let mut data = selector("withdrawBatch(address[],uint256[])").to_vec();
+    data.extend_from_slice(&word(0x40));
+    data.extend_from_slice(&word(0x40 + 0x20 * (n + 1)));
+    data.extend_from_slice(&word(n));
+    for t in transfers {
+        // `prepare` has already checked every address is 20 bytes.
+        data.extend_from_slice(&[0u8; 12]);
+        data.extend_from_slice(
+            &hex::decode(t.to.strip_prefix("0x").unwrap_or(&t.to)).unwrap_or_default(),
+        );
+    }
+    data.extend_from_slice(&word(n));
+    for t in transfers {
+        data.extend_from_slice(&word(t.amount));
+    }
+    format!("0x{}", hex::encode(data))
+}
+
 /// One transfer out of the treasury, in token base units.
 #[derive(Clone)]
 pub struct Transfer {
@@ -844,7 +870,7 @@ impl Treasury {
         let committed = commit().await.map_err(PayError::Refused)?;
 
         let mut sent = Vec::with_capacity(signed.len());
-        for ((nonce, raw), transfer) in (first_nonce..).zip(&signed).zip(&transfers) {
+        for (nonce, (raw, amount)) in (first_nonce..).zip(&signed) {
             let (hash, failure) = match self.rpc.broadcast(raw).await {
                 Broadcast::Accepted(hash) => (hash, None),
                 Broadcast::Refused(message) => {
@@ -856,10 +882,10 @@ impl Treasury {
                 Broadcast::Unknown(message) => (raw_tx_hash(raw), Some(message)),
             };
             queue.next_nonce = Some(nonce + 1);
-            queue.in_flight += transfer.amount;
+            queue.in_flight += amount;
             sent.push(Sent {
                 hash,
-                amount: transfer.amount,
+                amount: *amount,
             });
             if let Some(message) = failure {
                 return Err(PayError::Send {
@@ -877,7 +903,7 @@ impl Treasury {
         &self,
         queue: &SendQueue,
         transfers: &[Transfer],
-    ) -> ApiResult<(u64, Vec<String>)> {
+    ) -> ApiResult<(u64, Vec<(String, u128)>)> {
         let mut total = queue.in_flight;
         for transfer in transfers {
             if !is_address_shape(&transfer.to) {
@@ -920,33 +946,40 @@ impl Treasury {
         // max fee; keeping max_fee at 2x base is the standard safe guess.
         let (max_fee, priority_fee) = (gas_price * 2, gas_price / 10);
 
-        let selector_bytes = selector("withdrawTokenTo(address,uint256)");
-        let mut signed = Vec::with_capacity(transfers.len());
-        for (tx_nonce, transfer) in (nonce..).zip(transfers) {
-            let data = Self::call_data_with_uint(selector_bytes, &transfer.to, transfer.amount);
-            let estimate = json!([{
-                "from": self.address,
-                "to": self.contract,
-                "value": "0x0",
-                "data": data,
-            }, "latest"]);
-            let gas = self.rpc.quantity("eth_estimateGas", estimate).await? as u64;
-            // Padding the estimate so a state-changing call is not under-gassed
-            // between estimation and inclusion.
-            let gas_limit = gas + gas / 5 + 21_000;
-            signed.push(build_eip1559_raw(
-                &self.signer,
-                self.rpc.chain_id(),
-                tx_nonce,
-                gas_limit,
-                max_fee,
-                priority_fee,
-                &self.contract,
-                0,
-                &hex_decode(data.strip_prefix("0x").unwrap_or(&data)).unwrap_or_default(),
-            )?);
-        }
-        Ok((nonce, signed))
+        // One transaction however many recipients: a fee and its net payout land
+        // together or not at all, on one nonce.
+        let data = if let [only] = transfers {
+            Self::call_data_with_uint(
+                selector("withdrawTokenTo(address,uint256)"),
+                &only.to,
+                only.amount,
+            )
+        } else {
+            withdraw_batch_call_data(transfers)
+        };
+        let estimate = json!([{
+            "from": self.address,
+            "to": self.contract,
+            "value": "0x0",
+            "data": data,
+        }, "latest"]);
+        let gas = self.rpc.quantity("eth_estimateGas", estimate).await? as u64;
+        // Padding the estimate so a state-changing call is not under-gassed
+        // between estimation and inclusion.
+        let gas_limit = gas + gas / 5 + 21_000;
+        let raw = build_eip1559_raw(
+            &self.signer,
+            self.rpc.chain_id(),
+            nonce,
+            gas_limit,
+            max_fee,
+            priority_fee,
+            &self.contract,
+            0,
+            &hex_decode(data.strip_prefix("0x").unwrap_or(&data)).unwrap_or_default(),
+        )?;
+        let amount = transfers.iter().map(|t| t.amount).sum();
+        Ok((nonce, vec![(raw, amount)]))
     }
 
     /// Waits for `PAYOUT_CONFIRMATIONS` and checks the receipt status. A reverted
@@ -1108,6 +1141,23 @@ mod tests {
             "000000000000000000000000b46b14d5da2438a7821b141722cd25cd7ff1e225\
              000000000000000000000000000000000000000000000000000000000006ddd0"
         ));
+    }
+
+    #[test]
+    fn withdraw_batch_calldata_matches_ethers() {
+        // ethers Interface.encodeFunctionData("withdrawBatch", [[0x…aa, 0x…bb], [1, 9]])
+        let expected = "0xcb94aa26000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000000000000000000000000000000000000000000000000000bb000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000009";
+        let transfers = [
+            Transfer {
+                to: "0x00000000000000000000000000000000000000aa".into(),
+                amount: 1,
+            },
+            Transfer {
+                to: "0x00000000000000000000000000000000000000bb".into(),
+                amount: 9,
+            },
+        ];
+        assert_eq!(withdraw_batch_call_data(&transfers), expected);
     }
 
     #[test]

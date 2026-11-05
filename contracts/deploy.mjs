@@ -45,6 +45,8 @@ const net = {
   rpc: process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || (chainId === 5042 ? 'https://rpc.mainnet.arc.io' : 'https://rpc.testnet.arc.io'),
   explorer: process.env.NEXT_PUBLIC_ARC_EXPLORER || (chainId === 5042 ? 'https://explorer.arc.io' : 'https://explorer.testnet.arc.io'),
   usdc: process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS || '0x3600000000000000000000000000000000000000',
+  eurc: process.env.ARC_EURC_ADDRESS || '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+  tokenMessenger: process.env.ARC_TOKEN_MESSENGER || '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA',
 };
 
 function compile() {
@@ -112,7 +114,9 @@ async function main() {
     `0x${artifact.evm.bytecode.object}`,
     wallet
   );
-  const treasury = await factory.deploy(net.usdc);
+  // The operator is the backend's hot key; the deployer becomes the cold owner.
+  const operator = process.env.ARC_OPERATOR_ADDRESS || wallet.address;
+  const treasury = await factory.deploy(net.usdc, net.eurc, net.tokenMessenger, operator);
   console.log(`\nDeploying… tx ${treasury.deploymentTransaction().hash}`);
   await treasury.waitForDeployment();
 
@@ -125,8 +129,11 @@ async function main() {
     chainId: net.chainId,
     network: net.name,
     strikeTreasury: address,
-    token: net.usdc,
+    usdc: net.usdc,
+    eurc: net.eurc,
+    tokenMessenger: net.tokenMessenger,
     owner: wallet.address,
+    operator,
     txHash: receipt.hash,
     gasUsed: receipt.gasUsed.toString(),
     deployedAt: new Date().toISOString(),
