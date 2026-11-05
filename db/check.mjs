@@ -18,10 +18,13 @@ const root = resolve(__dirname, '..');
 
 function readEnv(name) {
   if (process.env[name]) return process.env[name].trim();
-  const envPath = resolve(root, '.env');
-  if (!existsSync(envPath)) return null;
-  const m = readFileSync(envPath, 'utf8').match(new RegExp(`^${name}=(.+)$`, 'm'));
-  return m ? m[1].trim() : null;
+  for (const file of ['.env.local', '.env']) {
+    const envPath = resolve(root, file);
+    if (!existsSync(envPath)) continue;
+    const m = readFileSync(envPath, 'utf8').match(new RegExp(`^${name}=(.+)$`, 'm'));
+    if (m) return m[1].trim();
+  }
+  return null;
 }
 
 const url = readEnv('DATABASE_URL');

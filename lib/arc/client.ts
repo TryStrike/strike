@@ -1,4 +1,4 @@
-/** Arc SDK integration for native USDC transfers. */
+/** Read-side Arc helpers (USDC via its ERC-20 interface). */
 
 import { ethers } from 'ethers';
 import {
@@ -31,11 +31,7 @@ export async function getAssetBalance(address: string, asset: ArcAsset): Promise
   const rpc = getArcProvider();
 
   try {
-    if (cfg.isNative) {
-      const balance = await rpc.getBalance(address);
-      return parseFloat(ethers.formatUnits(balance, cfg.decimals));
-    }
-    const token = new ethers.Contract(cfg.address as string, ERC20_ABI, rpc);
+    const token = new ethers.Contract(cfg.address, ERC20_ABI, rpc);
     const balance = await token.balanceOf(address);
     return parseFloat(ethers.formatUnits(balance, cfg.decimals));
   } catch (error) {

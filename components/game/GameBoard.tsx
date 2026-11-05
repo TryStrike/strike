@@ -130,13 +130,11 @@ export const GameBoard: React.FC = () => {
       const feeValue = ethers.parseUnits(String(blitzEntryFee), assetConfig.decimals);
 
       toast.info(`Confirming ${blitzEntryFee} ${currencySymbol} Blitz Entry...`);
-      const feeTx = assetConfig.isNative
-        ? await signer.sendTransaction({ to: feeWallet, value: feeValue })
-        : await new ethers.Contract(
-            assetConfig.address as string,
-            ['function transfer(address to, uint256 amount) returns (bool)'],
-            signer
-          ).transfer(feeWallet, feeValue);
+      const feeTx = await new ethers.Contract(
+        assetConfig.address,
+        ['function transfer(address to, uint256 amount) returns (bool)'],
+        signer
+      ).transfer(feeWallet, feeValue);
       await feeTx.wait();
       toast.success("Payment successful! Blitz Mode enabled.");
       enableBlitzAccess();

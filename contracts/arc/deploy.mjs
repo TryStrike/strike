@@ -4,7 +4,8 @@
  * Usage:
  *   ARC_TREASURY_SECRET_KEY=... node contracts/arc/deploy.mjs
  *
- * Reads ARC_TREASURY_SECRET_KEY from .env and writes an Arc deployment file.
+ * Reads ARC_TREASURY_SECRET_KEY and NEXT_PUBLIC_ARC_* from .env.local/.env and
+ * writes contracts/arc/deployments/arc-<chainId>.json.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -15,20 +16,25 @@ import solc from 'solc';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '../..');
 
-const envPath = resolve(root, '.env');
-if (existsSync(envPath)) {
+for (const file of ['.env.local', '.env']) {
+  const envPath = resolve(root, file);
+  if (!existsSync(envPath)) continue;
   for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
   }
 }
 
+const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID) || 5042;
 const net = {
-    chainId: 5042,
-    name: 'Arc',
-    rpc: process.env.ARC_RPC_URL || process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || 'https://rpc.mainnet.arc.io',
-    explorer: 'https://explorer.arc.io',
-    usdc: process.env.ARC_USDC_ADDRESS || process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS || '',
+  chainId,
+  name: chainId === 5042 ? 'Arc' : 'Arc Testnet',
+  rpc: process.env.ARC_RPC_URL || process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || 'https://rpc.mainnet.arc.io',
+  explorer: process.env.NEXT_PUBLIC_ARC_EXPLORER || 'https://explorer.arc.io',
+  usdc:
+    process.env.ARC_USDC_ADDRESS ||
+    process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS ||
+    '0x3600000000000000000000000000000000000000',
 };
 
 function compile() {
@@ -69,7 +75,7 @@ async function main() {
 
   console.log(`Network   ${net.name} (${net.chainId})`);
   console.log(`Deployer  ${wallet.address}`);
-  console.log(`Balance   ${ethers.formatUnits(balance, 6)} USDC`);
+  console.log(`Balance   ${ethers.formatEther(balance)} USDC (native, 18 decimals)`);
   console.log(`USDC      ${net.usdc}`);
   if (balance === 0n) throw new Error('Deployer has no USDC to pay for gas');
 

@@ -3,38 +3,15 @@ import 'server-only';
 import { ethers } from 'ethers';
 import { getArcConfig, getAssetConfig, type ArcAsset } from './config';
 
-const ERC20_ABI = [
-  'function transfer(address to, uint256 amount) returns (bool)',
-  'function balanceOf(address owner) view returns (uint256)',
+const ERC20_ABI = ['function balanceOf(address owner) view returns (uint256)'];
+const TREASURY_ABI = [
+  'function owner() view returns (address)',
+  'function withdrawTokenTo(address to, uint256 amount)',
 ];
 
-function treasurySigner(): ethers.Wallet {
-  const key = process.env.ARC_TREASURY_SECRET_KEY?.trim();
-  if (!key) {
-    throw new Error('ARC_TREASURY_SECRET_KEY is not configured');
-  }
-  const config = getArcConfig();
-  const provider = new ethers.JsonRpcProvider(config.rpcEndpoint, {
-    chainId: config.chainId,
-    name: config.name,
-  });
-  const wallet = new ethers.Wallet(key, provider);
-
-  // A mismatch here would send house funds from an unexpected account.
-  if (
-    config.treasuryAddress &&
-    wallet.address.toLowerCase() !== config.treasuryAddress.toLowerCase()
-  ) {
-    throw new Error(
-      `ARC_TREASURY_SECRET_KEY does not match NEXT_PUBLIC_TREASURY_ADDRESS ` +
-        `(key is ${wallet.address}, expected ${config.treasuryAddress})`
-    );
-  }
-  return wallet;
-}
-
 /**
- * Send `amount` whole tokens of `asset` from the treasury to `to`.
+ * Pay `amount` whole USDC out of the StrikeTreasury contract to `to`.
+ * ARC_TREASURY_SECRET_KEY must be the contract owner.
  * Returns the transaction hash once it is mined.
  */
 export async function transferFromTreasury(
@@ -52,24 +29,34 @@ export async function transferFromTreasury(
     throw new Error('Withdrawal amount must be greater than zero');
   }
 
-  const wallet = treasurySigner();
-
-  if (assetConfig.isNative) {
-    const balance = await wallet.provider!.getBalance(wallet.address);
-    if (balance < value) {
-      throw new Error('Treasury has insufficient USDC for this withdrawal');
-    }
-    const tx = await wallet.sendTransaction({ to, value });
-    await tx.wait();
-    return tx.hash;
+  const key = process.env.ARC_TREASURY_SECRET_KEY?.trim();
+  if (!key) throw new Error('ARC_TREASURY_SECRET_KEY is not configured');
+  const config = getArcConfig();
+  if (!ethers.isAddress(config.treasuryAddress)) {
+    throw new Error('NEXT_PUBLIC_TREASURY_ADDRESS is not a valid address');
   }
 
-  const token = new ethers.Contract(assetConfig.address as string, ERC20_ABI, wallet);
-  const balance: bigint = await token.balanceOf(wallet.address);
+  const provider = new ethers.JsonRpcProvider(config.rpcEndpoint, {
+    chainId: config.chainId,
+    name: config.name,
+  });
+  const wallet = new ethers.Wallet(key, provider);
+  const treasury = new ethers.Contract(config.treasuryAddress, TREASURY_ABI, wallet);
+
+  // A mismatch here would mean the payout reverts on-chain; fail early and clearly.
+  const owner: string = await treasury.owner();
+  if (owner.toLowerCase() !== wallet.address.toLowerCase()) {
+    throw new Error(
+      `ARC_TREASURY_SECRET_KEY (${wallet.address}) is not the StrikeTreasury owner (${owner})`
+    );
+  }
+
+  const token = new ethers.Contract(assetConfig.address, ERC20_ABI, provider);
+  const balance: bigint = await token.balanceOf(config.treasuryAddress);
   if (balance < value) {
     throw new Error(`Treasury has insufficient ${asset} for this withdrawal`);
   }
-  const tx = await token.transfer(to, value);
+  const tx = await treasury.withdrawTokenTo(to, value);
   await tx.wait();
   return tx.hash;
 }

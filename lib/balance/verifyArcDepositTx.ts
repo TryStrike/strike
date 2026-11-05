@@ -1,8 +1,9 @@
 /**
  * On-chain verification for Arc USDC deposits.
  *
- * USDC is the native currency, so the transaction itself must be addressed to the
- * treasury and carry at least the claimed value.
+ * Deposits are USDC ERC-20 transfers (or StrikeTreasury.depositToken calls) into
+ * the treasury contract, so the proof is a Transfer log from the player to the
+ * treasury for at least the claimed amount.
  *
  * Returns false rather than throwing: a deposit that cannot be proven is
  * simply not credited.
@@ -62,13 +63,8 @@ export async function verifyArcDepositTx(
 
     const required = ethers.parseUnits(amount.toString(), assetConfig.decimals);
 
-    if (assetConfig.isNative) {
-      if (!sameAddress(tx.to, recipient)) return false;
-      return tx.value >= required;
-    }
-
     // ERC-20: the value rides in a Transfer log, not in tx.value.
-    const token = assetConfig.address as string;
+    const token = assetConfig.address;
     for (const log of receipt.logs) {
       if (!sameAddress(log.address, token)) continue;
       if (log.topics[0] !== TRANSFER_TOPIC) continue;

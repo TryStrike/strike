@@ -59,11 +59,9 @@ async function readBalance(
 ): Promise<number> {
   const config = getArcConfig();
   const assetConfig = config.assets[asset];
-  const raw = assetConfig.isNative
-    ? await provider.getBalance(address)
-    : await new ethers.Contract(assetConfig.address as string, ERC20_ABI, provider).balanceOf(
-        address
-      );
+  const raw = await new ethers.Contract(assetConfig.address, ERC20_ABI, provider).balanceOf(
+    address
+  );
   return parseFloat(ethers.formatUnits(raw, assetConfig.decimals));
 }
 

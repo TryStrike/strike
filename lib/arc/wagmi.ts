@@ -9,7 +9,7 @@ const arcConfig = getArcConfig();
 export const arc = defineChain({
   id: arcConfig.chainId,
   name: arcConfig.name,
-  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
   rpcUrls: {
     default: { http: [arcConfig.rpcEndpoint] },
   },

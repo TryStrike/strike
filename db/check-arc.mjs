@@ -10,8 +10,9 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const envPath = resolve(root, '.env');
-if (existsSync(envPath)) {
+for (const file of ['.env.local', '.env']) {
+  const envPath = resolve(root, file);
+  if (!existsSync(envPath)) continue;
   for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
     if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();

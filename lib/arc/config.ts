@@ -1,13 +1,12 @@
-/** Arc mainnet configuration. */
+/** Arc network configuration (mainnet defaults; NEXT_PUBLIC_ARC_* switches to testnet). */
 
 export type ArcAsset = 'USDC';
 
 interface ArcAssetConfig {
   symbol: ArcAsset;
   decimals: number;
-  /** Null while the Arc USDC contract address has not been supplied. */
-  address: `0x${string}` | null;
-  isNative: boolean;
+  /** Arc's USDC ERC-20 interface (6 decimals; the native gas token is the same balance at 18). */
+  address: `0x${string}`;
   logo: string;
 }
 
@@ -16,7 +15,7 @@ interface NetworkConfig {
   name: string;
   rpcEndpoint: string;
   explorer: string;
-  usdc: `0x${string}` | null;
+  usdc: `0x${string}`;
 }
 
 const ARC_DEFAULTS: NetworkConfig = {
@@ -24,7 +23,7 @@ const ARC_DEFAULTS: NetworkConfig = {
   name: 'Arc',
   rpcEndpoint: 'https://rpc.mainnet.arc.io',
   explorer: 'https://explorer.arc.io',
-  usdc: null,
+  usdc: '0x3600000000000000000000000000000000000000',
 };
 
 interface ArcConfig extends NetworkConfig {
@@ -38,7 +37,7 @@ export function getArcConfig(): ArcConfig {
   const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID) || net.chainId;
   const rpcEndpoint = process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT?.trim() || net.rpcEndpoint;
   const explorer = process.env.NEXT_PUBLIC_ARC_EXPLORER?.trim() || net.explorer;
-  const usdc = (process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS?.trim() || net.usdc) as `0x${string}` | null;
+  const usdc = (process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS?.trim() || net.usdc) as `0x${string}`;
   const treasuryAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS?.trim() || '';
 
   if (!treasuryAddress) {
@@ -57,7 +56,6 @@ export function getArcConfig(): ArcConfig {
         symbol: 'USDC',
         decimals: 6,
         address: usdc,
-        isNative: true,
         logo: '/logos/usdc.png',
       },
     },

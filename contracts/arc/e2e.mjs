@@ -1,11 +1,11 @@
 /**
  * On-chain check for StrikeTreasury on Arc.
  *
- * Exercises the native USDC path and token safety controls after the Arc USDC
- * contract address has been configured.
+ * Exercises USDC deposits, payouts and the safety controls against a deployed
+ * treasury (see deploy.mjs). Spends a few micro-USDC.
  *
  * Usage:
- *   ARC_TREASURY_SECRET_KEY=... ARC_USDC_ADDRESS=0x... node contracts/arc/e2e.mjs
+ *   node contracts/arc/e2e.mjs   (reads .env.local/.env like deploy.mjs)
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -16,17 +16,21 @@ import { ethers } from 'ethers';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '../..');
 
-const envPath = resolve(root, '.env');
-if (existsSync(envPath)) {
+for (const file of ['.env.local', '.env']) {
+  const envPath = resolve(root, file);
+  if (!existsSync(envPath)) continue;
   for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
   }
 }
 
-const net = { chainId: 5042, name: 'Arc', rpc: process.env.ARC_RPC_URL || 'https://rpc.mainnet.arc.io' };
-const usdcAddress = process.env.ARC_USDC_ADDRESS || process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS;
-assert.ok(ethers.isAddress(usdcAddress), 'ARC_USDC_ADDRESS must be configured');
+const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID) || 5042;
+const net = {
+  chainId,
+  name: chainId === 5042 ? 'Arc' : 'Arc Testnet',
+  rpc: process.env.ARC_RPC_URL || process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || 'https://rpc.mainnet.arc.io',
+};
 
 const deployment = JSON.parse(
   readFileSync(join(__dirname, `deployments/arc-${net.chainId}.json`), 'utf8')
@@ -60,9 +64,12 @@ console.log(`StrikeTreasury e2e on ${net.name} (${net.chainId})`);
 console.log(`Treasury ${deployment.strikeTreasury}`);
 console.log(`Signer   ${wallet.address}\n`);
 
-const NATIVE_AMOUNT = ethers.parseUnits('0.00001', 6);
 const TOKEN_DECIMALS = Number(await token.decimals());
-const TOKEN_AMOUNT = ethers.parseUnits('0.00001', TOKEN_DECIMALS);
+const AMOUNT = ethers.parseUnits('0.00001', TOKEN_DECIMALS);
+const parseEvent = (receipt, name) =>
+  receipt.logs
+    .map((l) => { try { return treasury.interface.parseLog(l); } catch { return null; } })
+    .find((e) => e && e.name === name);
 
 await check('deployer owns the treasury and it points at the right token', async () => {
   assert.equal((await treasury.owner()).toLowerCase(), deployment.owner.toLowerCase());
@@ -70,92 +77,69 @@ await check('deployer owns the treasury and it points at the right token', async
   assert.equal(await treasury.paused(), false);
 });
 
-await check('native deposit is recorded and credited', async () => {
-  const before = await treasury.getBalance();
-  const receipt = await (await treasury.deposit({ value: NATIVE_AMOUNT })).wait();
-  assert.equal(await treasury.getBalance(), before + NATIVE_AMOUNT);
-
-  const event = receipt.logs
-    .map((l) => { try { return treasury.interface.parseLog(l); } catch { return null; } })
-    .find((e) => e && e.name === 'Deposited');
-  assert.ok(event, 'no Deposited event');
-  assert.equal(event.args.asset, ethers.ZeroAddress, 'native deposit should report the zero asset');
-  assert.equal(event.args.amount, NATIVE_AMOUNT);
-});
-
-await check('a plain transfer counts as a native deposit', async () => {
-  const before = await treasury.getBalance();
-  await (await wallet.sendTransaction({ to: deployment.strikeTreasury, value: NATIVE_AMOUNT })).wait();
-  assert.equal(await treasury.getBalance(), before + NATIVE_AMOUNT);
-});
-
-await check('a zero native deposit is rejected', async () => {
-  await assert.rejects(() => treasury.deposit.staticCall({ value: 0 }));
-});
-
-await check('token deposit needs an allowance, then is credited', async () => {
+await check('USDC deposit needs an allowance, then is credited', async () => {
   const balance = await token.balanceOf(wallet.address);
-  assert.ok(balance >= TOKEN_AMOUNT, `signer holds no USDC (${balance})`);
+  assert.ok(balance >= AMOUNT * 4n, `signer holds too little USDC (${balance})`);
 
-  // Without an allowance the transferFrom must fail.
-  await assert.rejects(() => treasury.depositToken.staticCall(TOKEN_AMOUNT));
-
-  await (await token.approve(deployment.strikeTreasury, TOKEN_AMOUNT)).wait();
+  await assert.rejects(() => treasury.depositToken.staticCall(AMOUNT));
+  await (await token.approve(deployment.strikeTreasury, AMOUNT)).wait();
 
   const before = await treasury.getTokenBalance();
-  const receipt = await (await treasury.depositToken(TOKEN_AMOUNT)).wait();
-  assert.equal(await treasury.getTokenBalance(), before + TOKEN_AMOUNT);
-
-  const event = receipt.logs
-    .map((l) => { try { return treasury.interface.parseLog(l); } catch { return null; } })
-    .find((e) => e && e.name === 'Deposited');
+  const receipt = await (await treasury.depositToken(AMOUNT)).wait();
+  assert.equal(await treasury.getTokenBalance(), before + AMOUNT);
+  const event = parseEvent(receipt, 'Deposited');
   assert.ok(event, 'no Deposited event');
-  assert.equal(event.args.asset.toLowerCase(), deployment.token.toLowerCase());
+  assert.equal(event.args.amount, AMOUNT);
 });
 
-await check('owner pays native out to a player', async () => {
-  const to = ethers.Wallet.createRandom().address;
-  await (await treasury.withdrawTo(to, NATIVE_AMOUNT)).wait();
-  assert.equal(await provider.getBalance(to), NATIVE_AMOUNT);
+await check('a plain ERC-20 transfer also lands in the treasury', async () => {
+  const before = await treasury.getTokenBalance();
+  await (await token.transfer(deployment.strikeTreasury, AMOUNT * 2n)).wait();
+  assert.equal(await treasury.getTokenBalance(), before + AMOUNT * 2n);
 });
 
-await check('owner pays the token out to a player', async () => {
+await check('native value sent to the treasury is refused', async () => {
+  await assert.rejects(() =>
+    wallet.call({ to: deployment.strikeTreasury, value: 1n })
+  );
+});
+
+await check('a zero deposit is rejected', async () => {
+  await assert.rejects(() => treasury.depositToken.staticCall(0));
+});
+
+await check('owner pays USDC out to a player', async () => {
   const to = ethers.Wallet.createRandom().address;
-  await (await treasury.withdrawTokenTo(to, TOKEN_AMOUNT)).wait();
-  assert.equal(await token.balanceOf(to), TOKEN_AMOUNT);
+  const receipt = await (await treasury.withdrawTokenTo(to, AMOUNT)).wait();
+  assert.equal(await token.balanceOf(to), AMOUNT);
+  assert.ok(parseEvent(receipt, 'Withdrawn'), 'no Withdrawn event');
 });
 
 await check('batch payout reaches every recipient', async () => {
-  // Earlier payouts drained the balance; top it up for the batch.
-  await (await treasury.deposit({ value: NATIVE_AMOUNT * 2n })).wait();
-
   const a = ethers.Wallet.createRandom().address;
   const b = ethers.Wallet.createRandom().address;
-  await (await treasury.withdrawBatch([a, b], [NATIVE_AMOUNT, NATIVE_AMOUNT])).wait();
-  assert.equal(await provider.getBalance(a), NATIVE_AMOUNT);
-  assert.equal(await provider.getBalance(b), NATIVE_AMOUNT);
+  await (await treasury.withdrawBatch([a, b], [AMOUNT, AMOUNT])).wait();
+  assert.equal(await token.balanceOf(a), AMOUNT);
+  assert.equal(await token.balanceOf(b), AMOUNT);
 });
 
 await check('a payout beyond the balance is refused', async () => {
-  await assert.rejects(() =>
-    treasury.withdrawTo.staticCall(wallet.address, ethers.parseEther('1000000'))
-  );
+  const tooMuch = (await treasury.getTokenBalance()) + 1n;
+  await assert.rejects(() => treasury.withdrawTokenTo.staticCall(wallet.address, tooMuch));
 });
 
 await check('a non-owner cannot pay anything out', async () => {
   const stranger = ethers.Wallet.createRandom().connect(provider);
   const asStranger = new ethers.Contract(deployment.strikeTreasury, abi, stranger);
-  await assert.rejects(() => asStranger.withdrawTo.staticCall(stranger.address, NATIVE_AMOUNT));
+  await assert.rejects(() => asStranger.withdrawTokenTo.staticCall(stranger.address, AMOUNT));
   await assert.rejects(() => asStranger.pause.staticCall());
 });
 
 await check('pause stops deposits and payouts, unpause restores them', async () => {
   await (await treasury.pause()).wait();
   assert.equal(await treasury.paused(), true);
-
-  await assert.rejects(() => treasury.deposit.staticCall({ value: NATIVE_AMOUNT }));
-  await assert.rejects(() => treasury.withdrawTo.staticCall(wallet.address, NATIVE_AMOUNT));
-
+  await assert.rejects(() => treasury.depositToken.staticCall(AMOUNT));
+  await assert.rejects(() => treasury.withdrawTokenTo.staticCall(wallet.address, AMOUNT));
   await (await treasury.unpause()).wait();
   assert.equal(await treasury.paused(), false);
 });
@@ -163,14 +147,9 @@ await check('pause stops deposits and payouts, unpause restores them', async () 
 await check('ownership transfer needs the new owner to accept', async () => {
   const nominee = ethers.Wallet.createRandom();
   await (await treasury.transferOwnership(nominee.address)).wait();
-
-  // Not yet the owner — the handover is incomplete until accepted.
   assert.equal((await treasury.owner()).toLowerCase(), wallet.address.toLowerCase());
   assert.equal((await treasury.pendingOwner()).toLowerCase(), nominee.address.toLowerCase());
-
-  // Nobody else can accept on the nominee's behalf.
   await assert.rejects(() => treasury.acceptOwnership.staticCall());
-
   // Cancel the handover so the treasury stays operable.
   await (await treasury.transferOwnership(wallet.address)).wait();
 });

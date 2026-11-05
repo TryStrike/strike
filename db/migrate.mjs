@@ -23,9 +23,6 @@ const MIGRATIONS = [
   'supabase/migrations/002_banned_wallets.sql',
   'supabase/migrations/003_user_sessions.sql',
   'supabase/migrations/007_withdrawal_columns.sql',
-  'supabase/migrations/008_staking.sql',
-  'supabase/migrations/009_staking_manual_withdrawals.sql',
-  'supabase/migrations/010_staking_365d_100pct_apy.sql',
   'supabase/access_system.sql',
   'supabase/user_profiles.sql',
   'db/arc.sql',
@@ -33,10 +30,13 @@ const MIGRATIONS = [
 
 function readEnv(name) {
   if (process.env[name]) return process.env[name].trim();
-  const envPath = resolve(root, '.env');
-  if (!existsSync(envPath)) return null;
-  const match = readFileSync(envPath, 'utf8').match(new RegExp(`^${name}=(.+)$`, 'm'));
-  return match ? match[1].trim() : null;
+  for (const file of ['.env.local', '.env']) {
+    const envPath = resolve(root, file);
+    if (!existsSync(envPath)) continue;
+    const match = readFileSync(envPath, 'utf8').match(new RegExp(`^${name}=(.+)$`, 'm'));
+    if (match) return match[1].trim();
+  }
+  return null;
 }
 
 const NEWLINE = String.fromCharCode(10);

@@ -16,6 +16,24 @@ This repo settles on **Arc only**. Players deposit **USDC**, trade binary rounds
 
 ---
 
+## ETHGlobal Mumbai — Arc track
+
+**Arc Studio project:** https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd
+
+### Before the hackathon
+
+Strike was a working binary options dapp that had been ported across several chains, most recently BOT Chain (native BOT + USDT). The codebase still carried integrations for about ten networks, a staking product, and a treasury contract designed for a separate native coin and ERC-20.
+
+### During the hackathon
+
+- **Pruned to Arc only** — removed every other chain, staking, dead code and unused packages (~26.8k lines), driven by knip and `tsc --noUnusedLocals`.
+- **USDC-only `StrikeTreasury`** — rewritten for Arc, where native USDC and the ERC-20 interface share one balance: no payable paths, `depositToken`, `withdrawTokenTo`, batched payouts, pause and two-step ownership.
+- **Treasury contract is now the money path** — deposits land in the contract, payouts go through `withdrawTokenTo` signed by the owner key (previously an EOA).
+- **Decimals fix** — the app treated USDC as native with 6 decimals; native USDC on Arc has 18. Everything now goes through the 6-decimal ERC-20 interface.
+- **Testnet end to end** — Arc Testnet config, Neon Postgres, deploy + e2e scripts driven by env.
+
+---
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -55,12 +73,16 @@ Playable asset: **USDC** (6 decimals). Markets cover crypto, forex, stocks, meta
 
 | | Mainnet | Testnet |
 |---|---|---|
-| **Name** | Arc | Arc testnet |
-| **Chain ID** | `5042` | Configure `NEXT_PUBLIC_ARC_CHAIN_ID` |
-| **RPC** | `https://rpc.mainnet.arc.io` | Configure `NEXT_PUBLIC_ARC_RPC_ENDPOINT` |
-| **Explorer** | https://explorer.arc.io | Configure `NEXT_PUBLIC_ARC_EXPLORER` |
-| **USDC** | Configure `NEXT_PUBLIC_ARC_USDC_ADDRESS` when applicable | Address is not assumed |
-| **Treasury** | Configure `NEXT_PUBLIC_TREASURY_ADDRESS` | Configure `NEXT_PUBLIC_TREASURY_ADDRESS` |
+| **Chain ID** | `5042` | `5042002` |
+| **RPC** | `https://rpc.mainnet.arc.io` | `https://rpc.testnet.arc.io` |
+| **Explorer** | https://explorer.arc.io | https://explorer.testnet.arc.io |
+| **USDC (ERC-20 interface, 6 dp)** | `0x3600000000000000000000000000000000000000` | `0x3600000000000000000000000000000000000000` |
+| **Faucet** | — | https://faucet.circle.com |
+| **Treasury** | `NEXT_PUBLIC_TREASURY_ADDRESS` (StrikeTreasury) | `NEXT_PUBLIC_TREASURY_ADDRESS` (StrikeTreasury) |
+
+Mainnet is the default; set the `NEXT_PUBLIC_ARC_*` variables to run on testnet.
+
+On Arc, native USDC (the gas token, 18 decimals) and the USDC ERC-20 interface (6 decimals) are **the same balance**. Strike only moves USDC through the ERC-20 interface so amounts are never mis-scaled.
 
 **Wallets:** MetaMask, Trust Wallet, WalletConnect (wagmi + ConnectKit), and Privy social login (embedded EVM wallet). The app switches the connected wallet onto Arc on connect.
 
@@ -73,7 +95,7 @@ Config lives in `lib/arc/config.ts` for compatibility with existing internal imp
 ```
 1. Connect a wallet on Arc
 2. Deposit USDC to StrikeTreasury
-3. House balance is credited (off-chain, Supabase)
+3. House balance is credited (off-chain, Neon Postgres)
 4. Place bets — no wallet signature per round
 5. Live price at expiry settles the outcome
 6. Withdraw back to the same Arc address
@@ -81,27 +103,30 @@ Config lives in `lib/arc/config.ts` for compatibility with existing internal imp
 
 Deposits and withdrawals are on-chain. Bets, wins, and losses are atomic house-balance RPCs so rounds can settle in milliseconds.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  OFF-CHAIN (Supabase)                                       │
-│  user_balances  ·  balance_audit_log  ·  bet_history        │
-│  user_sessions  ·  withdrawal_requests                      │
-└─────────────────────────────────────────────────────────────┘
-         ▲                            ▲
-         │ balance RPCs               │ session pings
-┌────────┴────────────────────────────┴────────────────────────┐
-│  CLIENT (Next.js + Zustand + wagmi)                          │
-│  Price feed: live price feeds (Yahoo/Binance)                                     │
-│  Asset: USDC                                                 │
-│  Network: Arc only                                           │
-└──────────────────────────────────────────────────────────────┘
-         ▲
-         │ deposits / withdrawals
-┌────────┴─────────────────────────────────────────────────────┐
-│  ARC (5042)                                                  │
-│  StrikeTreasury holds USDC                                   │
-│  Fee collector receives platform + Blitz fees                │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph Browser["Browser — Next.js 16 + wagmi/ConnectKit/Privy"]
+    UI[Trade UI · Zustand store]
+  end
+  subgraph Server["Next.js route handlers"]
+    BAL["/api/balance/* — deposit · bet · win · withdraw"]
+    ADM["/api/admin/* — review + payout"]
+    PX["/api/prices/latest — Yahoo / Binance"]
+  end
+  DB[("Neon Postgres<br/>user_balances · bet_history<br/>withdrawal_requests · audit log")]
+  subgraph Arc["Arc (USDC gas)"]
+    USDC["USDC ERC-20 interface<br/>0x3600…0000"]
+    T["StrikeTreasury<br/>depositToken · withdrawTokenTo<br/>pause · 2-step owner"]
+  end
+  UI -- "1. USDC transfer to treasury" --> USDC --> T
+  UI -- "2. tx hash" --> BAL
+  BAL -- "verify Transfer log on-chain" --> Arc
+  BAL <--> DB
+  UI -- "bets, no signature" --> BAL
+  UI --> PX
+  UI -- "3. signed withdrawal intent" --> BAL
+  ADM -- "4. owner key: withdrawTokenTo" --> T
+  ADM <--> DB
 ```
 
 ---
@@ -218,13 +243,13 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  U[User requests withdrawal] --> W[POST /api/balance/withdraw]
-  W --> S[Signed intent required]
-  S --> V{Valid Arc balance?}
-  V -- No --> Y[Reject]
-  V -- Yes --> Z[Apply tier fee]
-  Z --> FEE[Fee → Arc fee collector]
-  FEE --> T[Treasury sends net USDC]
+  U[User signs withdrawal intent in wallet] --> W[POST /api/balance/withdraw]
+  W --> S{Signature, balance, cap, ban, frequency checks}
+  S -- fail --> Y[Reject]
+  S -- pass --> P[withdrawal_requests: pending]
+  P --> A[Admin dashboard: accept / reject]
+  A -- accept --> Z[Apply tier fee]
+  Z --> T["StrikeTreasury.withdrawTokenTo (owner key)"]
   T --> R[update_balance_for_withdrawal]
 ```
 

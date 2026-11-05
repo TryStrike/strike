@@ -68,13 +68,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           chainId: config.chainId,
           name: config.name,
         });
-        const raw = assetConfig.isNative
-          ? await provider.getBalance(address)
-          : await new ethers.Contract(
-              assetConfig.address as string,
-              ERC20_ABI,
-              provider
-            ).balanceOf(address);
+        const raw = await new ethers.Contract(
+          assetConfig.address,
+          ERC20_ABI,
+          provider
+        ).balanceOf(address);
         if (!cancelled) {
           setWalletBalance(parseFloat(ethers.formatUnits(raw, assetConfig.decimals)));
         }
@@ -164,13 +162,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       const signer = await provider.getSigner();
       const value = ethers.parseUnits(amount, assetConfig.decimals);
 
-      const tx = assetConfig.isNative
-        ? await signer.sendTransaction({ to: config.treasuryAddress, value })
-        : await new ethers.Contract(
-            assetConfig.address as string,
-            ERC20_ABI,
-            signer
-          ).transfer(config.treasuryAddress, value);
+      const tx = await new ethers.Contract(
+        assetConfig.address,
+        ERC20_ABI,
+        signer
+      ).transfer(config.treasuryAddress, value);
 
       await tx.wait();
 
