@@ -8,16 +8,15 @@
 //!
 //! Wire-parity rules inherited from the TS implementation:
 //!   * a `Rejection` is `(status, body)` and reproduces `NextResponse.json`
-//!     byte-for-byte in structure (key *order* is serde-alphabetical, as the
-//!     gateway's own JSON is not order-guaranteed either);
+//!     byte-for-byte, key order included (`serde_json/preserve_order`);
 //!   * every check fires in the TS source order, including the quirks that
 //!     decide which 400 a caller gets (e.g. bet validates the ban *before*
 //!     the positivity check, withdraw crashes on `currency.toUpperCase()`
 //!     before it ever reaches the address);
-//!   * money that only JS touches in f64 (balance comparisons, fee maths,
-//!     `toFixed(8)` payouts) is ported as the same f64 operations — using
-//!     exact decimals there would *change* results the TS wrote to the
-//!     ledger. Multi-row cap totals keep the TS exact-integer path
+//!   * money that only JS touches in f64 (balance comparisons, the token's
+//!     `toFixed(8)` ceiling) is ported as the same f64 operations. Fees are not:
+//!     [`split_fee`] is exact, because a float fee could not be sent on-chain.
+//!     Multi-row cap totals keep the TS exact-integer path
 //!     (`amount_to_base_units`, the port of `lib/balance/ledgerMath.ts`).
 //!
 //! Deliberate, documented deviations:
@@ -31,13 +30,13 @@
 //!     need an exact binary value with the digit past the cut equal to 5 and
 //!     only zeros after — impossible at 6/8 decimals because those ties
 //!     require a `5^k` factor no IEEE double carries. The two agree.
-//!   * `parse_end_time` accepts the ISO shapes `crate::bets::parse_date_ms`
-//!     covers, not every string V8's `Date.parse` guesses at.
 
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{json, Map, Value};
 
 use crate::address;
-use crate::bets::{self, iso_ms, parse_date_ms, value_to_string};
+use crate::bets::{self, value_to_string};
+use crate::money::parse_decimal;
 
 /// `(status, body)` — the exact HTTP answer a rejection path produces.
 pub type Rejection = (u16, Value);
@@ -90,7 +89,7 @@ fn js_number_string(raw: &str) -> Option<f64> {
             return i64::from_str_radix(body, 16).ok().map(|v| v as f64);
         }
     }
-    t.parse::<f64>().ok()
+    t.parse::<f64>().ok().filter(|f| !f.is_nan())
 }
 
 /// `String(value)` in a template literal — objects become `[object Object]`,
@@ -174,7 +173,11 @@ pub fn amount_to_base_units(value: &Value, decimals: u32) -> Option<i128> {
         let (whole, fraction) = split_decimal(&raw);
         let kept: String = fraction.chars().take(decimals as usize).collect();
         let dropped: String = fraction.chars().skip(decimals as usize).collect();
-        let combined = format!("{}{}", if whole.is_empty() { "0" } else { &whole }, pad_end(&kept, decimals));
+        let combined = format!(
+            "{}{}",
+            if whole.is_empty() { "0" } else { &whole },
+            pad_end(&kept, decimals)
+        );
         let mut units = parse_units_decimal(&combined);
         if dropped.chars().any(|c| c.is_ascii_digit() && c != '0') {
             units = units.saturating_add(1);
@@ -193,7 +196,11 @@ pub fn amount_to_base_units(value: &Value, decimals: u32) -> Option<i128> {
         // `BigInt(Number.MAX_SAFE_INTEGER)` in the TS.
         return Some(9_007_199_254_740_991);
     }
-    Some(if scaled > 0.0 { saturating_f64_to_i128(scaled) } else { 0 })
+    Some(if scaled > 0.0 {
+        saturating_f64_to_i128(scaled)
+    } else {
+        0
+    })
 }
 
 /// `String(1e21)` prints `1e+21`; serde prints `1e21`. Both spellings parse
@@ -256,7 +263,9 @@ fn is_plain_decimal(raw: &str) -> bool {
     }
     match body.split_once('.') {
         Some((w, f)) => {
-            !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()) && f.chars().all(|c| c.is_ascii_digit())
+            !w.is_empty()
+                && w.chars().all(|c| c.is_ascii_digit())
+                && f.chars().all(|c| c.is_ascii_digit())
         }
         None => !body.is_empty() && body.chars().all(|c| c.is_ascii_digit()),
     }
@@ -276,7 +285,10 @@ fn split_decimal(raw: &str) -> (String, String) {
 
 /// `sumAmountsToBaseUnits`: exact sum; `None` when any entry is unparseable,
 /// so a corrupt ledger row fails the cap closed instead of disabling it.
-pub fn sum_amounts_to_base_units<'a, I: IntoIterator<Item = &'a Value>>(values: I, decimals: u32) -> Option<i128> {
+pub fn sum_amounts_to_base_units<'a, I: IntoIterator<Item = &'a Value>>(
+    values: I,
+    decimals: u32,
+) -> Option<i128> {
     let mut total: i128 = 0;
     for value in values {
         let units = amount_to_base_units(value, decimals)?;
@@ -307,7 +319,13 @@ pub fn base_units_to_number(base: i128, decimals: u32) -> f64 {
     let fraction = &digits[split..];
     let trimmed = fraction.trim_end_matches('0');
     let text = if trimmed.is_empty() {
-        format!("{}0", if whole.is_empty() { "" } else { whole })
+        // An all-zero fraction prints as the integer part alone: appending a
+        // digit here would silently scale the balance by ten.
+        if whole.is_empty() {
+            "0".to_string()
+        } else {
+            whole.to_string()
+        }
     } else {
         format!("{whole}.{trimmed}")
     };
@@ -315,7 +333,11 @@ pub fn base_units_to_number(base: i128, decimals: u32) -> f64 {
         // Degenerate fallback: divide, which is what a float model would do.
         (base.abs() as f64) / 10f64.powi(decimals as i32)
     });
-    if negative { -n } else { n }
+    if negative {
+        -n
+    } else {
+        n
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -349,11 +371,12 @@ pub fn resolve_tier(tier_value: Option<&Value>) -> Tier {
     }
 }
 
-pub fn fee_percent(tier: Tier) -> f64 {
+/// The player keeps `100 - fee_percent` of the gross.
+pub fn fee_percent(tier: Tier) -> u32 {
     match tier {
-        Tier::Free => 0.10,
-        Tier::Standard => 0.09,
-        Tier::Vip => 0.08,
+        Tier::Free => 10,
+        Tier::Standard => 9,
+        Tier::Vip => 8,
     }
 }
 
@@ -367,33 +390,26 @@ pub fn fee_percent_label(tier: Tier) -> &'static str {
     }
 }
 
-/// `calculateFeeAmount`: floor to 1e-8 in the same double order JS uses.
-pub fn calculate_fee_amount(amount: f64, tier: Tier) -> f64 {
-    let fee = amount * fee_percent(tier);
-    (fee * 1e8).floor() / 1e8
+/// An amount as the decimal it was written as: the shortest text that round-trips
+/// the double. `None` past what a `Decimal` holds.
+pub fn exact_amount(amount: f64) -> Option<Decimal> {
+    parse_decimal(&format!("{amount}")).ok()
 }
 
-/// `ethers.parseUnits(String(x), decimals)` *including its throw*: the fee
-// collector skips the on-chain transfer when the amount has more fractional
-/// digits than the token or any notation ethers rejects. A truncating parse
-/// would move money the TS never moved.
-pub fn parse_units_strict(raw: &str, decimals: u32) -> Option<u128> {
-    let s = raw.trim();
-    if s.is_empty() || s.starts_with('-') {
-        return None;
-    }
-    let (whole, frac) = match s.split_once('.') {
-        Some((w, f)) => (if w.is_empty() { "0" } else { w }, f),
-        None => (s, ""),
-    };
-    if !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    if frac.chars().count() > decimals as usize {
-        return None; // ethers throws "too many decimal places"
-    }
-    let combined = format!("{whole}{}", pad_end(frac, decimals));
-    combined.parse::<u128>().ok()
+/// Rounds down to what the token can represent.
+pub fn floor_to_token(amount: Decimal) -> Decimal {
+    amount.round_dp_with_strategy(USDC_DECIMALS, RoundingStrategy::ToZero)
+}
+
+/// `(fee, net)`. The player's net floors to the token's 6 decimals and the fee is
+/// the remainder, so fee + net is exactly the gross and the net is always a
+/// payable amount. A gross with more than 6 decimals leaves a fee that does too:
+/// only the fee's on-chain transfer floors, and that dust stays in the treasury.
+/// `None` when the sum overflows a `Decimal`.
+pub fn split_fee(gross: Decimal, tier: Tier) -> Option<(Decimal, Decimal)> {
+    let kept = gross.checked_mul(Decimal::from(100 - fee_percent(tier)))? / Decimal::ONE_HUNDRED;
+    let net = floor_to_token(kept);
+    Some((gross - net, net))
 }
 
 // ---------------------------------------------------------------------------
@@ -434,21 +450,29 @@ pub struct BetHead<'a> {
 pub fn bet_head(body: &Value) -> Result<BetHead<'_>, Rejection> {
     let user_address = body.get("userAddress");
     let bet_amount = body.get("betAmount");
-    if !bets::is_truthy(user_address)
-        || matches!(bet_amount, None | Some(Value::Null))
-    {
-        return Err((400, error_body("Missing required fields: userAddress, betAmount")));
+    if !bets::is_truthy(user_address) || matches!(bet_amount, None | Some(Value::Null)) {
+        return Err((
+            400,
+            error_body("Missing required fields: userAddress, betAmount"),
+        ));
     }
     let bet_amount = bet_amount.unwrap();
     let amount = number_of(bet_amount);
     if amount.is_none() || !amount.map(|f| f.is_finite()).unwrap_or(false) {
         return Err((400, error_body("Invalid bet amount")));
     }
-    let address_ok = user_address.and_then(Value::as_str).map(address::is_address).unwrap_or(false);
+    let address_ok = user_address
+        .and_then(Value::as_str)
+        .map(address::is_address)
+        .unwrap_or(false);
     if !address_ok {
         return Err((400, error_body("Invalid wallet address format")));
     }
-    Ok(BetHead { user_address: user_address.unwrap(), bet_amount, amount: amount.unwrap() })
+    Ok(BetHead {
+        user_address: user_address.unwrap(),
+        bet_amount,
+        amount: amount.unwrap(),
+    })
 }
 
 pub struct BetPlan {
@@ -462,18 +486,22 @@ pub struct BetPlan {
 /// Checks after the ban probe: positivity, multiplier, target cell, then the
 /// currency normalisation (which *crashes* the TS route on a non-string, so
 /// it must run last and only after everything else passed).
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0)` is the NaN-safe spelling
 pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
     if !(head.amount > 0.0) {
         return Err((400, error_body("Bet amount must be greater than zero")));
     }
     let multiplier = body.get("multiplier");
-    let mult_num = multiplier.map(number_of).flatten();
+    let mult_num = multiplier.and_then(number_of);
     let lt_one = mult_num.map(|f| f < 1.0).unwrap_or(false);
     if !bets::is_truthy(multiplier) || lt_one {
         return Err((400, error_body("Multiplier must be at least 1.0")));
     }
     let is_real_number = matches!(multiplier, Some(Value::Number(_)));
-    if !is_real_number || !mult_num.map(|f| f.is_finite()).unwrap_or(false) || mult_num.unwrap() > 20.0 {
+    if !is_real_number
+        || !mult_num.map(|f| f.is_finite()).unwrap_or(false)
+        || mult_num.unwrap() > 20.0
+    {
         return Err((400, error_body("Multiplier exceeds maximum allowed value")));
     }
 
@@ -485,8 +513,9 @@ pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
             !(id_missing || price_change_missing)
         }
         // Truthy non-objects pass `!targetCell` but have no usable `id`.
-        Some(cell) if bets::is_truthy(Some(cell)) => cell.get("id").is_some_and(|v| !v.is_null())
-            && cell.get("priceChange").is_some(),
+        Some(cell) if bets::is_truthy(Some(cell)) => {
+            cell.get("id").is_some_and(|v| !v.is_null()) && cell.get("priceChange").is_some()
+        }
         _ => false,
     };
     if !cell_ok {
@@ -509,6 +538,7 @@ pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
     })
 }
 
+#[derive(Debug)]
 pub enum BetRows {
     /// The ledger row the deduction will hit; carries its `user_address`.
     Ledger(String),
@@ -532,9 +562,7 @@ pub fn bet_choose_row(rows: &[Value], amount: f64, currency: &str) -> BetRows {
             Some("frozen") => {
                 return BetRows::Reject((403, error_body("Account is frozen. Bets are disabled.")))
             }
-            Some("banned") => {
-                return BetRows::Reject((403, error_body("Account is banned.")))
-            }
+            Some("banned") => return BetRows::Reject((403, error_body("Account is banned."))),
             _ => {}
         }
     }
@@ -548,11 +576,16 @@ pub fn bet_choose_row(rows: &[Value], amount: f64, currency: &str) -> BetRows {
         bb.partial_cmp(&ba).unwrap_or(std::cmp::Ordering::Equal)
     });
     let chosen = sorted.iter().find(|row| {
-        to_number_opt(row.get("balance")).map(|b| b >= amount).unwrap_or(false)
+        to_number_opt(row.get("balance"))
+            .map(|b| b >= amount)
+            .unwrap_or(false)
     });
     match chosen {
         Some(row) => BetRows::Ledger(
-            row.get("user_address").and_then(Value::as_str).unwrap_or_default().to_string(),
+            row.get("user_address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         ),
         None => BetRows::Reject((
             400,
@@ -568,7 +601,11 @@ pub fn bet_choose_row(rows: &[Value], amount: f64, currency: &str) -> BetRows {
 pub fn sanitize_bet_request_id(value: Option<&Value>) -> Option<String> {
     let raw = value.and_then(Value::as_str).map(str::trim)?;
     let len = raw.chars().count();
-    if (8..=64).contains(&len) && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if (8..=64).contains(&len)
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         Some(raw.to_string())
     } else {
         None
@@ -577,8 +614,17 @@ pub fn sanitize_bet_request_id(value: Option<&Value>) -> Option<String> {
 
 /// `bet_req_${roundId}_${userKey.slice(-8)}_${Date.now()}`.
 pub fn derived_bet_request_id(round_id: Option<&Value>, user_key: &str, now_ms: i64) -> String {
-    let round = round_id.map(value_to_string).unwrap_or_else(|| "undefined".to_string());
-    let tail: String = user_key.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+    let round = round_id
+        .map(value_to_string)
+        .unwrap_or_else(|| "undefined".to_string());
+    let tail: String = user_key
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("bet_req_{round}_{tail}_{now_ms}")
 }
 
@@ -587,47 +633,8 @@ pub fn build_bet_id(now_ms: i64, uuid_hex12: &str) -> String {
     format!("bet_{now_ms}_{uuid_hex12}")
 }
 
-/// `Number((betAmount * multiplier).toFixed(8))`. `None` models the TS
-/// RangeError from `toFixed` on a non-finite product, which the route's outer
-/// catch turns into 500.
-pub fn bet_max_payout(amount: f64, multiplier: f64) -> Option<f64> {
-    let product = amount * multiplier;
-    if !product.is_finite() {
-        return None;
-    }
-    to_fixed(product, 8).parse::<f64>().ok()
-}
-
-/// `parseEndTime`: epoch-ms numbers or ISO strings, and the JS RangeError
-/// when the number is outside the Date range (the outer catch -> 500).
-pub fn bet_end_time(value: Option<&Value>) -> Result<Option<String>, Rejection> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => {
-            let ms = n.as_f64();
-            match ms {
-                Some(ms) if ms.is_finite() => date_to_iso(ms as i64),
-                _ => Ok(None),
-            }
-        }
-        Some(Value::String(s)) => match parse_date_ms(s) {
-            Some(ms) => date_to_iso(ms),
-            None => Ok(None),
-        },
-        Some(_) => Ok(None),
-    }
-}
-
-fn date_to_iso(ms: i64) -> Result<Option<String>, Rejection> {
-    // ECMAScript Date range: ±8.64e15 ms. Beyond it `toISOString()` throws
-    // (an Invalid Date), which the TS route surfaces as its 500.
-    if ms.abs() > 8_640_000_000_000_000 {
-        return Err(route_crash());
-    }
-    Ok(Some(iso_ms(ms)))
-}
-
 /// `createSettlementToken` inputs the route must sign *before* the deduction.
+#[derive(Debug)]
 pub struct TokenMint {
     pub bet_id: String,
     pub user_address: String,
@@ -635,17 +642,26 @@ pub struct TokenMint {
     pub max_payout: f64,
 }
 
+#[derive(Debug)]
 pub enum BetRpcDecision {
     /// Duplicate that minted a token first time: re-sign with the stored
     /// payout ceiling so the retry keeps a settlement window.
     ReplayMint(TokenMint),
     /// Duplicate with a stored token and no usable ceiling: replay it.
-    ReplayStored { bet_id: String, token: String, new_balance: Option<f64> },
+    ReplayStored {
+        bet_id: String,
+        token: String,
+        new_balance: Option<f64>,
+    },
     /// Duplicate that never got a token: 409.
     Conflict { body: Value },
     /// Anything not an explicit well-formed success.
     FailClosed { status: u16, body: Value },
-    Success { new_balance: f64, bet_id: String, token: String },
+    Success {
+        new_balance: f64,
+        bet_id: String,
+        token: String,
+    },
 }
 
 /// Maps the `place_bet_locked` JSON onto the exact TS responses. The replay
@@ -653,9 +669,19 @@ pub enum BetRpcDecision {
 /// the secret lives in `config()`.
 pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -> BetRpcDecision {
     let new_balance = to_number_opt(result.get("new_balance"));
-    if result.get("duplicate").and_then(Value::as_bool).unwrap_or(false) {
-        let bet_id = result.get("bet_id").and_then(Value::as_str).filter(|s| !s.is_empty());
-        let token = result.get("settlement_token").and_then(Value::as_str).filter(|s| !s.is_empty());
+    if result
+        .get("duplicate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let bet_id = result
+            .get("bet_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let token = result
+            .get("settlement_token")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
         if let (Some(bet_id), Some(_token)) = (bet_id, token) {
             let stored = to_number_opt(result.get("max_payout"));
             return match stored {
@@ -687,24 +713,42 @@ pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .unwrap_or("Bet already processed. Please place a new bet.");
-        return BetRpcDecision::Conflict { body: error_body(error) };
+        return BetRpcDecision::Conflict {
+            body: error_body(error),
+        };
     }
 
     // Fail closed unless every success field is explicitly present.
     let explicit_success = result.get("success").and_then(Value::as_bool) == Some(true);
-    let bet_id = result.get("bet_id").and_then(Value::as_str).filter(|s| !s.is_empty());
-    let token = result.get("settlement_token").and_then(Value::as_str).filter(|s| !s.is_empty());
-    if explicit_success && bet_id.is_some() && token.is_some() && new_balance.is_some() {
+    let bet_id = result
+        .get("bet_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let token = result
+        .get("settlement_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let (true, Some(new_balance), Some(bet_id), Some(token)) =
+        (explicit_success, new_balance, bet_id, token)
+    {
         return BetRpcDecision::Success {
-            new_balance: new_balance.unwrap(),
-            bet_id: bet_id.unwrap().to_string(),
-            token: token.unwrap().to_string(),
+            new_balance,
+            bet_id: bet_id.to_string(),
+            token: token.to_string(),
         };
     }
 
-    let error = result.get("error").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let error = result
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
     let status_and_body: (u16, Value) = match error {
-        Some("Insufficient balance") => (400, error_body(&format!("Insufficient house balance. Deposit more {currency}."))),
+        Some("Insufficient balance") => (
+            400,
+            error_body(&format!(
+                "Insufficient house balance. Deposit more {currency}."
+            )),
+        ),
         Some("User not found") => (
             400,
             error_body(&format!(
@@ -716,10 +760,21 @@ pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -
         Some(other) => (400, error_body(other)),
         None => (503, error_body("Bet placement failed")),
     };
-    BetRpcDecision::FailClosed { status: status_and_body.0, body: status_and_body.1 }
+    BetRpcDecision::FailClosed {
+        status: status_and_body.0,
+        body: status_and_body.1,
+    }
 }
 
-pub fn bet_success_body(remaining_balance: Value, bet_id: &str, settlement_token: &str, duplicate: bool) -> Value {
+/// `round` is the frozen view `place_bet_locked` answered with, the numbers a
+/// client must show instead of its own.
+pub fn bet_success_body(
+    remaining_balance: Value,
+    bet_id: &str,
+    settlement_token: &str,
+    duplicate: bool,
+    round: Option<&Value>,
+) -> Value {
     let mut map = Map::new();
     map.insert("success".into(), json!(true));
     if duplicate {
@@ -729,6 +784,11 @@ pub fn bet_success_body(remaining_balance: Value, bet_id: &str, settlement_token
     map.insert("remainingBalance".into(), remaining_balance);
     map.insert("betId".into(), json!(bet_id));
     map.insert("settlementToken".into(), json!(settlement_token));
+    if let Some(round) = round {
+        map.insert("strikePrice".into(), round["strike_price"].clone());
+        map.insert("endTime".into(), round["end_time_ms"].clone());
+        map.insert("multiplier".into(), round["multiplier"].clone());
+    }
     Value::Object(map)
 }
 
@@ -751,18 +811,26 @@ pub fn deposit_head(body: &Value) -> Result<DepositHead<'_>, Rejection> {
         || matches!(amount, None | Some(Value::Null))
         || !bets::is_truthy(tx_hash)
     {
-        return Err((400, error_body("Missing required fields: userAddress, amount, txHash")));
+        return Err((
+            400,
+            error_body("Missing required fields: userAddress, amount, txHash"),
+        ));
     }
     let amount = amount.unwrap();
     let value = number_of(amount);
     if value.is_none() || !value.map(|f| f.is_finite()).unwrap_or(false) {
         return Err((400, error_body("Invalid deposit amount")));
     }
-    Ok(DepositHead { user_address: user_address.unwrap(), tx_hash: tx_hash.unwrap(), amount: value.unwrap() })
+    Ok(DepositHead {
+        user_address: user_address.unwrap(),
+        tx_hash: tx_hash.unwrap(),
+        amount: value.unwrap(),
+    })
 }
 
 /// Post-ban deposit checks: positivity, the `String(currency ?? '')`
 /// normalisation and the supported-currency gate.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0)` is the NaN-safe spelling
 pub fn deposit_currency(body: &Value, amount: f64) -> Result<String, Rejection> {
     if !(amount > 0.0) {
         return Err((400, error_body("Deposit amount must be greater than zero")));
@@ -773,7 +841,10 @@ pub fn deposit_currency(body: &Value, amount: f64) -> Result<String, Rejection> 
     };
     let normalized = raw.to_uppercase();
     if normalized != "USDC" {
-        return Err((400, error_body(&format!("Unsupported deposit currency: {normalized}"))));
+        return Err((
+            400,
+            error_body(&format!("Unsupported deposit currency: {normalized}")),
+        ));
     }
     Ok(normalized)
 }
@@ -782,7 +853,10 @@ pub fn deposit_currency(body: &Value, amount: f64) -> Result<String, Rejection> 
 /// TS included them (insufficient confirmations).
 pub fn deposit_pending_body(reason: &str, confirmations: Option<u64>) -> (u16, Value) {
     let mut map = Map::new();
-    map.insert("error".into(), json!("Deposit could not be verified on-chain yet. Please retry."));
+    map.insert(
+        "error".into(),
+        json!("Deposit could not be verified on-chain yet. Please retry."),
+    );
     map.insert("retryable".into(), json!(true));
     map.insert("code".into(), json!(reason));
     if let Some(c) = confirmations {
@@ -858,26 +932,34 @@ pub fn combined_tx_hash(tx_hash: &Value, fee_tx: Option<&str>) -> String {
 /// verification fails closed exactly like the TS one does.
 pub fn deposit_required_amount_string(amount: f64) -> String {
     let units = amount_to_base_units(&Value::from(amount), USDC_DECIMALS);
-    let units = match units {
-        Some(u) => u,
-        None => 9_007_199_254_740_991, // MAX_SAFE_INTEGER clamp, as requiredBaseUnits
-    };
-    let units = units.min(u128::MAX as i128) as u128;
+    let units = units.unwrap_or(9_007_199_254_740_991);
+    // `i128` already tops out below `u128::MAX`; a negative clamp would wrap
+    // the whole amount to 2^128-1 and demand an impossible transfer.
+    let units = units.max(0) as u128;
     let whole = units / 1_000_000;
     let frac = units % 1_000_000;
     format!("{whole}.{frac:06}")
 }
 
-pub fn deposit_net(amount: f64, tier: Tier) -> (f64, f64) {
-    let fee = calculate_fee_amount(amount, tier);
-    (fee, amount - fee)
+pub fn deposit_net(amount: f64, tier: Tier) -> Option<(Decimal, Decimal)> {
+    split_fee(exact_amount(amount)?, tier)
 }
 
 pub fn deposit_net_rejection(label: &str) -> Rejection {
-    (400, error_body(&format!("Deposit amount after {label} fee must be greater than zero")))
+    (
+        400,
+        error_body(&format!(
+            "Deposit amount after {label} fee must be greater than zero"
+        )),
+    )
 }
 
-pub fn deposit_success_body(new_balance: Option<f64>, fee: f64, net: f64, credited_at: &str) -> Value {
+pub fn deposit_success_body(
+    new_balance: Option<f64>,
+    fee: f64,
+    net: f64,
+    credited_at: &str,
+) -> Value {
     json!({
         "success": true,
         "newBalance": bets::js_num(new_balance.unwrap_or(f64::NAN)),
@@ -893,42 +975,40 @@ pub fn deposit_success_body(new_balance: Option<f64>, fee: f64, net: f64, credit
 
 pub struct WinRequest<'a> {
     pub user_address: &'a str,
-    pub win_amount: &'a Value,
     pub currency: Value,
     pub bet_id: &'a Value,
     pub settlement_token: Value,
 }
 
-pub fn win_head(body: &Value, allow_test_bypass: bool) -> Result<WinRequest<'_>, Rejection> {
+/// A claim names a bet and proves it holds the bet's token. Any `winAmount` or
+/// price in the body is ignored: the server computes the result.
+pub fn win_head(body: &Value) -> Result<WinRequest<'_>, Rejection> {
     let user_address = body.get("userAddress");
-    let win_amount = body.get("winAmount");
-    if !bets::is_truthy(user_address) || matches!(win_amount, None | Some(Value::Null)) {
-        return Err((400, error_body("Missing required fields: userAddress, winAmount")));
+    if !bets::is_truthy(user_address) {
+        return Err((400, error_body("Missing required fields: userAddress")));
     }
     let bet_id = body.get("betId");
     let settlement_token = body.get("settlementToken");
-    if !bets::is_truthy(bet_id) || (!bets::is_truthy(settlement_token) && !allow_test_bypass) {
-        return Err((400, error_body("Missing required fields: betId, settlementToken")));
+    if !bets::is_truthy(bet_id) || !bets::is_truthy(settlement_token) {
+        return Err((
+            400,
+            error_body("Missing required fields: betId, settlementToken"),
+        ));
     }
     Ok(WinRequest {
         user_address: user_address.and_then(Value::as_str).unwrap_or_default(),
-        win_amount: win_amount.unwrap(),
-        currency: body.get("currency").cloned().unwrap_or(Value::String("USDC".into())),
+        currency: body
+            .get("currency")
+            .cloned()
+            .unwrap_or(Value::String("USDC".into())),
         bet_id: bet_id.unwrap(),
         settlement_token: settlement_token.cloned().unwrap_or(Value::Null),
     })
 }
 
-/// Post-address/amount checks: positivity+strict-finiteness of winAmount and
-/// the currency normalisation (a non-string truthy currency is a TS
-/// TypeError -> 500; falsy falls back to USDC before `.toUpperCase`).
+/// The currency normalisation (a non-string truthy currency is a TS TypeError ->
+/// 500; falsy falls back to USDC before `.toUpperCase`).
 pub fn win_after_ban(req: &WinRequest<'_>) -> Result<String, Rejection> {
-    let amount = number_of(req.win_amount);
-    let is_number = matches!(req.win_amount, Value::Number(_));
-    let positive = amount.map(|f| f > 0.0).unwrap_or(false);
-    if !positive || !is_number || !amount.map(|f| f.is_finite()).unwrap_or(false) {
-        return Err((400, error_body("Win amount must be greater than zero")));
-    }
     let currency = match &req.currency {
         Value::String(s) if !s.is_empty() => s.to_uppercase(),
         v if bets::is_truthy(Some(v)) => return Err(route_crash()),
@@ -940,15 +1020,13 @@ pub fn win_after_ban(req: &WinRequest<'_>) -> Result<String, Rejection> {
     Ok(currency)
 }
 
-/// The settlement-token binding: identity match and the payout ceiling
-/// (`winAmount > maxPayout + 1e-8`). Caller verifies the HMAC first; a
-/// `None` payload maps to the 401 here.
+/// The settlement-token binding: bet, wallet and currency. Caller verifies the
+/// HMAC first; a `None` payload maps to the 401 here.
 pub fn win_token_failure(
     payload: Option<&crate::crypto::SettlementPayload>,
     bet_id: &Value,
     user_key: &str,
     currency: &str,
-    win_amount: f64,
 ) -> Option<Rejection> {
     let payload = payload?;
     let bet_id_matches = bet_id.as_str() == Some(payload.bet_id.as_str());
@@ -957,61 +1035,63 @@ pub fn win_token_failure(
     if !bet_id_matches || !address_matches || payload.currency != currency {
         return Some((401, error_body("Settlement token does not match bet")));
     }
-    if win_amount > payload.max_payout + 1e-8 {
-        return Some((400, error_body("Win amount exceeds approved payout")));
-    }
-    None
-}
-
-/// `settleFailureFromThrow`: maps the PL/pgSQL exception text onto responses.
-pub fn win_map_settle_error(message: &str) -> Option<Rejection> {
-    let lower = message.to_lowercase();
-    if lower.contains("strike_unknown_bet") {
-        return Some((400, error_body("Unknown bet: no server-side record of this payout")));
-    }
-    if lower.contains("strike_payout_exceeds_max") {
-        return Some((400, error_body("Win amount exceeds approved payout")));
-    }
-    if lower.contains("strike_invalid_payout_amount") {
-        return Some((400, error_body("Win amount must be greater than zero")));
-    }
     None
 }
 
 pub fn win_unavailable() -> Rejection {
-    (503, error_body("Service temporarily unavailable. Please try again."))
+    (
+        503,
+        error_body("Service temporarily unavailable. Please try again."),
+    )
 }
 
-pub enum WinRpcDecision {
-    Duplicate(Value),
-    FailClosed { status: u16, body: Value },
-    Success(Value),
+pub fn win_unknown_bet() -> Rejection {
+    (
+        400,
+        error_body("Unknown bet: no server-side record of this payout"),
+    )
 }
 
-pub fn win_rpc_decision(result: &Value, bet_id: &str, win_amount: f64) -> WinRpcDecision {
-    let new_balance = parse_float_of(result.get("new_balance"));
-    if result.get("duplicate").and_then(Value::as_bool).unwrap_or(false) {
-        return WinRpcDecision::Duplicate(json!({
-            "success": true,
-            "duplicate": true,
-            "message": "Payout already processed for this bet",
-            "newBalance": bets::js_num(new_balance.unwrap_or(f64::NAN)),
-            "betId": bet_id,
-        }));
+/// The claim came early. The client keeps its token and tries again at `end_ms`.
+pub fn win_round_open(end_ms: i64) -> Rejection {
+    (
+        409,
+        json!({
+            "error": "Round has not ended yet",
+            "code": "round_open",
+            "endTime": end_ms,
+        }),
+    )
+}
+
+/// The server's result, whoever settled it. `won` and `payout` are what a client
+/// shows; `winAmount` is the old name for the payout.
+pub fn win_body(result: &Value, bet_id: &str) -> Value {
+    let outcome = result["outcome"].as_str().unwrap_or_default();
+    let payout = parse_float_of(result.get("payout")).unwrap_or(0.0);
+    let mut map = Map::new();
+    map.insert("success".into(), json!(true));
+    if result["duplicate"] == json!(true) {
+        map.insert("duplicate".into(), json!(true));
+        map.insert(
+            "message".into(),
+            json!("Payout already processed for this bet"),
+        );
     }
-    let explicit_success = result.get("success").and_then(Value::as_bool) == Some(true);
-    if !explicit_success || new_balance.is_none() {
-        let error = result.get("error").and_then(Value::as_str).filter(|s| !s.is_empty());
-        return WinRpcDecision::FailClosed {
-            status: if error.is_some() { 400 } else { 503 },
-            body: error_body(error.unwrap_or("Failed to credit winnings")),
-        };
-    }
-    WinRpcDecision::Success(json!({
-        "success": true,
-        "newBalance": bets::js_num(new_balance.unwrap()),
-        "winAmount": bets::js_num(win_amount),
-    }))
+    map.insert(
+        "newBalance".into(),
+        bets::js_num(parse_float_of(result.get("new_balance")).unwrap_or(f64::NAN)),
+    );
+    map.insert("betId".into(), json!(bet_id));
+    map.insert("outcome".into(), json!(outcome));
+    map.insert("won".into(), json!(!matches!(outcome, "loss" | "withheld")));
+    map.insert("payout".into(), bets::js_num(payout));
+    map.insert("winAmount".into(), bets::js_num(payout));
+    map.insert(
+        "endPrice".into(),
+        result.get("end_price").cloned().unwrap_or(Value::Null),
+    );
+    Value::Object(map)
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,7 +1110,10 @@ pub fn withdraw_head(body: &Value) -> Result<WithdrawHead<'_>, Rejection> {
     let user_address = body.get("userAddress");
     let amount = body.get("amount");
     if !bets::is_truthy(user_address) || matches!(amount, None | Some(Value::Null)) {
-        return Err((400, error_body("Missing required fields: userAddress, amount")));
+        return Err((
+            400,
+            error_body("Missing required fields: userAddress, amount"),
+        ));
     }
     let amount = amount.unwrap();
     let value = number_of(amount);
@@ -1044,11 +1127,19 @@ pub fn withdraw_head(body: &Value) -> Result<WithdrawHead<'_>, Rejection> {
         Some(Value::String(s)) => s.to_uppercase(),
         Some(_) => return Err(route_crash()),
     };
-    Ok(WithdrawHead { user_address: user_address.unwrap(), amount, amount_num: value.unwrap(), currency })
+    Ok(WithdrawHead {
+        user_address: user_address.unwrap(),
+        amount,
+        amount_num: value.unwrap(),
+        currency,
+    })
 }
 
 pub fn withdraw_positive() -> Rejection {
-    (400, error_body("Withdrawal amount must be greater than zero"))
+    (
+        400,
+        error_body("Withdrawal amount must be greater than zero"),
+    )
 }
 
 pub fn withdraw_missing_authorization() -> Rejection {
@@ -1056,7 +1147,10 @@ pub fn withdraw_missing_authorization() -> Rejection {
 }
 
 pub fn withdraw_expired() -> Rejection {
-    (401, error_body("Withdrawal authorization expired. Please sign again."))
+    (
+        401,
+        error_body("Withdrawal authorization expired. Please sign again."),
+    )
 }
 
 pub fn withdraw_signature_mismatch() -> Rejection {
@@ -1098,6 +1192,7 @@ pub fn withdraw_intent_message(
     ))
 }
 
+#[derive(Debug)]
 pub enum WithdrawRows {
     /// `(dbAddress, balance row value)` of the row the payout is keyed on.
     Ledger(String, Value),
@@ -1111,7 +1206,10 @@ pub fn withdraw_choose_row(rows: &[Value], amount: f64, currency_raw: &str) -> W
     for row in rows {
         match row.get("status").and_then(Value::as_str) {
             Some("frozen") => {
-                return WithdrawRows::Reject((403, error_body("Account is frozen. Withdrawals are disabled.")))
+                return WithdrawRows::Reject((
+                    403,
+                    error_body("Account is frozen. Withdrawals are disabled."),
+                ))
             }
             Some("banned") => return WithdrawRows::Reject((403, error_body("Account is banned."))),
             _ => {}
@@ -1123,13 +1221,23 @@ pub fn withdraw_choose_row(rows: &[Value], amount: f64, currency_raw: &str) -> W
         let bb = to_number_opt(b.get("balance")).unwrap_or(f64::NAN);
         bb.partial_cmp(&ba).unwrap_or(std::cmp::Ordering::Equal)
     });
-    match sorted.iter().find(|row| to_number_opt(row.get("balance")).map(|b| b >= amount).unwrap_or(false)) {
+    match sorted.iter().find(|row| {
+        to_number_opt(row.get("balance"))
+            .map(|b| b >= amount)
+            .unwrap_or(false)
+    }) {
         Some(row) => WithdrawRows::Ledger(
-            row.get("user_address").and_then(Value::as_str).unwrap_or_default().to_string(),
+            row.get("user_address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             row.get("balance").cloned().unwrap_or(Value::Null),
         ),
         // NOTE the TS interpolates the *raw* (un-normalised) currency here.
-        None => WithdrawRows::Reject((400, error_body(&format!("Insufficient house balance in {currency_raw}")))),
+        None => WithdrawRows::Reject((
+            400,
+            error_body(&format!("Insufficient house balance in {currency_raw}")),
+        )),
     }
 }
 
@@ -1157,14 +1265,29 @@ pub fn withdraw_cap_check(
 ) -> Result<(), Rejection> {
     let amount_base = amount_to_base_units(amount, USDC_DECIMALS);
     let null = Value::Null;
-    let deposited = sum_amounts_to_base_units(deposits.iter().map(|r| r.get("amount").unwrap_or(&null)), USDC_DECIMALS);
-    let withdrawn_sum = sum_amounts_to_base_units(withdrawn.iter().map(|r| r.get("amount").unwrap_or(&null)), USDC_DECIMALS);
-    let pending_sum = sum_amounts_to_base_units(pending.iter().map(|r| r.get("amount").unwrap_or(&null)), USDC_DECIMALS);
-    let (amount_base, deposited, withdrawn_sum, pending_sum) = match (amount_base, deposited, withdrawn_sum, pending_sum) {
-        (Some(a), Some(d), Some(w), Some(p)) => (a, d, w, p),
-        // An unparseable row disables the comparison: fail closed, 503.
-        _ => return Err((503, error_body("Service temporarily unavailable. Please try again."))),
-    };
+    let deposited = sum_amounts_to_base_units(
+        deposits.iter().map(|r| r.get("amount").unwrap_or(&null)),
+        USDC_DECIMALS,
+    );
+    let withdrawn_sum = sum_amounts_to_base_units(
+        withdrawn.iter().map(|r| r.get("amount").unwrap_or(&null)),
+        USDC_DECIMALS,
+    );
+    let pending_sum = sum_amounts_to_base_units(
+        pending.iter().map(|r| r.get("amount").unwrap_or(&null)),
+        USDC_DECIMALS,
+    );
+    let (amount_base, deposited, withdrawn_sum, pending_sum) =
+        match (amount_base, deposited, withdrawn_sum, pending_sum) {
+            (Some(a), Some(d), Some(w), Some(p)) => (a, d, w, p),
+            // An unparseable row disables the comparison: fail closed, 503.
+            _ => {
+                return Err((
+                    503,
+                    error_body("Service temporarily unavailable. Please try again."),
+                ))
+            }
+        };
     if deposited <= 0 {
         return Ok(());
     }
@@ -1208,20 +1331,24 @@ pub fn frequency_review_stamp(withdrawal_count: i64) -> String {
     format!("FREQUENCY_REVIEW:count={}", withdrawal_count + 1)
 }
 
-pub fn withdraw_net(amount: f64, tier: Tier) -> (f64, f64) {
-    // `Number(calculateFeeAmount(amount, tier).toFixed(8))` and
-    // `Number((amount - feeAmount).toFixed(8))`.
-    let fee = to_fixed(calculate_fee_amount(amount, tier), 8).parse::<f64>().unwrap_or(0.0);
-    let net = to_fixed(amount - fee, 8).parse::<f64>().unwrap_or(0.0);
-    (fee, net)
+pub fn withdraw_net(amount: f64, tier: Tier) -> Option<(Decimal, Decimal)> {
+    split_fee(exact_amount(amount)?, tier)
 }
 
 pub fn withdraw_net_rejection(label: &str) -> Rejection {
-    (400, error_body(&format!("Withdrawal amount after {label} fee must be greater than zero")))
+    (
+        400,
+        error_body(&format!(
+            "Withdrawal amount after {label} fee must be greater than zero"
+        )),
+    )
 }
 
 pub fn withdraw_insert_failed() -> Rejection {
-    (500, error_body("Failed to create withdrawal request. Please try again."))
+    (
+        500,
+        error_body("Failed to create withdrawal request. Please try again."),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1263,9 +1390,21 @@ mod tests {
     #[test]
     fn base_units_rejects_garbage_and_negatives() {
         for bad in [
-            json!("NaN"), json!("Infinity"), json!("-Infinity"), json!("abc"), json!(""),
-            json!("-5"), json!("-0.5"), json!(true), json!(null), json!({}), json!([]),
-            json!("1e"), json!("1.2.3"), json!("--1"), json!(" 1e9e9 "),
+            json!("NaN"),
+            json!("Infinity"),
+            json!("-Infinity"),
+            json!("abc"),
+            json!(""),
+            json!("-5"),
+            json!("-0.5"),
+            json!(true),
+            json!(null),
+            json!({}),
+            json!([]),
+            json!("1e"),
+            json!("1.2.3"),
+            json!("--1"),
+            json!(" 1e9e9 "),
         ] {
             assert_eq!(amount_to_base_units(&bad, 6), None, "accepted {bad:?}");
         }
@@ -1276,8 +1415,14 @@ mod tests {
         assert_eq!(amount_to_base_units(&json!("1.5"), 6), Some(1_500_000));
         assert_eq!(amount_to_base_units(&json!(1.5), 6), Some(1_500_000));
         assert_eq!(amount_to_base_units(&json!("0.0000001"), 6), Some(1));
-        assert_eq!(amount_to_base_units(&json!("1.0000004"), 6), Some(1_000_001));
-        assert_eq!(amount_to_base_units(&json!("1.0000000"), 6), Some(1_000_000));
+        assert_eq!(
+            amount_to_base_units(&json!("1.0000004"), 6),
+            Some(1_000_001)
+        );
+        assert_eq!(
+            amount_to_base_units(&json!("1.0000000"), 6),
+            Some(1_000_000)
+        );
         assert_eq!(amount_to_base_units(&json!(".5"), 6), Some(500_000));
         assert_eq!(amount_to_base_units(&json!("1."), 6), Some(1_000_000));
         assert_eq!(amount_to_base_units(&json!("0"), 6), Some(0));
@@ -1317,25 +1462,19 @@ mod tests {
         assert_eq!(base_units_to_number(-2_500_000, 6), -2.5);
     }
 
-    #[test]
-    fn parse_units_strict_rejects_what_ethers_throws_on() {
-        assert_eq!(parse_units_strict("1.5", 6), Some(1_500_000));
-        assert_eq!(parse_units_strict("1.2345678", 6), None); // too many decimals
-        assert_eq!(parse_units_strict("1e-8", 6), None); // exponent notation
-        assert_eq!(parse_units_strict("-1", 6), None);
-        assert_eq!(parse_units_strict("", 6), None);
-        assert_eq!(parse_units_strict(".5", 6), Some(500_000));
-    }
-
     // -- fees ---------------------------------------------------------------
 
     #[test]
     fn tier_fees_and_labels() {
-        assert_eq!(calculate_fee_amount(100.0, Tier::Free), 10.0);
-        assert_eq!(calculate_fee_amount(100.0, Tier::Standard), 9.0);
-        assert_eq!(calculate_fee_amount(100.0, Tier::Vip), 8.0);
-        // floor at 1e-8, in double order: 0.1 * 0.09 = 0.009000000000000001.
-        assert_eq!(calculate_fee_amount(0.1, Tier::Standard), 0.009);
+        let split = |amount: &str, tier| split_fee(parse_decimal(amount).unwrap(), tier).unwrap();
+        let dec = |amount: &str| parse_decimal(amount).unwrap();
+        assert_eq!(split("100", Tier::Free), (dec("10"), dec("90")));
+        assert_eq!(split("100", Tier::Standard), (dec("9"), dec("91")));
+        assert_eq!(split("100", Tier::Vip), (dec("8"), dec("92")));
+        // floor at 1e-8, in double order: JS and Rust both print 0.1 * 0.09 as
+        // 0.009, but scaled by 1e8 it is 899999.9999999999, so the floor loses
+        // a digit. Pinned from node: calculateFeeAmount(0.1, 'standard').
+        assert_eq!(split("0.1", Tier::Standard), (dec("0.009"), dec("0.091")));
         assert_eq!(fee_percent_label(Tier::Free), "10%");
         assert_eq!(fee_percent_label(Tier::Standard), "9%");
         assert_eq!(fee_percent_label(Tier::Vip), "8%");
@@ -1373,24 +1512,53 @@ mod tests {
         // missing session is the HTTP layer's guard; shape errors come next.
         let (status, resp) = bet_head(&json!({ "betAmount": 1 })).err().unwrap();
         assert_eq!(status, 400);
-        assert_eq!(resp, error_body("Missing required fields: userAddress, betAmount"));
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, betAmount")
+        );
         let (status, resp) = bet_head(&json!({ "userAddress": ADDR })).err().unwrap();
-        assert_eq!(resp, error_body("Missing required fields: userAddress, betAmount"));
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, betAmount")
+        );
         assert_eq!(status, 400);
         // null betAmount is "missing", 0 is not (it fails the positivity gate).
-        assert!(bet_full(&bet_body(json!({"betAmount": 0}))).is_ok());
+        let (_, resp) = bet_head(&bet_body(json!({"betAmount": null})))
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, betAmount")
+        );
+        let (_, resp) = bet_full(&bet_body(json!({"betAmount": 0}))).err().unwrap();
+        assert_eq!(resp, error_body("Bet amount must be greater than zero"));
     }
 
     #[test]
     fn bet_rejects_nan_and_bad_addresses() {
-        let (_, resp) = bet_head(&bet_body(json!({"betAmount": "abc"}))).err().unwrap();
+        let (_, resp) = bet_head(&bet_body(json!({"betAmount": "abc"})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid bet amount"));
-        let (_, resp) = bet_head(&bet_body(json!({"betAmount": json!(f64::INFINITY)}))).err().unwrap();
-        // serde_json cannot even express Infinity as JSON; a string can.
+        // JSON cannot carry Infinity: it arrives as null, the TS "missing" 400.
+        let (_, resp) = bet_head(&bet_body(json!({"betAmount": json!(f64::INFINITY)})))
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, betAmount")
+        );
+        let (_, resp) = bet_head(&bet_body(json!({"betAmount": "1e400"})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid bet amount"));
-        let (_, resp) = bet_head(&bet_body(json!({"betAmount": "Infinity"}))).err().unwrap();
+        let (_, resp) = bet_head(&bet_body(json!({"betAmount": "Infinity"})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid bet amount"));
-        let (_, resp) = bet_head(&bet_body(json!({"userAddress": "vitalik.eth"}))).err().unwrap();
+        let (_, resp) = bet_head(&bet_body(json!({"userAddress": "vitalik.eth"})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid wallet address format"));
     }
 
@@ -1406,11 +1574,13 @@ mod tests {
     #[test]
     fn bet_positivity_and_ban_gate_order() {
         // head passes for 0; the "greater than zero" rejection is post-ban.
-        let head = bet_head(&bet_body(json!({"betAmount": 0}))).unwrap();
-        let (_, resp) = bet_tail(head, &bet_body(json!({"betAmount": 0}))).err().unwrap();
+        let zero = bet_body(json!({"betAmount": 0}));
+        let head = bet_head(&zero).unwrap();
+        let (_, resp) = bet_tail(head, &zero).err().unwrap();
         assert_eq!(resp, error_body("Bet amount must be greater than zero"));
-        let head = bet_head(&bet_body(json!({"betAmount": -3}))).unwrap();
-        assert!(bet_tail(head, &bet_body(json!({"betAmount": -3}))).is_err());
+        let negative = bet_body(json!({"betAmount": -3}));
+        let head = bet_head(&negative).unwrap();
+        assert!(bet_tail(head, &negative).is_err());
     }
 
     #[test]
@@ -1427,39 +1597,74 @@ mod tests {
         ];
         for (multiplier, expected) in cases {
             let body = bet_body(json!({"multiplier": multiplier}));
-            let (_, resp) = bet_full(&body).err().unwrap_or_else(|| panic!("{multiplier:?} should reject"));
+            let (_, resp) = bet_full(&body)
+                .err()
+                .unwrap_or_else(|| panic!("{multiplier:?} should reject"));
             assert_eq!(resp, error_body(expected), "{multiplier:?}");
         }
-        assert_eq!(bet_full(&bet_body(json!({"multiplier": 1.0}))).ok().map(|p| p.amount), Some(10.0));
-        assert_eq!(bet_full(&bet_body(json!({"multiplier": 20}))).ok().map(|p| p.amount), Some(10.0));
+        assert_eq!(
+            bet_full(&bet_body(json!({"multiplier": 1.0})))
+                .ok()
+                .map(|p| p.amount),
+            Some(10.0)
+        );
+        assert_eq!(
+            bet_full(&bet_body(json!({"multiplier": 20})))
+                .ok()
+                .map(|p| p.amount),
+            Some(10.0)
+        );
     }
 
     #[test]
     fn bet_target_cell_validation() {
-        let (_, resp) = bet_full(&bet_body(json!({"targetCell": {"priceChange": 1}}))).err().unwrap();
+        let (_, resp) = bet_full(&bet_body(json!({"targetCell": {"priceChange": 1}})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid target cell data"));
-        let (_, resp) = bet_full(&bet_body(json!({"targetCell": {"id": 1}}))).err().unwrap();
+        let (_, resp) = bet_full(&bet_body(json!({"targetCell": {"id": 1}})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid target cell data"));
         // id null counts as missing, priceChange null does not (=== undefined).
-        assert!(bet_full(&bet_body(json!({"targetCell": {"id": null, "priceChange": 1}}))).is_err());
-        assert!(bet_full(&bet_body(json!({"targetCell": {"id": 0, "priceChange": 0}}))).is_ok());
+        assert!(bet_full(&bet_body(
+            json!({"targetCell": {"id": null, "priceChange": 1}})
+        ))
+        .is_err());
+        assert!(bet_full(&bet_body(
+            json!({"targetCell": {"id": 0, "priceChange": 0}})
+        ))
+        .is_ok());
     }
 
     #[test]
     fn bet_currency_normalises_and_crashes_like_the_ts() {
-        assert_eq!(bet_full(&bet_body(json!({"currency": "usdc"}))).unwrap().currency, "USDC");
-        assert_eq!(bet_full(&bet_body(json!({ "currency": Value::Undefined }))).unwrap().currency, "USDC");
+        assert_eq!(
+            bet_full(&bet_body(json!({"currency": "usdc"})))
+                .unwrap()
+                .currency,
+            "USDC"
+        );
         let mut body = bet_body(json!({}));
         body.as_object_mut().unwrap().remove("currency");
         assert_eq!(bet_full(&body).unwrap().currency, "USDC");
         // null / non-string currency: `.toUpperCase()` TypeError -> outer 500.
-        assert_eq!(bet_full(&bet_body(json!({"currency": null}))).err().unwrap(), route_crash());
-        assert_eq!(bet_full(&bet_body(json!({"currency": 5}))).err().unwrap(), route_crash());
+        assert_eq!(
+            bet_full(&bet_body(json!({"currency": null})))
+                .err()
+                .unwrap(),
+            route_crash()
+        );
+        assert_eq!(
+            bet_full(&bet_body(json!({"currency": 5}))).err().unwrap(),
+            route_crash()
+        );
     }
 
     #[test]
     fn bet_row_selection_status_guards_and_order() {
-        let rows: Vec<Value> = vec![json!({"user_address": "b@x", "balance": 5, "status": "active"})];
+        let rows: Vec<Value> =
+            vec![json!({"user_address": "b@x", "balance": 5, "status": "active"})];
         match bet_choose_row(&rows, 10.0, "USDC") {
             BetRows::Reject((400, resp)) => assert_eq!(
                 resp,
@@ -1479,7 +1684,9 @@ mod tests {
             json!({"user_address": "b@x", "balance": 2, "status": "frozen"}),
         ];
         match bet_choose_row(&frozen, 1.0, "USDC") {
-            BetRows::Reject((403, resp)) => assert_eq!(resp, error_body("Account is frozen. Bets are disabled.")),
+            BetRows::Reject((403, resp)) => {
+                assert_eq!(resp, error_body("Account is frozen. Bets are disabled."))
+            }
             other => panic!("expected frozen, got {other:?}"),
         }
         let banned = vec![json!({"user_address": "b@x", "balance": 2, "status": "banned"})];
@@ -1502,10 +1709,14 @@ mod tests {
     #[test]
     fn bet_idempotency_key_sanitisation() {
         assert_eq!(
-            sanitize_bet_request_id(Some(&json!("550e8400-e29b-41d4-a716-446655440000"))).as_deref(),
+            sanitize_bet_request_id(Some(&json!("550e8400-e29b-41d4-a716-446655440000")))
+                .as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
-        assert_eq!(sanitize_bet_request_id(Some(&json!("  abcdefgh  "))).as_deref(), Some("abcdefgh"));
+        assert_eq!(
+            sanitize_bet_request_id(Some(&json!("  abcdefgh  "))).as_deref(),
+            Some("abcdefgh")
+        );
         assert_eq!(sanitize_bet_request_id(Some(&json!("short7"))), None);
         assert_eq!(sanitize_bet_request_id(Some(&json!("x".repeat(65)))), None);
         assert_eq!(sanitize_bet_request_id(Some(&json!("bad;key--"))), None);
@@ -1520,36 +1731,24 @@ mod tests {
         // A missing roundId interpolates "undefined" exactly like JS.
         assert_eq!(
             derived_bet_request_id(None, "0xdeadbeef", 1),
-            "bet_req_undefined_0xdeadbe".replacen("0xdeadbe", "deadbeef", 1).as_str() == "" , // placeholder, replaced below
+            "bet_req_undefined_deadbeef_1",
         );
     }
 
     #[test]
     fn bet_derived_request_id_undefined_round() {
-        assert_eq!(derived_bet_request_id(None, "0xdeadbeef", 1), "bet_req_undefined_deadbeef_1".replace("deadbeef", "deadbeef").as_str());
+        assert_eq!(
+            derived_bet_request_id(None, "0xdeadbeef", 1),
+            "bet_req_undefined_deadbeef_1"
+        );
     }
 
     #[test]
     fn bet_id_uses_hashless_uuid_prefix() {
-        assert_eq!(build_bet_id(1700000000000, "550e8400e29b"), "bet_1700000000000_550e8400e29b");
-    }
-
-    #[test]
-    fn bet_max_payout_rounds_to_eight_places() {
-        assert_eq!(bet_max_payout(10.0, 1.5), Some(15.0));
-        assert_eq!(bet_max_payout(0.1, 3.0), Some(0.3));
-        // 1e308 * 20 -> Infinity -> toFixed throws -> outer catch 500.
-        assert_eq!(bet_max_payout(1e308, 20.0), None);
-    }
-
-    #[test]
-    fn bet_end_time_parsing() {
-        assert_eq!(bet_end_time(Some(&json!(1700000000000))).unwrap().as_deref(), Some("2023-11-14T22:13:20.000Z"));
-        assert_eq!(bet_end_time(Some(&json!("2023-11-14T22:13:20.000Z"))).unwrap().as_deref(), Some("2023-11-14T22:13:20.000Z"));
-        assert_eq!(bet_end_time(Some(&json!("garbage"))).unwrap(), None);
-        assert_eq!(bet_end_time(None).unwrap(), None);
-        // Out of the Date range: toISOString throws RangeError -> 500.
-        assert_eq!(bet_end_time(Some(&json!(9e15))).err().unwrap(), route_crash());
+        assert_eq!(
+            build_bet_id(1700000000000, "550e8400e29b"),
+            "bet_1700000000000_550e8400e29b"
+        );
     }
 
     #[test]
@@ -1558,7 +1757,10 @@ mod tests {
         assert_eq!(status, 503);
         assert_eq!(resp, error_body("Set BALANCE_SETTLEMENT_SECRET in .env (any long random string) and restart the dev server."));
         let (_, resp) = bet_signing_unavailable(false);
-        assert_eq!(resp, error_body("Betting is temporarily unavailable. Please try again later."));
+        assert_eq!(
+            resp,
+            error_body("Betting is temporarily unavailable. Please try again later.")
+        );
     }
 
     // -- place_bet_locked outcome mapping ------------------------------------
@@ -1579,7 +1781,11 @@ mod tests {
     fn bet_success_needs_every_field() {
         let d = bet_rpc_decision(&lock_result(json!({})), ADDR, "USDC");
         match d {
-            BetRpcDecision::Success { new_balance, bet_id, token } => {
+            BetRpcDecision::Success {
+                new_balance,
+                bet_id,
+                token,
+            } => {
                 assert_eq!(new_balance, 5.0);
                 assert_eq!(bet_id, "bet_1_abc");
                 assert_eq!(token, "tok.sig");
@@ -1587,16 +1793,29 @@ mod tests {
             other => panic!("expected success, got {other:?}"),
         }
         // A missing betId is a fail-closed ambiguity, never a minted token.
-        let d = bet_rpc_decision(&lock_result(json!({"bet_id": null, "error": null})), ADDR, "USDC");
+        let d = bet_rpc_decision(
+            &lock_result(json!({"bet_id": null, "error": null})),
+            ADDR,
+            "USDC",
+        );
         assert!(matches!(d, BetRpcDecision::FailClosed { status: 503, .. }));
         // new_balance null is JS-null via toNumber(null)=0? No: null -> 0,
         // which is a *number*, so the gate passes on explicit success.
         let d = bet_rpc_decision(&lock_result(json!({"new_balance": null})), ADDR, "USDC");
-        assert!(matches!(d, BetRpcDecision::Success { new_balance: 0.0, .. }));
+        assert!(matches!(
+            d,
+            BetRpcDecision::Success {
+                new_balance: 0.0,
+                ..
+            }
+        ));
         // undefined (absent) new_balance -> toNumber -> NaN -> fail closed 503.
         let mut r = lock_result(json!({}));
         r.as_object_mut().unwrap().remove("new_balance");
-        assert!(matches!(bet_rpc_decision(&r, ADDR, "USDC"), BetRpcDecision::FailClosed { status: 503, .. }));
+        assert!(matches!(
+            bet_rpc_decision(&r, ADDR, "USDC"),
+            BetRpcDecision::FailClosed { status: 503, .. }
+        ));
     }
 
     #[test]
@@ -1613,7 +1832,9 @@ mod tests {
         // Stored ceiling 0 -> falsy -> replay the stored token verbatim.
         let dup0 = lock_result(json!({"duplicate": true, "success": false, "max_payout": 0}));
         match bet_rpc_decision(&dup0, "ledger@x", "USDC") {
-            BetRpcDecision::ReplayStored { token, new_balance, .. } => {
+            BetRpcDecision::ReplayStored {
+                token, new_balance, ..
+            } => {
                 assert_eq!(token, "tok.sig");
                 assert_eq!(new_balance, Some(5.0));
             }
@@ -1623,15 +1844,24 @@ mod tests {
 
     #[test]
     fn bet_duplicate_without_token_is_a_409() {
-        let dup = lock_result(json!({"duplicate": true, "bet_id": null, "settlement_token": null, "error": "Bet already processed"}));
-        match bet_rpc_decision(&dup, "l@x", "USDC") {
-            BetRpcDecision::Conflict { body } => assert_eq!(body, error_body("Bet already processed")),
-            other => panic!("got {other:?}"),
-        }
-        let dup = lock_result(json!({"duplicate": true, "bet_id": null, "settlement_token": null, "error": null}));
+        let dup = lock_result(
+            json!({"duplicate": true, "bet_id": null, "settlement_token": null, "error": "Bet already processed"}),
+        );
         match bet_rpc_decision(&dup, "l@x", "USDC") {
             BetRpcDecision::Conflict { body } => {
-                assert_eq!(body, error_body("Bet already processed. Please place a new bet."))
+                assert_eq!(body, error_body("Bet already processed"))
+            }
+            other => panic!("got {other:?}"),
+        }
+        let dup = lock_result(
+            json!({"duplicate": true, "bet_id": null, "settlement_token": null, "error": null}),
+        );
+        match bet_rpc_decision(&dup, "l@x", "USDC") {
+            BetRpcDecision::Conflict { body } => {
+                assert_eq!(
+                    body,
+                    error_body("Bet already processed. Please place a new bet.")
+                )
             }
             other => panic!("got {other:?}"),
         }
@@ -1640,14 +1870,26 @@ mod tests {
     #[test]
     fn bet_fail_closed_error_mapping() {
         let cases = vec![
-            ("Insufficient balance", 400u16, "Insufficient house balance. Deposit more USDC."),
-            ("User not found", 400, "No house balance for this wallet in USDC. Deposit from the Wallet tab first."),
+            (
+                "Insufficient balance",
+                400u16,
+                "Insufficient house balance. Deposit more USDC.",
+            ),
+            (
+                "User not found",
+                400,
+                "No house balance for this wallet in USDC. Deposit from the Wallet tab first.",
+            ),
             (BANNED_MESSAGE, 403, BANNED_MESSAGE),
             ("Account is FROZEN", 403, "Account is FROZEN"),
             ("some ledger trouble", 400, "some ledger trouble"),
         ];
         for (rpc_error, status, message) in cases {
-            let d = bet_rpc_decision(&lock_result(json!({"success": false, "error": rpc_error})), "l@x", "USDC");
+            let d = bet_rpc_decision(
+                &lock_result(json!({"success": false, "error": rpc_error})),
+                "l@x",
+                "USDC",
+            );
             match d {
                 BetRpcDecision::FailClosed { status: s, body } => {
                     assert_eq!(s, status, "{rpc_error}");
@@ -1660,7 +1902,9 @@ mod tests {
 
     #[test]
     fn bet_replay_falls_back_to_ledger_fields_when_rpc_rows_are_empty() {
-        let dup = lock_result(json!({"duplicate": true, "success": false, "max_payout": 5, "user_address": null, "currency": ""}));
+        let dup = lock_result(
+            json!({"duplicate": true, "success": false, "max_payout": 5, "user_address": null, "currency": ""}),
+        );
         match bet_rpc_decision(&dup, "ledger@x", "USDC") {
             BetRpcDecision::ReplayMint(mint) => {
                 assert_eq!(mint.user_address, "ledger@x");
@@ -1672,7 +1916,7 @@ mod tests {
 
     #[test]
     fn bet_replay_success_body_shape() {
-        let body = bet_success_body(json!(4.5), "bet_9", "tok", true);
+        let body = bet_success_body(json!(4.5), "bet_9", "tok", true, None);
         assert_eq!(body["success"], json!(true));
         assert_eq!(body["duplicate"], json!(true));
         assert_eq!(body["message"], json!("Bet already processed"));
@@ -1680,7 +1924,7 @@ mod tests {
         assert_eq!(body["betId"], json!("bet_9"));
         assert_eq!(body["settlementToken"], json!("tok"));
         // The non-duplicate success carries no duplicate/message keys at all.
-        let plain = bet_success_body(json!(4.5), "bet_9", "tok", false);
+        let plain = bet_success_body(json!(4.5), "bet_9", "tok", false, None);
         assert!(plain.get("duplicate").is_none());
         assert!(plain.get("message").is_none());
     }
@@ -1689,39 +1933,72 @@ mod tests {
 
     #[test]
     fn deposit_head_rejections() {
-        let (_, resp) = deposit_head(&json!({"amount": 1, "txHash": "0x1"})).err().unwrap();
-        assert_eq!(resp, error_body("Missing required fields: userAddress, amount, txHash"));
-        let (_, resp) = deposit_head(&json!({"userAddress": ADDR, "txHash": "0x1"})).err().unwrap();
-        assert_eq!(resp, error_body("Missing required fields: userAddress, amount, txHash"));
-        let (_, resp) = deposit_head(&json!({"userAddress": ADDR, "amount": 1})).err().unwrap();
-        assert_eq!(resp, error_body("Missing required fields: userAddress, amount, txHash"));
-        let (_, resp) = deposit_head(&json!({"userAddress": ADDR, "amount": "abc", "txHash": "0x1"})).err().unwrap();
+        let (_, resp) = deposit_head(&json!({"amount": 1, "txHash": "0x1"}))
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, amount, txHash")
+        );
+        let (_, resp) = deposit_head(&json!({"userAddress": ADDR, "txHash": "0x1"}))
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, amount, txHash")
+        );
+        let (_, resp) = deposit_head(&json!({"userAddress": ADDR, "amount": 1}))
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: userAddress, amount, txHash")
+        );
+        let (_, resp) =
+            deposit_head(&json!({"userAddress": ADDR, "amount": "abc", "txHash": "0x1"}))
+                .err()
+                .unwrap();
         assert_eq!(resp, error_body("Invalid deposit amount"));
         // A stringified amount normalises through Number(), as the TS did.
-        let head = deposit_head(&json!({"userAddress": ADDR, "amount": "10", "txHash": "0x1"})).unwrap();
+        let body = json!({"userAddress": ADDR, "amount": "10", "txHash": "0x1"});
+        let head = deposit_head(&body).unwrap();
         assert_eq!(head.amount, 10.0);
     }
 
     #[test]
     fn deposit_currency_normalisation_uses_string_coercion() {
-        assert_eq!(deposit_currency(&json!({"currency": "usdc"}), 1.0).unwrap(), "USDC");
+        assert_eq!(
+            deposit_currency(&json!({"currency": "usdc"}), 1.0).unwrap(),
+            "USDC"
+        );
         let (_, resp) = deposit_currency(&json!({}), 1.0).err().unwrap();
         assert_eq!(resp, error_body("Unsupported deposit currency: "));
-        let (_, resp) = deposit_currency(&json!({"currency": {"a": 1}}), 1.0).err().unwrap();
-        assert_eq!(resp, error_body("Unsupported deposit currency: [OBJECT OBJECT]"));
-        let (_, resp) = deposit_currency(&json!({"currency": "usdc"}), 0.0).err().unwrap();
+        let (_, resp) = deposit_currency(&json!({"currency": {"a": 1}}), 1.0)
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Unsupported deposit currency: [OBJECT OBJECT]")
+        );
+        let (_, resp) = deposit_currency(&json!({"currency": "usdc"}), 0.0)
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Deposit amount must be greater than zero"));
     }
 
     #[test]
     fn deposit_fee_net_and_rejection_label() {
-        let (fee, net) = deposit_net(10.0, Tier::Free);
-        assert_eq!((fee, net), (1.0, 9.0));
-        let (fee, net) = deposit_net(0.000001, Tier::Free);
-        assert!(net > 0.0 && fee == 0.0);
+        let (fee, net) = deposit_net(10.0, Tier::Free).unwrap();
+        assert_eq!((fee, net), (Decimal::ONE, Decimal::from(9)));
+        // The smallest deposit nets nothing, and the route refuses that.
+        let (fee, net) = deposit_net(0.000001, Tier::Free).unwrap();
+        assert_eq!((fee, net), (Decimal::new(1, 6), Decimal::ZERO));
         let (status, resp) = deposit_net_rejection(fee_percent_label(Tier::Free));
         assert_eq!(status, 400);
-        assert_eq!(resp, error_body("Deposit amount after 10% fee must be greater than zero"));
+        assert_eq!(
+            resp,
+            error_body("Deposit amount after 10% fee must be greater than zero")
+        );
     }
 
     #[test]
@@ -1739,7 +2016,10 @@ mod tests {
 
     #[test]
     fn deposit_terminal_and_duplicate_bodies() {
-        let (status, body) = deposit_terminal("amount_mismatch", "No USDC transfer of at least the claimed amount reached the treasury");
+        let (status, body) = deposit_terminal(
+            "amount_mismatch",
+            "No USDC transfer of at least the claimed amount reached the treasury",
+        );
         assert_eq!(status, 400);
         assert_eq!(
             body["error"],
@@ -1749,24 +2029,34 @@ mod tests {
         assert_eq!(body["code"], json!("amount_mismatch"));
         let (status, body) = deposit_duplicate_body();
         assert_eq!(status, 409);
-        assert_eq!(body, json!({
-            "error": "This transaction has already been credited",
-            "duplicate": true,
-            "code": "already_credited",
-        }));
+        assert_eq!(
+            body,
+            json!({
+                "error": "This transaction has already been credited",
+                "duplicate": true,
+                "code": "already_credited",
+            })
+        );
     }
 
     #[test]
     fn deposit_audit_duplicate_regex_matches_ci() {
-        assert!(is_audit_duplicate("duplicate key value violates unique constraint"));
+        assert!(is_audit_duplicate(
+            "duplicate key value violates unique constraint"
+        ));
         assert!(is_audit_duplicate("Unique violation"));
         assert!(is_audit_duplicate("duplicate KEY"));
-        assert!(!is_audit_duplicate("Deposit amount must be greater than zero"));
+        assert!(!is_audit_duplicate(
+            "Deposit amount must be greater than zero"
+        ));
     }
 
     #[test]
     fn deposit_combined_hash_and_fee_audit_shape() {
-        assert_eq!(combined_tx_hash(&json!("0xabc"), Some("0xfee")), "0xabc|feeTx:0xfee");
+        assert_eq!(
+            combined_tx_hash(&json!("0xabc"), Some("0xfee")),
+            "0xabc|feeTx:0xfee"
+        );
         assert_eq!(combined_tx_hash(&json!("0xabc"), None), "0xabc");
     }
 
@@ -1776,9 +2066,15 @@ mod tests {
         // 1e-7 must demand a full micro-unit, never 0.000000.
         assert_eq!(deposit_required_amount_string(1e-7), "0.000001");
         assert_eq!(deposit_required_amount_string(0.1234567), "0.123457");
-        // Absurd magnitude still fails verification closed, not open.
+        // Absurd magnitude still fails verification closed, not open: the
+        // i128 clamp must survive the round trip through `verify_deposit`'s
+        // parse, far above USDC's whole supply.
         let huge = deposit_required_amount_string(1e40);
-        assert_eq!(huge, "340282366920938463463374607431768211455.000000");
+        assert_eq!(huge, "170141183460469231731687303715884.105727");
+        assert_eq!(
+            crate::eth::parse_units(&huge, USDC_DECIMALS).unwrap(),
+            i128::MAX as u128
+        );
     }
 
     #[test]
@@ -1799,9 +2095,47 @@ mod tests {
         assert_eq!(body["newBalance"], Value::Null);
     }
 
+    // -- fee rounding ---------------------------------------------------------
+
+    fn assert_payable(gross: Decimal, tier: Tier) {
+        let (fee, net) = split_fee(gross, tier).unwrap();
+        assert_eq!(fee + net, gross, "{gross} {tier:?}");
+        let units = |amount: Decimal| crate::eth::parse_units(&amount.to_string(), USDC_DECIMALS);
+        assert!(units(fee).is_ok(), "fee {fee} of {gross} {tier:?}");
+        assert!(units(net).is_ok(), "net {net} of {gross} {tier:?}");
+    }
+
+    #[test]
+    fn point_five_seven_at_ten_percent_pays() {
+        // 0.57 * 0.1 is 0.05699999999999999 in doubles: the old fee was 0.05699999,
+        // which the token cannot represent.
+        let (fee, net) = withdraw_net(0.57, Tier::Free).unwrap();
+        assert_eq!(fee, Decimal::new(57, 3));
+        assert_eq!(net, Decimal::new(513, 3));
+        assert_payable(Decimal::new(57, 2), Tier::Free);
+    }
+
+    #[test]
+    fn every_cent_up_to_a_hundred_pays_at_every_tier() {
+        for tier in [Tier::Free, Tier::Standard, Tier::Vip] {
+            for cents in 1..=10_000 {
+                assert_payable(Decimal::new(cents, 2), tier);
+            }
+        }
+    }
+
+    #[test]
+    fn a_gross_past_six_decimals_only_floors_the_fee_transfer() {
+        let gross = parse_decimal("1.23456789").unwrap();
+        let (fee, net) = split_fee(gross, Tier::Free).unwrap();
+        assert_eq!(fee + net, gross);
+        assert_eq!(net, Decimal::new(1_111_111, 6));
+        assert_eq!(floor_to_token(fee), Decimal::new(123_456, 6));
+    }
+
     // -- win ------------------------------------------------------------------
 
-    fn win_body(extra: Value) -> Value {
+    fn win_request(extra: Value) -> Value {
         let mut base = json!({
             "userAddress": ADDR, "winAmount": 5, "currency": "USDC",
             "betId": "bet_1", "settlementToken": "tok.sig"
@@ -1816,38 +2150,61 @@ mod tests {
 
     #[test]
     fn win_missing_field_two_flavours() {
-        let (_, resp) = win_head(&json!({"winAmount": 1}), false).err().unwrap();
-        assert_eq!(resp, error_body("Missing required fields: userAddress, winAmount"));
-        let (_, resp) = win_head(&json!({"userAddress": ADDR, "winAmount": 1}), false).err().unwrap();
-        assert_eq!(resp, error_body("Missing required fields: betId, settlementToken"));
+        let (_, resp) = win_head(&json!({"winAmount": 1})).err().unwrap();
+        assert_eq!(resp, error_body("Missing required fields: userAddress"));
+        let (_, resp) = win_head(&json!({"userAddress": ADDR, "winAmount": 1}))
+            .err()
+            .unwrap();
+        assert_eq!(
+            resp,
+            error_body("Missing required fields: betId, settlementToken")
+        );
     }
 
     #[test]
-    fn win_amount_must_be_a_real_positive_number() {
-        for bad in [json!(0), json!(-1), json!("10"), json!(null)] {
-            let req = win_head(&win_body(json!({"winAmount": bad.clone()})), false).unwrap();
-            let (_, resp) = win_after_ban(&req).err().unwrap_or_else(|| panic!("{bad:?} must reject"));
-            assert_eq!(resp, error_body("Win amount must be greater than zero"), "{bad:?}");
+    fn a_token_is_always_required() {
+        for token in [json!(null), json!(""), json!(0), json!(false)] {
+            let body = win_request(json!({"settlementToken": token}));
+            assert_eq!(win_head(&body).err().unwrap().0, 400);
         }
+        let mut body = win_request(json!({}));
+        body.as_object_mut().unwrap().remove("settlementToken");
+        assert_eq!(win_head(&body).err().unwrap().0, 400);
+    }
+
+    #[test]
+    fn a_claim_does_not_need_an_amount() {
+        let mut body = win_request(json!({}));
+        body.as_object_mut().unwrap().remove("winAmount");
+        assert!(win_head(&body).is_ok());
     }
 
     #[test]
     fn win_currency_rules() {
         // Falsy currency falls back to USDC before the case fold.
-        let req = win_head(&win_body(json!({"currency": ""})), false).unwrap();
+        let empty = win_request(json!({"currency": ""}));
+        let req = win_head(&empty).unwrap();
         assert_eq!(win_after_ban(&req).unwrap(), "USDC");
-        let req = win_head(&win_body(json!({"currency": "usdc"})), false).unwrap();
+        let lower = win_request(json!({"currency": "usdc"}));
+        let req = win_head(&lower).unwrap();
         assert_eq!(win_after_ban(&req).unwrap(), "USDC");
-        let req = win_head(&win_body(json!({"currency": "eth"})), false).unwrap();
+        let eth = win_request(json!({"currency": "eth"}));
+        let req = win_head(&eth).unwrap();
         let (status, resp) = win_after_ban(&req).err().unwrap();
         assert_eq!(status, 400);
         assert_eq!(resp, error_body("Unsupported currency"));
         // Truthy non-string: `.toUpperCase()` TypeError -> outer 500.
-        let req = win_head(&win_body(json!({"currency": 7})), false).unwrap();
+        let numeric = win_request(json!({"currency": 7}));
+        let req = win_head(&numeric).unwrap();
         assert_eq!(win_after_ban(&req).err().unwrap(), route_crash());
     }
 
-    fn payload(bet_id: &str, user: &str, currency: &str, max: f64) -> crate::crypto::SettlementPayload {
+    fn payload(
+        bet_id: &str,
+        user: &str,
+        currency: &str,
+        max: f64,
+    ) -> crate::crypto::SettlementPayload {
         crate::crypto::SettlementPayload {
             bet_id: bet_id.into(),
             user_address: user.into(),
@@ -1866,89 +2223,53 @@ mod tests {
     fn win_token_binding_rejections() {
         let user_key = address::canonical(ADDR);
         // Invalid token -> the caller hands None here; 401 'Invalid settlement
-        // token' is emitted by the HTTP layer (crypto::verify). This covers
-        // the *mismatch* and cap arms.
+        // token' is emitted by the HTTP layer (crypto::verify).
         let mismatch = win_token_failure(
             Some(&payload("bet_OTHER", ADDR, "USDC", 10.0)),
             &json!("bet_1"),
             &user_key,
             "USDC",
-            5.0,
         );
-        assert_eq!(mismatch, Some((401, error_body("Settlement token does not match bet"))));
+        assert_eq!(
+            mismatch,
+            Some((401, error_body("Settlement token does not match bet")))
+        );
         let wrong_currency = win_token_failure(
             Some(&payload("bet_1", ADDR, "BOT", 10.0)),
             &json!("bet_1"),
             &user_key,
             "USDC",
-            5.0,
         );
         assert!(wrong_currency.is_some());
-        // Cap: strictly `winAmount > maxPayout + 1e-8`.
-        assert!(win_token_failure(
+        let fine = win_token_failure(
             Some(&payload("bet_1", ADDR, "USDC", 10.0)),
-            &json!("bet_1"), &user_key, "USDC", 10.00000001
-        ).is_none());
-        let over = win_token_failure(
-            Some(&payload("bet_1", ADDR, "USDC", 10.0)),
-            &json!("bet_1"), &user_key, "USDC", 10.00000002,
+            &json!("bet_1"),
+            &user_key,
+            "USDC",
         );
-        assert_eq!(over, Some((400, error_body("Win amount exceeds approved payout"))));
+        assert_eq!(fine, None);
     }
 
     #[test]
-    fn win_settle_exception_mapping() {
+    fn the_server_result_is_what_a_claim_answers() {
+        let settled = json!({
+            "success": true, "duplicate": false, "outcome": "win", "payout": 17.5,
+            "end_price": 101.0, "new_balance": 107.5,
+        });
         assert_eq!(
-            win_map_settle_error("error: strike_unknown_bet:bet_1"),
-            Some((400, error_body("Unknown bet: no server-side record of this payout")))
+            win_body(&settled, "bet_1"),
+            json!({
+                "success": true, "newBalance": 107.5, "betId": "bet_1", "outcome": "win",
+                "won": true, "payout": 17.5, "winAmount": 17.5, "endPrice": 101.0,
+            })
         );
-        assert_eq!(
-            win_map_settle_error("STRIKE_PAYOUT_EXCEEDS_MAX whatever"),
-            Some((400, error_body("Win amount exceeds approved payout"))
-            )
-        );
-        assert_eq!(
-            win_map_settle_error("strike_invalid_payout_amount"),
-            Some((400, error_body("Win amount must be greater than zero")))
-        );
-        assert_eq!(win_map_settle_error("connection reset"), None);
-    }
-
-    #[test]
-    fn win_duplicate_is_an_acknowledged_success() {
-        let dup = json!({"success": false, "duplicate": true, "new_balance": 20, "error": null});
-        match win_rpc_decision(&dup, "bet_1", 5.0) {
-            WinRpcDecision::Duplicate(body) => assert_eq!(
-                body,
-                json!({
-                    "success": true, "duplicate": true,
-                    "message": "Payout already processed for this bet",
-                    "newBalance": 20, "betId": "bet_1",
-                })
-            ),
-            other => panic!("got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn win_fail_closed_and_success_bodies() {
-        let d = win_rpc_decision(&json!({"success": false, "error": "Insufficient balance", "new_balance": null}), "b", 1.0);
-        match d {
-            WinRpcDecision::FailClosed { status, body } => {
-                assert_eq!(status, 400);
-                assert_eq!(body, error_body("Insufficient balance"));
-            }
-            other => panic!("got {other:?}"),
-        }
-        // No error string -> 503 and the generic message.
-        let d = win_rpc_decision(&json!({"success": true, "duplicate": false}), "b", 1.0);
-        assert!(matches!(d, WinRpcDecision::FailClosed { status: 503, .. }));
-        match win_rpc_decision(&json!({"success": true, "new_balance": "15.5"}), "b", 5.0) {
-            WinRpcDecision::Success(body) => {
-                assert_eq!(body, json!({"success": true, "newBalance": 15.5, "winAmount": 5}));
-            }
-            other => panic!("got {other:?}"),
-        }
+        let replay = json!({
+            "duplicate": true, "outcome": "loss", "payout": 0.0, "end_price": null,
+            "new_balance": 90.0,
+        });
+        let body = win_body(&replay, "bet_1");
+        assert_eq!(body["duplicate"], json!(true));
+        assert_eq!((&body["won"], &body["payout"]), (&json!(false), &json!(0)));
     }
 
     // -- withdraw ---------------------------------------------------------------
@@ -1956,7 +2277,7 @@ mod tests {
     fn wd_body(extra: Value) -> Value {
         let mut base = json!({
             "userAddress": ADDR, "amount": 10, "currency": "USDC",
-            "signature": "0xsig", "signedAt": 1700000000000
+            "signature": "0xsig", "signedAt": 1700000000000i64
         });
         if let (Some(a), Some(b)) = (base.as_object_mut(), extra.as_object()) {
             for (k, v) in b {
@@ -1969,43 +2290,69 @@ mod tests {
     #[test]
     fn withdraw_head_rejections() {
         let (s, resp) = withdraw_head(&json!({"amount": 1})).err().unwrap();
-        assert_eq!((s, resp), (400, error_body("Missing required fields: userAddress, amount")));
-        let (_, resp) = withdraw_head(&wd_body(json!({"amount": "nan"}))).err().unwrap();
+        assert_eq!(
+            (s, resp),
+            (
+                400,
+                error_body("Missing required fields: userAddress, amount")
+            )
+        );
+        let (_, resp) = withdraw_head(&wd_body(json!({"amount": "nan"})))
+            .err()
+            .unwrap();
         assert_eq!(resp, error_body("Invalid withdrawal amount"));
         // currency.toUpperCase() runs before the address gate in the TS.
-        assert_eq!(withdraw_head(&wd_body(json!({"currency": null}))).err().unwrap(), route_crash());
-        assert_eq!(withdraw_head(&wd_body(json!({"currency": "usdc"}))).unwrap().currency, "USDC");
+        assert_eq!(
+            withdraw_head(&wd_body(json!({"currency": null})))
+                .err()
+                .unwrap(),
+            route_crash()
+        );
+        assert_eq!(
+            withdraw_head(&wd_body(json!({"currency": "usdc"})))
+                .unwrap()
+                .currency,
+            "USDC"
+        );
     }
 
     #[test]
     fn withdraw_intent_message_is_the_exact_signed_string() {
         // Mirrors the message in lib/balance/withdrawalIntent.ts call sites.
-        let message = withdraw_intent_message(
-            &json!(ADDR),
-            &json!(1),
-            "USDC",
-            &json!(1700000000000u64),
-        )
-        .unwrap();
+        let message =
+            withdraw_intent_message(&json!(ADDR), &json!(1), "USDC", &json!(1700000000000u64))
+                .unwrap();
         assert_eq!(
             message,
             format!("STRIKE withdrawal authorization\naddress:{ADDR}\namount:1.00000000\ncurrency:USDC\nsignedAt:1700000000000")
         );
         // The raw address spelling is signed, not the canonical one.
-        let message = withdraw_intent_message(&json!("0xABC"), &json!(2.5), "USDC", &json!(7)).unwrap();
+        let message =
+            withdraw_intent_message(&json!("0xABC"), &json!(2.5), "USDC", &json!(7)).unwrap();
         assert!(message.contains("address:0xABC"));
         assert!(message.contains("amount:2.50000000"));
         // A stringified amount has no .toFixed -> TypeError -> 500.
         assert_eq!(
-            withdraw_intent_message(&json!(ADDR), &json!("10"), "USDC", &json!(7)).err().unwrap(),
+            withdraw_intent_message(&json!(ADDR), &json!("10"), "USDC", &json!(7))
+                .err()
+                .unwrap(),
             route_crash()
         );
     }
 
     #[test]
     fn withdraw_authorization_gates() {
-        assert_eq!(withdraw_missing_authorization(), (401, error_body("Missing signed withdrawal authorization")));
-        assert_eq!(withdraw_expired(), (401, error_body("Withdrawal authorization expired. Please sign again.")));
+        assert_eq!(
+            withdraw_missing_authorization(),
+            (401, error_body("Missing signed withdrawal authorization"))
+        );
+        assert_eq!(
+            withdraw_expired(),
+            (
+                401,
+                error_body("Withdrawal authorization expired. Please sign again.")
+            )
+        );
         let (_, body) = withdraw_signature_mismatch();
         assert_eq!(body["code"], json!("signature_mismatch"));
         assert_eq!(
@@ -2034,7 +2381,10 @@ mod tests {
         let frozen = vec![json!({"user_address": "a", "balance": 1, "status": "frozen"})];
         match withdraw_choose_row(&frozen, 0.5, "USDC") {
             WithdrawRows::Reject((403, body)) => {
-                assert_eq!(body, error_body("Account is frozen. Withdrawals are disabled."))
+                assert_eq!(
+                    body,
+                    error_body("Account is frozen. Withdrawals are disabled.")
+                )
             }
             other => panic!("got {other:?}"),
         }
@@ -2066,14 +2416,23 @@ mod tests {
         assert!(withdraw_cap_check(&json!(108.000001), &deposits, &none, &none, "USDC").is_err());
         // Pending rows count against the cap.
         let pending = vec![json!({"amount": 100})];
-        let (_, body) = withdraw_cap_check(&json!(8), &deposits, &none, &pending, "USDC").err().unwrap();
+        assert!(
+            withdraw_cap_check(&json!(8), &deposits, &none, &pending, "USDC").is_ok(),
+            "108 is exactly the cap"
+        );
+        let spent = vec![json!({"amount": 108})];
+        let (_, body) = withdraw_cap_check(&json!(1), &deposits, &none, &spent, "USDC")
+            .err()
+            .unwrap();
         assert_eq!(
             body,
             error_body("Withdrawal amount exceeds your available limit. You have no remaining withdrawal allowance. Please contact support if you believe this is an error.")
         );
         // Partial remaining is printed with 6 decimals and the currency.
         let withdrawn = vec![json!({"amount": 100})];
-        let (_, body) = withdraw_cap_check(&json!(1), &deposits, &withdrawn, &none, "USDC").err().unwrap();
+        let (_, body) = withdraw_cap_check(&json!(9), &deposits, &withdrawn, &none, "USDC")
+            .err()
+            .unwrap();
         assert_eq!(
             body,
             error_body("Withdrawal amount exceeds your available limit. You have 8.000000 USDC remaining. Please contact support if you believe this is an error.")
@@ -2086,8 +2445,13 @@ mod tests {
         let deposits = vec![json!({"amount": 0.000001})];
         let none = Vec::<Value>::new();
         assert!(withdraw_cap_check(&json!("0.000001"), &deposits, &none, &none, "USDC").is_ok());
-        let (_, body) = withdraw_cap_check(&json!("0.000002"), &deposits, &none, &none, "USDC").err().unwrap();
-        assert!(body["error"].as_str().unwrap().contains("0.000001 USDC remaining"));
+        let (_, body) = withdraw_cap_check(&json!("0.000002"), &deposits, &none, &none, "USDC")
+            .err()
+            .unwrap();
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("0.000001 USDC remaining"));
     }
 
     #[test]
@@ -2101,8 +2465,16 @@ mod tests {
     fn withdraw_cap_corrupt_row_fails_closed_with_503() {
         let bad = vec![json!({"amount": "not-a-number"})];
         let none = Vec::<Value>::new();
-        let (status, body) = withdraw_cap_check(&json!(1), &bad, &none, &none, "USDC").err().unwrap();
-        assert_eq!((status, body), (503, error_body("Service temporarily unavailable. Please try again.")));
+        let (status, body) = withdraw_cap_check(&json!(1), &bad, &none, &none, "USDC")
+            .err()
+            .unwrap();
+        assert_eq!(
+            (status, body),
+            (
+                503,
+                error_body("Service temporarily unavailable. Please try again.")
+            )
+        );
         // A row with no amount column is a JS `undefined` -> unparseable too.
         let holey = vec![json!({"id": 1})];
         assert!(withdraw_cap_check(&json!(1), &holey, &none, &none, "USDC").is_err());
@@ -2111,34 +2483,43 @@ mod tests {
     #[test]
     fn frequency_review_threshold_and_stamp() {
         assert!(!frequency_review_exempt(ADDR, &[]));
-        assert!(frequency_review_triggered(false, FREQUENCY_REVIEW_THRESHOLD));
+        assert!(frequency_review_triggered(
+            false,
+            FREQUENCY_REVIEW_THRESHOLD
+        ));
         assert!(!frequency_review_triggered(false, 9));
         assert!(!frequency_review_triggered(true, 999));
         assert_eq!(frequency_review_stamp(10), "FREQUENCY_REVIEW:count=11");
         // Exemption matches on the canonical spelling of the env list entry.
         let list = vec![address::canonical(ADDR)];
         assert!(frequency_review_exempt(ADDR, &list));
-        assert!(frequency_review_exempt(&ADDR.to_uppercase().replacen("0X", "0x", 1), &list));
+        assert!(frequency_review_exempt(
+            &ADDR.to_uppercase().replacen("0X", "0x", 1),
+            &list
+        ));
         assert!(!frequency_review_exempt("", &list));
     }
 
     #[test]
-    fn withdraw_net_applies_to_fixed_eight() {
-        let (fee, net) = withdraw_net(10.0, Tier::Free);
-        assert_eq!((fee, net), (1.0, 9.0));
-        // The double-noise cleanup: 0.29000000000000004 -> 0.29.
-        let dirty = 0.29000000000000004f64;
-        assert_eq!(to_fixed(dirty, 8).parse::<f64>().unwrap(), 0.29);
+    fn withdraw_net_is_the_exact_split() {
+        let (fee, net) = withdraw_net(10.0, Tier::Free).unwrap();
+        assert_eq!((fee, net), (Decimal::ONE, Decimal::from(9)));
         let (status, body) = withdraw_net_rejection("10%");
         assert_eq!(status, 400);
-        assert_eq!(body, error_body("Withdrawal amount after 10% fee must be greater than zero"));
+        assert_eq!(
+            body,
+            error_body("Withdrawal amount after 10% fee must be greater than zero")
+        );
     }
 
     #[test]
     fn withdraw_insert_failure_and_success_bodies() {
         assert_eq!(
             withdraw_insert_failed(),
-            (500, error_body("Failed to create withdrawal request. Please try again."))
+            (
+                500,
+                error_body("Failed to create withdrawal request. Please try again.")
+            )
         );
         let body = withdraw_success_body(
             json!(42),
@@ -2164,8 +2545,10 @@ mod tests {
         // NaN / Infinity / negative / over-precision / absurd magnitude all
         // have defined answers on every path; pin the shared primitives.
         assert_eq!(number_of(&json!("NaN")), None);
-        assert_eq!(number_of(&json!(f64::NAN)), Some(f64::NAN)); // serde cannot carry NaN; strings model it
-        assert!(number_of(&json!("1e400")).map(|f| f.is_infinite()).unwrap_or(false));
+        assert_eq!(number_of(&json!(f64::NAN)), Some(0.0)); // JSON has no NaN: it arrives as null
+        assert!(number_of(&json!("1e400"))
+            .map(|f| f.is_infinite())
+            .unwrap_or(false));
         assert_eq!(number_of(&json!(null)), Some(0.0));
         assert_eq!(number_of(&json!("")), Some(0.0));
         assert_eq!(number_of(&json!(" 12.5 ")), Some(12.5));

@@ -8,12 +8,14 @@
 //! `lib/admin/walletAddressVariants.ts`. Everything here is offline-testable:
 //! the handlers in the server crate supply the database and the chain.
 
+use rust_decimal::Decimal;
 use serde_json::{Map, Value};
 
 use crate::address::{canonical, is_address_shape, to_checksum};
 use crate::bets::{is_demo_bet_row, js_num, to_number, value_to_string};
 use crate::crypto::{is_within_accept_window_at, MAX_ACCEPT_INTENT_AGE_MS};
 use crate::eth::recover_personal_signer;
+use crate::ledger::{floor_to_token, split_fee, Tier};
 
 // ── Request-id guard (`/^\d{1,15}$/` + safe integer) ────────────────────────
 
@@ -38,7 +40,11 @@ pub fn js_number_string(value: f64) -> String {
         return "NaN".to_string();
     }
     if value.is_infinite() {
-        return if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        return if value > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
     }
     if value.fract() == 0.0 && value.abs() < 9.007_199_254_740_992e15 {
         // `-0.0 as i64` is 0, and JS String(-0) is "0"; both collapse here.
@@ -56,7 +62,11 @@ pub fn to_fixed8(value: f64) -> String {
         return "NaN".to_string();
     }
     if value.is_infinite() {
-        return if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        return if value > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
     }
     let negative = value < 0.0; // -0.0 is false here, exactly like JS
     let x = value.abs();
@@ -169,39 +179,34 @@ pub fn within_accept_window(now_ms: i64, signed_at_ms: i64) -> bool {
 
 // ── Platform fee (`lib/fees/platformFee.ts`) ────────────────────────────────
 
-pub fn fee_percent(tier: Option<&str>) -> f64 {
-    match tier {
-        Some("standard") => 0.09,
-        Some("vip") => 0.08,
-        // normalizeTier: anything unrecognised (including NULL) is 'free'.
-        _ => 0.10,
-    }
-}
-
-/// `calculateFeeAmount`: percent of the amount, truncated (Math.floor) at the
-/// eighth decimal. The accept route calls it with no tier, i.e. 'free'.
-pub fn calculate_fee_amount(amount: f64, tier: Option<&str>) -> f64 {
-    (amount * fee_percent(tier) * 1e8).floor() / 1e8
-}
-
 /// `executeTreasuryWithdrawal`'s pre-chain arithmetic, in the TS order:
 /// currency gate, fee source, then the net-must-be-positive gate. The error
 /// strings are what land in the NEEDS_RECONCILIATION note, not the response.
-pub fn plan_payout(currency: &str, amount: f64, fee_override: Option<f64>) -> Result<(f64, f64), String> {
+/// Returns `(fee, net)` summing to `amount`, with the net payable on-chain: the
+/// stored fee picks the net, floored to the token, and the fee is the remainder,
+/// so a row queued with an unpayable float fee still pays. No stored fee is the
+/// free tier.
+pub fn plan_payout(
+    currency: &str,
+    amount: Decimal,
+    fee_override: Option<Decimal>,
+) -> Result<(Decimal, Decimal), String> {
     let normalized = currency.to_uppercase();
     if normalized != "USDC" {
         return Err(format!("Unsupported currency for withdrawal: {currency}"));
     }
-    let fee = fee_override
-        .filter(|f| f.is_finite())
-        .unwrap_or_else(|| calculate_fee_amount(amount, None));
-    let net = amount - fee;
-    // JS `<=` is false for NaN and the throw comes later, in parseUnits; keep
-    // the same order by only guarding the comparable case.
-    if net <= 0.0 {
+    let net = match fee_override {
+        Some(fee) => floor_to_token(amount - fee),
+        None => {
+            split_fee(amount, Tier::Free)
+                .ok_or("Withdrawal amount is out of range")?
+                .1
+        }
+    };
+    if net <= Decimal::ZERO {
         return Err("Withdrawal net amount after fees must be > 0".to_string());
     }
-    Ok((fee, net))
+    Ok((amount - net, net))
 }
 
 /// `${feeTxHash}|netTx:${withdrawTxHash}` when a fee transfer ran, plain hash
@@ -282,6 +287,9 @@ pub fn looks_like_internal_error(message: &str) -> bool {
         "password",
         "token",
         "node_modules",
+        "sqlite",
+        "no such table",
+        "no such column",
     ] {
         if find_sub(&lower, phrase.as_bytes()).is_some() {
             return true;
@@ -341,7 +349,10 @@ pub fn sanitize_error_text(err_text: &str, fallback: &str) -> String {
 /// signature that turns a 500 into a 503 with the migration nudge.
 pub fn is_missing_table_message(message: &str) -> bool {
     let lower = message.to_lowercase();
-    lower.contains("schema cache") || lower.contains("does not exist") || lower.contains("banned_wallets")
+    lower.contains("schema cache")
+        || lower.contains("does not exist")
+        || lower.contains("no such table")
+        || lower.contains("banned_wallets")
 }
 
 pub const MISSING_TABLE_HINT: &str =
@@ -351,9 +362,16 @@ pub const MISSING_TABLE_HINT: &str =
 /// operator instructions; everything else passes through untouched.
 pub fn append_service_key_hint(message: &str) -> String {
     let lower = message.to_lowercase();
-    if !["connect", "password", "authentication", "does not exist", "econnrefused", "timeout"]
-        .iter()
-        .any(|p| lower.contains(p))
+    if ![
+        "connect",
+        "password",
+        "authentication",
+        "does not exist",
+        "econnrefused",
+        "timeout",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
     {
         return message.to_string();
     }
@@ -368,7 +386,10 @@ pub fn append_service_key_hint(message: &str) -> String {
 pub fn respond_supabase_error(err_text: &str, fallback: &str) -> (u16, Value) {
     let missing = is_missing_table_message(err_text);
     let safe = sanitize_error_text(err_text, fallback);
-    let body = append_service_key_hint(&format!("{safe}{}", if missing { MISSING_TABLE_HINT } else { "" }));
+    let body = append_service_key_hint(&format!(
+        "{safe}{}",
+        if missing { MISSING_TABLE_HINT } else { "" }
+    ));
     (
         if missing { 503 } else { 500 },
         Value::Object(Map::from_iter([("error".to_string(), Value::String(body))])),
@@ -493,7 +514,10 @@ fn has_stack_frame(lower: &[u8]) -> bool {
         if idx == ws_begin {
             continue;
         }
-        if idx < lower.len() && lower[idx] == b'(' && colon_digits_colon_digits_close(lower, idx + 1) {
+        if idx < lower.len()
+            && lower[idx] == b'('
+            && colon_digits_colon_digits_close(lower, idx + 1)
+        {
             return true;
         }
     }
@@ -574,7 +598,10 @@ pub fn win_streak_hits(bet_rows: &[Value]) -> Vec<(String, i64, Vec<bool>)> {
         if is_demo_bet_row(row) {
             continue;
         }
-        let address = row.get("wallet_address").map(value_to_string).unwrap_or_default();
+        let address = row
+            .get("wallet_address")
+            .map(value_to_string)
+            .unwrap_or_default();
         let won = row.get("won").and_then(Value::as_bool).unwrap_or(false);
         match order.iter().position(|a| *a == address) {
             Some(idx) => results[idx].push(won),
@@ -669,7 +696,10 @@ pub fn aggregate_withdrawal_stats(audit_rows: &[Value], pending_rows: &[Value]) 
 
     let mut stats: Vec<WdStats> = Vec::new();
     for row in audit_rows {
-        let address = row.get("user_address").map(value_to_string).unwrap_or_default();
+        let address = row
+            .get("user_address")
+            .map(value_to_string)
+            .unwrap_or_default();
         let key = canonical(&address);
         let entry = locate(&mut stats, &key);
         entry.completed_count += 1;
@@ -677,7 +707,10 @@ pub fn aggregate_withdrawal_stats(audit_rows: &[Value], pending_rows: &[Value]) 
         entry.add_currency(&row.get("currency").map(value_to_string).unwrap_or_default());
     }
     for row in pending_rows {
-        let address = row.get("user_address").map(value_to_string).unwrap_or_default();
+        let address = row
+            .get("user_address")
+            .map(value_to_string)
+            .unwrap_or_default();
         let key = canonical(&address);
         let entry = locate(&mut stats, &key);
         entry.pending_count += 1;
@@ -707,7 +740,11 @@ pub fn frequency_review_candidates(stats: Vec<WdStats>, exempt: &[String]) -> Ve
 
 /// One frequency-user row, enriched with the deposit/balance queries and
 /// `net_pnl = (withdrawn + available) - deposited`, in the TS key order.
-pub fn frequency_user_json(stats: &WdStats, total_deposited: f64, total_available_balance: f64) -> Value {
+pub fn frequency_user_json(
+    stats: &WdStats,
+    total_deposited: f64,
+    total_available_balance: f64,
+) -> Value {
     let net_pnl = (stats.total_withdrawn + total_available_balance) - total_deposited;
     let has_flag = stats.pending_requests.iter().any(|r| {
         r.get("decided_by")
@@ -715,23 +752,51 @@ pub fn frequency_user_json(stats: &WdStats, total_deposited: f64, total_availabl
             .is_some_and(|d| d.starts_with("FREQUENCY_REVIEW"))
     });
     let mut map = Map::new();
-    map.insert("user_address".into(), Value::String(stats.user_address.clone()));
-    map.insert("completed_withdrawals".into(), Value::Number(stats.completed_count.into()));
-    map.insert("pending_withdrawals".into(), Value::Number(stats.pending_count.into()));
-    map.insert("total_withdrawals".into(), Value::Number(stats.total_count().into()));
+    map.insert(
+        "user_address".into(),
+        Value::String(stats.user_address.clone()),
+    );
+    map.insert(
+        "completed_withdrawals".into(),
+        Value::Number(stats.completed_count.into()),
+    );
+    map.insert(
+        "pending_withdrawals".into(),
+        Value::Number(stats.pending_count.into()),
+    );
+    map.insert(
+        "total_withdrawals".into(),
+        Value::Number(stats.total_count().into()),
+    );
     map.insert("total_withdrawn".into(), js_num(stats.total_withdrawn));
     map.insert("pending_amount".into(), js_num(stats.pending_amount));
-    map.insert("pending_requests".into(), Value::Array(stats.pending_requests.clone()));
+    map.insert(
+        "pending_requests".into(),
+        Value::Array(stats.pending_requests.clone()),
+    );
     map.insert(
         "currencies".into(),
-        Value::Array(stats.currencies.iter().cloned().map(Value::String).collect()),
+        Value::Array(
+            stats
+                .currencies
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
     );
     map.insert("total_deposited".into(), js_num(total_deposited));
-    map.insert("total_available_balance".into(), js_num(total_available_balance));
+    map.insert(
+        "total_available_balance".into(),
+        js_num(total_available_balance),
+    );
     map.insert("net_pnl".into(), js_num(net_pnl));
     map.insert("has_frequency_flag".into(), Value::Bool(has_flag));
     // Local sort key; stripped by `sort_frequency_users` before the response.
-    map.insert("__sort_total".into(), Value::Number(stats.total_count().into()));
+    map.insert(
+        "__sort_total".into(),
+        Value::Number(stats.total_count().into()),
+    );
     Value::Object(map)
 }
 
@@ -792,11 +857,23 @@ pub fn wipe_audit_rows(balance_rows: &[Value], ban_key: &str) -> Vec<Value> {
         .map(|row| {
             let balance = row.get("balance").map(to_number).unwrap_or(0.0);
             json_like(&[
-                ("user_address", row.get("user_address").cloned().unwrap_or(Value::Null)),
-                ("currency", row.get("currency").cloned().unwrap_or(Value::Null)),
-                ("operation_type", Value::String("admin_balance_wipe".to_string())),
+                (
+                    "user_address",
+                    row.get("user_address").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "currency",
+                    row.get("currency").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "operation_type",
+                    Value::String("admin_balance_wipe".to_string()),
+                ),
                 ("amount", js_num(-balance)),
-                ("transaction_hash", Value::String(format!("admin:unban:{ban_key}"))),
+                (
+                    "transaction_hash",
+                    Value::String(format!("admin:unban:{ban_key}")),
+                ),
             ])
         })
         .collect()
@@ -804,7 +881,10 @@ pub fn wipe_audit_rows(balance_rows: &[Value], ban_key: &str) -> Vec<Value> {
 
 /// UTF-16 code-unit length, matching JS `.length` for the 128/500-char gates.
 pub fn utf16_len(value: &str) -> usize {
-    value.chars().map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 }).sum()
+    value
+        .chars()
+        .map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 })
+        .sum()
 }
 
 /// `body.walletAddress.length > 128` on the *trimmed* string.
@@ -845,14 +925,35 @@ mod tests {
     #[test]
     fn request_ids_are_digits_only_and_at_least_one() {
         assert_eq!(parse_request_id(Some("7")), Some(7));
-        assert_eq!(parse_request_id(Some(" 7 ")), Some(7), "trim before the digit gate");
-        assert_eq!(parse_request_id(Some("000000000000001")), Some(1), "leading zeros are still digits");
-        for bad in ["", "0", "-1", "1.5", "1e9", "abc", "12 34", "١٢", &"1".repeat(16)] {
+        assert_eq!(
+            parse_request_id(Some(" 7 ")),
+            Some(7),
+            "trim before the digit gate"
+        );
+        assert_eq!(
+            parse_request_id(Some("000000000000001")),
+            Some(1),
+            "leading zeros are still digits"
+        );
+        for bad in [
+            "",
+            "0",
+            "-1",
+            "1.5",
+            "1e9",
+            "abc",
+            "12 34",
+            "١٢",
+            &"1".repeat(16),
+        ] {
             assert_eq!(parse_request_id(Some(bad)), None, "{bad:?} must 400");
         }
         assert_eq!(parse_request_id(None), None);
         // 15 digits is inside 2^53, so the safe-integer gate is the >=1 check.
-        assert_eq!(parse_request_id(Some(&"9".repeat(15))), Some(999_999_999_999_999));
+        assert_eq!(
+            parse_request_id(Some(&"9".repeat(15))),
+            Some(999_999_999_999_999)
+        );
     }
 
     #[test]
@@ -904,38 +1005,46 @@ mod tests {
         assert_eq!(spellings[0], lower, "the stored spelling is tried first");
         assert_eq!(spellings[1], "0xd1220A0Cf47c7B9be7A2E6Ba89F429762B72dB5B");
         // Non-EVM values: getAddress would throw, so one spelling stands.
-        assert_eq!(signature_spellings("privy-ext-42"), vec!["privy-ext-42".to_string()]);
-    }
-
-    #[test]
-    fn fee_math_matches_the_tier_table_and_floor() {
-        assert_eq!(calculate_fee_amount(10.0, None), 1.0);
-        assert_eq!(calculate_fee_amount(10.0, Some("standard")), 0.9);
-        assert_eq!(calculate_fee_amount(10.0, Some("vip")), 0.8);
-        assert_eq!(calculate_fee_amount(10.0, Some("gold")), 1.0, "unknown tiers are 'free'");
-        // Math.floor at 1e-8, not round: 0.1234567891 keeps 0.12345678.
-        assert_eq!(calculate_fee_amount(1.234567891, None), 0.12345678);
+        assert_eq!(
+            signature_spellings("privy-ext-42"),
+            vec!["privy-ext-42".to_string()]
+        );
     }
 
     #[test]
     fn payout_plan_rejects_in_the_ts_order() {
-        assert_eq!(plan_payout("usdc", 10.0, Some(1.0)), Ok((1.0, 9.0)));
-        assert_eq!(plan_payout("USDC", 10.0, None), Ok((1.0, 9.0)), "fee defaults to the free tier");
-        // A stored fee_amount of NaN/inf falls back to the computed fee, like
-        // the `Number.isFinite` gate on the override.
-        assert_eq!(plan_payout("USDC", 10.0, Some(f64::NAN)), Ok((1.0, 9.0)));
-        assert!(plan_payout("BTC", 10.0, None).unwrap_err().starts_with("Unsupported currency for withdrawal: BTC"));
+        let dec = |text: &str| crate::money::parse_decimal(text).unwrap();
+        let (ten, one, nine) = (dec("10"), dec("1"), dec("9"));
+        assert_eq!(plan_payout("usdc", ten, Some(one)), Ok((one, nine)));
         assert_eq!(
-            plan_payout("USDC", 0.5, Some(0.5)).unwrap_err(),
+            plan_payout("USDC", ten, None),
+            Ok((one, nine)),
+            "fee defaults to the free tier"
+        );
+        // A row queued by the float maths still pays: net floors, fee takes the rest.
+        let (fee, net) = plan_payout("USDC", dec("0.57"), Some(dec("0.05699999"))).unwrap();
+        assert_eq!((fee, net), (dec("0.057"), dec("0.513")));
+        assert!(plan_payout("BTC", ten, None)
+            .unwrap_err()
+            .starts_with("Unsupported currency for withdrawal: BTC"));
+        assert_eq!(
+            plan_payout("USDC", dec("0.5"), Some(dec("0.5"))).unwrap_err(),
             "Withdrawal net amount after fees must be > 0"
         );
     }
 
     #[test]
     fn combined_hash_shape() {
-        assert_eq!(combined_tx_hash(Some("0xfaaa"), "0xnet"), "0xfaaa|netTx:0xnet");
+        assert_eq!(
+            combined_tx_hash(Some("0xfaaa"), "0xnet"),
+            "0xfaaa|netTx:0xnet"
+        );
         assert_eq!(combined_tx_hash(None, "0xnet"), "0xnet");
-        assert_eq!(combined_tx_hash(Some(""), "0xnet"), "0xnet", "empty fee hash behaves as null");
+        assert_eq!(
+            combined_tx_hash(Some(""), "0xnet"),
+            "0xnet",
+            "empty fee hash behaves as null"
+        );
     }
 
     #[test]
@@ -972,7 +1081,10 @@ mod tests {
             "multi\nline",
         ] {
             assert!(looks_like_internal_error(raw), "leak guard missed: {raw}");
-            assert_eq!(sanitize_error_text(raw, "Failed to unban wallet"), "Failed to unban wallet");
+            assert_eq!(
+                sanitize_error_text(raw, "Failed to unban wallet"),
+                "Failed to unban wallet"
+            );
         }
         // Safe-by-construction messages survive.
         for safe in [
@@ -981,39 +1093,62 @@ mod tests {
             "Failed to load danger zone",
             "Request not found",
         ] {
-            assert!(!looks_like_internal_error(safe), "over-eager leak guard: {safe}");
+            assert!(
+                !looks_like_internal_error(safe),
+                "over-eager leak guard: {safe}"
+            );
         }
         assert!(looks_like_internal_error(""), "empty messages fall back");
     }
 
     #[test]
     fn missing_table_detection_and_hint_appends() {
-        assert!(is_missing_table_message("banned_wallets: relation does not exist"));
+        assert!(is_missing_table_message(
+            "banned_wallets: relation does not exist"
+        ));
         assert!(is_missing_table_message("the schema cache is not loaded"));
         assert!(!is_missing_table_message("Insufficient balance"));
-        assert_eq!(append_service_key_hint("Insufficient balance"), "Insufficient balance");
+        assert_eq!(
+            append_service_key_hint("Insufficient balance"),
+            "Insufficient balance"
+        );
         let hinted = append_service_key_hint("connection refused by host");
         assert!(hinted.ends_with("then redeploy."));
         assert!(hinted.contains("Fix: set DATABASE_URL"));
-        let (status, body) =
-            respond_supabase_error("relation \"banned_wallets\" does not exist", "Failed to add ban");
+        let (status, body) = respond_supabase_error(
+            "relation \"banned_wallets\" does not exist",
+            "Failed to add ban",
+        );
         assert_eq!(status, 503);
         let text = body["error"].as_str().unwrap();
-        assert!(text.starts_with("Failed to add ban"), "raw driver text leaked: {text}");
+        assert!(
+            text.starts_with("Failed to add ban"),
+            "raw driver text leaked: {text}"
+        );
         assert!(text.contains("002_banned_wallets.sql"));
+        // The hint keys off the SANITIZED text (appendSupabaseServiceKeyHint(safe)
+        // in the TS), so raw connection text collapses to the bare fallback...
         let (status, body) = respond_supabase_error("connection timeout", "Failed to remove ban");
         assert_eq!(status, 500);
-        assert!(body["error"].as_str().unwrap().contains("Fix: set DATABASE_URL"));
+        assert_eq!(body["error"], json!("Failed to remove ban"));
+        // ...and only a message that survives sanitising earns the hint.
+        let (status, body) = respond_supabase_error("Request timeout", "Failed to remove ban");
+        assert_eq!(status, 500);
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Request timeout — Fix: set DATABASE_URL"));
     }
 
     #[test]
     fn win_streak_hits_need_ten_in_a_row() {
         let wallet = "0xaaa111111111111111111111111111111111111";
-        let mk = |id: &str, won: bool| {
-            json!({ "id": id, "wallet_address": wallet, "won": won, "created_at": "2026-01-01T00:00:00.000Z" })
-        };
+        let mk = |id: &str, won: bool| json!({ "id": id, "wallet_address": wallet, "won": won, "created_at": "2026-01-01T00:00:00.000Z" });
         let nine: Vec<Value> = (0..9).map(|i| mk(&format!("b{i}"), true)).collect();
-        assert!(win_streak_hits(&nine).is_empty(), "nine in a row stays below the threshold");
+        assert!(
+            win_streak_hits(&nine).is_empty(),
+            "nine in a row stays below the threshold"
+        );
 
         let mut ten = nine.clone();
         ten.push(mk("b9", true));
@@ -1061,11 +1196,22 @@ mod tests {
         assert_eq!(stats.len(), 1, "canonical key collapses the two spellings");
         let s = &stats[0];
         assert_eq!(s.user_address, lower);
-        assert_eq!((s.completed_count, s.pending_count, s.total_count()), (2, 1, 3));
+        assert_eq!(
+            (s.completed_count, s.pending_count, s.total_count()),
+            (2, 1, 3)
+        );
         assert_eq!(s.total_withdrawn, 10.0);
         assert_eq!(s.pending_amount, 2.0);
-        assert_eq!(s.currencies, vec!["USDC".to_string(), "BOT".to_string()], "insertion order kept");
-        assert_eq!(s.pending_requests.len(), 1, "the pending row rides along verbatim");
+        assert_eq!(
+            s.currencies,
+            vec!["USDC".to_string(), "BOT".to_string()],
+            "insertion order kept"
+        );
+        assert_eq!(
+            s.pending_requests.len(),
+            1,
+            "the pending row rides along verbatim"
+        );
     }
 
     #[test]
@@ -1090,7 +1236,10 @@ mod tests {
         .into_iter()
         .map(|s| s.user_address)
         .collect();
-        assert_eq!(kept, vec!["0xhot1111111111111111111111111111111111".to_string()]);
+        assert_eq!(
+            kept,
+            vec!["0xhot1111111111111111111111111111111111".to_string()]
+        );
     }
 
     #[test]
@@ -1105,12 +1254,19 @@ mod tests {
             user_address: "0xabc111111111111111111111111111111111111".to_string(),
         };
         let row = frequency_user_json(&stats, 100.0, 20.0);
-        assert_eq!(row["net_pnl"], json!(-40.0), "(40 + 20) - 100");
+        assert_eq!(
+            row["net_pnl"],
+            json!(-40),
+            "(40 + 20) - 100; JS prints an integer"
+        );
         assert_eq!(row["total_withdrawals"], 10);
         assert_eq!(row["has_frequency_flag"], json!(true));
         assert_eq!(row["currencies"], json!(["USDC"]));
         let plain = frequency_user_json(
-            &WdStats { pending_requests: vec![json!({ "decided_by": "admin" })], ..stats },
+            &WdStats {
+                pending_requests: vec![json!({ "decided_by": "admin" })],
+                ..stats
+            },
             0.0,
             0.0,
         );
@@ -1127,8 +1283,15 @@ mod tests {
             frequency_user_json(&stats, 0.0, 0.0)
         };
         let sorted = sort_frequency_users(vec![row("0xa", 10), row("0xb", 12), row("0xc", 10)]);
-        let addrs: Vec<&str> = sorted.iter().map(|v| v["user_address"].as_str().unwrap()).collect();
-        assert_eq!(addrs, vec!["0xb", "0xa", "0xc"], "ties keep aggregation order and the sort key is stripped");
+        let addrs: Vec<&str> = sorted
+            .iter()
+            .map(|v| v["user_address"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            addrs,
+            vec!["0xb", "0xa", "0xc"],
+            "ties keep aggregation order and the sort key is stripped"
+        );
         assert!(sorted[0].get("__sort_total").is_none());
     }
 
@@ -1158,8 +1321,15 @@ mod tests {
         assert_eq!(ban_reason(None), "Banned by administrator");
         assert_eq!(ban_reason(Some(&json!("   "))), "Banned by administrator");
         assert_eq!(ban_reason(Some(&json!("  fraud  "))), "fraud");
-        assert_eq!(ban_reason(Some(&json!(42))), "Banned by administrator", "non-strings default");
-        assert_eq!(ban_reason(Some(&json!(&"r".repeat(600)))).chars().count(), 500);
+        assert_eq!(
+            ban_reason(Some(&json!(42))),
+            "Banned by administrator",
+            "non-strings default"
+        );
+        assert_eq!(
+            ban_reason(Some(&json!(&"r".repeat(600)))).chars().count(),
+            500
+        );
     }
 
     #[test]
@@ -1182,15 +1352,23 @@ mod tests {
     #[test]
     fn accept_window_boundaries_match_the_ts() {
         let now = 1_700_000_000_000;
-        assert!(within_accept_window(now, now - 10 * 60 * 1000), "the boundary is inclusive (<=)");
+        assert!(
+            within_accept_window(now, now - 10 * 60 * 1000),
+            "the boundary is inclusive (<=)"
+        );
         assert!(!within_accept_window(now, now - 10 * 60 * 1000 - 1));
-        assert!(within_accept_window(now, now + 60_000), "skewed-ahead signatures get a minute");
+        assert!(
+            within_accept_window(now, now + 60_000),
+            "skewed-ahead signatures get a minute"
+        );
         assert!(!within_accept_window(now, now + 60_001));
     }
 
     #[test]
     fn demo_predicates_are_shared_with_the_bets_module() {
-        assert!(is_demo_wallet_address(Some(&json!("0xDEMO11111111111111111111111111111111111"))));
+        assert!(is_demo_wallet_address(Some(&json!(
+            "0xDEMO11111111111111111111111111111111111"
+        ))));
         assert!(!is_demo_wallet_address(Some(&json!("0xabc"))));
     }
 }

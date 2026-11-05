@@ -44,11 +44,7 @@ async fn handle() -> Response {
         .collect();
 
     let body = Value::Object(Map::from_iter([("wins".to_string(), Value::Array(wins))]));
-    json_cached(
-        StatusCode::OK,
-        body,
-        super::RECENT_CACHE,
-    )
+    json_cached(StatusCode::OK, body, super::RECENT_CACHE)
 }
 
 /// `{ id, trader, asset, payout, at }`; `trader` is the raw `slice(0,6)…slice(-4)`
@@ -69,14 +65,24 @@ fn wire_row(row: &Value) -> Value {
     // `Number(row.payout) || 0`
     let payout = {
         let n = to_number(row.get("payout").unwrap_or(&Value::Null));
-        if n == 0.0 || n.is_nan() { 0.0 } else { n }
+        if n == 0.0 || n.is_nan() {
+            0.0
+        } else {
+            n
+        }
     };
 
     let mut map = Map::new();
     map.insert("id".into(), row.get("id").cloned().unwrap_or(Value::Null));
     map.insert("trader".into(), Value::String(trader));
-    map.insert("asset".into(), row.get("asset").cloned().unwrap_or(Value::Null));
+    map.insert(
+        "asset".into(),
+        row.get("asset").cloned().unwrap_or(Value::Null),
+    );
     map.insert("payout".into(), Value::from(payout));
-    map.insert("at".into(), row.get("created_at").cloned().unwrap_or(Value::Null));
+    map.insert(
+        "at".into(),
+        row.get("created_at").cloned().unwrap_or(Value::Null),
+    );
     Value::Object(map)
 }

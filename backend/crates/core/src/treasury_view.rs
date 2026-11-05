@@ -100,30 +100,12 @@ pub fn transfer_filter(usdc: &str, from: u64, to: u64, kind: TransferKind, padde
     })
 }
 
-/// A log's `data` field: a 32-byte left-padded word, not an `eth_getLogs`
-/// quantity. `eth::parse_quantity` refuses 64 hex digits on purpose, so the
-/// leading zeros come off first; a word with more significant digits than a
-/// u128 cannot be a USDC amount and yields no row.
-fn parse_data_word(raw: &str) -> Option<u128> {
-    let trimmed = raw.trim();
-    let hex = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))?
-        .trim_start_matches('0');
-    if hex.is_empty() {
-        return Some(0);
-    }
-    if hex.len() > 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    u128::from_str_radix(hex, 16).ok()
-}
-
 /// One RPC log entry decoded. Anything the chain did not actually record (a
 /// short topic list, a missing transaction hash, an unparsable block) yields no
 /// row rather than a row of zeros: the panel would otherwise display a transfer
 /// that never happened.
-pub fn parse_transfer_log(log: &Value, kind: TransferKind, decimals: u32) -> Option<TransferEvent> {    let topics = log.get("topics")?.as_array()?;
+pub fn parse_transfer_log(log: &Value, kind: TransferKind, decimals: u32) -> Option<TransferEvent> {
+    let topics = log.get("topics")?.as_array()?;
     let needed = kind.counterparty_topic();
     if topics.len() <= needed {
         return None;
@@ -134,10 +116,12 @@ pub fn parse_transfer_log(log: &Value, kind: TransferKind, decimals: u32) -> Opt
         return None;
     }
     let raw_data = log.get("data").and_then(Value::as_str).unwrap_or("0x0");
-    let amount_raw = parse_data_word(raw_data)?;
+    let amount_raw = eth::parse_data_word(raw_data)?;
     let tx_hash = log.get("transactionHash").and_then(Value::as_str)?;
     let block = eth::parse_quantity(
-        log.get("blockNumber").and_then(Value::as_str).unwrap_or_default(),
+        log.get("blockNumber")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
     )? as u64;
 
     Some(TransferEvent {
@@ -149,7 +133,11 @@ pub fn parse_transfer_log(log: &Value, kind: TransferKind, decimals: u32) -> Opt
     })
 }
 
-pub fn parse_transfer_logs(logs: &[Value], kind: TransferKind, decimals: u32) -> Vec<TransferEvent> {
+pub fn parse_transfer_logs(
+    logs: &[Value],
+    kind: TransferKind,
+    decimals: u32,
+) -> Vec<TransferEvent> {
     logs.iter()
         .filter_map(|log| parse_transfer_log(log, kind, decimals))
         .collect()
@@ -158,10 +146,14 @@ pub fn parse_transfer_logs(logs: &[Value], kind: TransferKind, decimals: u32) ->
 /// Deposits first, then payouts, ordered by descending block and truncated.
 /// The sort is stable, so two events in the same block keep that order — the
 /// TypeScript relied on the same property of `Array.prototype.sort`.
-pub fn top_events(deposits: &[TransferEvent], payouts: &[TransferEvent], limit: usize) -> Vec<TransferEvent> {
+pub fn top_events(
+    deposits: &[TransferEvent],
+    payouts: &[TransferEvent],
+    limit: usize,
+) -> Vec<TransferEvent> {
     let mut all = deposits.to_vec();
     all.extend_from_slice(payouts);
-    all.sort_by(|a, b| b.block.cmp(&a.block));
+    all.sort_by_key(|event| std::cmp::Reverse(event.block));
     all.truncate(limit);
     all
 }
@@ -182,7 +174,10 @@ pub fn treasury_view_json(treasury: &str, balance: f64, events: &[TransferEvent]
 
 /// `balanceOf(treasury)` calldata on the USDC token.
 pub fn balance_of_calldata(contract: &str) -> String {
-    let addr_hex = contract.strip_prefix("0x").unwrap_or(contract).to_lowercase();
+    let addr_hex = contract
+        .strip_prefix("0x")
+        .unwrap_or(contract)
+        .to_lowercase();
     let mut data = eth::selector("balanceOf(address)").to_vec();
     data.extend_from_slice(&[0u8; 12]);
     data.extend_from_slice(&hex::decode(&addr_hex).unwrap_or_default());
@@ -212,10 +207,20 @@ pub async fn treasury_view() -> ApiResult<(u16, String)> {
         let (from, to) = block_range(head);
         let balance_calldata = balance_of_calldata(&treasury);
         let balance_call = rpc.call_uint256(&usdc, &balance_calldata);
-        let deposits_call =
-            rpc.get_logs(transfer_filter(&usdc, from, to, TransferKind::Deposit, &padded));
-        let payouts_call =
-            rpc.get_logs(transfer_filter(&usdc, from, to, TransferKind::Payout, &padded));
+        let deposits_call = rpc.get_logs(transfer_filter(
+            &usdc,
+            from,
+            to,
+            TransferKind::Deposit,
+            &padded,
+        ));
+        let payouts_call = rpc.get_logs(transfer_filter(
+            &usdc,
+            from,
+            to,
+            TransferKind::Payout,
+            &padded,
+        ));
         // One round trip for all three reads, as the route's `Promise.all` did:
         // the panel is on the landing page and a serial walk would triple its
         // worst-case latency.
@@ -267,21 +272,41 @@ mod tests {
     #[test]
     fn window_is_capped_and_never_negative() {
         assert_eq!(block_range(100_000), (95_100, 100_000));
-        assert_eq!(block_range(10), (0, 10), "a chain younger than the lookback");
+        assert_eq!(
+            block_range(10),
+            (0, 10),
+            "a chain younger than the lookback"
+        );
         assert_eq!(LOOKBACK_BLOCKS, 4_900);
         assert_eq!(EVENT_LIMIT, 6);
     }
 
     #[test]
     fn filters_wildcard_the_unknown_side_of_the_transfer() {
-        let deposits = transfer_filter("0x3600000000000000000000000000000000000000", 900, 1_000, TransferKind::Deposit, "0xpadded");
+        let deposits = transfer_filter(
+            "0x3600000000000000000000000000000000000000",
+            900,
+            1_000,
+            TransferKind::Deposit,
+            "0xpadded",
+        );
         assert_eq!(deposits["topics"].as_array().unwrap().len(), 3);
         assert!(deposits["topics"][1].is_null(), "the sender is any address");
         assert_eq!(deposits["fromBlock"], "0x384");
         assert_eq!(deposits["toBlock"], "0x3e8");
 
-        let payouts = transfer_filter("0x3600000000000000000000000000000000000000", 900, 1_000, TransferKind::Payout, "0xpadded");
-        assert_eq!(payouts["topics"].as_array().unwrap().len(), 2, "recipient stays wildcarded");
+        let payouts = transfer_filter(
+            "0x3600000000000000000000000000000000000000",
+            900,
+            1_000,
+            TransferKind::Payout,
+            "0xpadded",
+        );
+        assert_eq!(
+            payouts["topics"].as_array().unwrap().len(),
+            2,
+            "recipient stays wildcarded"
+        );
         assert_eq!(payouts["topics"][1], "0xpadded");
     }
 
@@ -290,7 +315,10 @@ mod tests {
         let padded = topic(TREASURY);
         assert_eq!(padded.len(), 66);
         assert!(padded.starts_with("0x000000000000000000000000"));
-        assert_eq!(padded, format!("0x{}{}", "0".repeat(24), TREASURY[2..].to_lowercase()));
+        assert_eq!(
+            padded,
+            format!("0x{}{}", "0".repeat(24), TREASURY[2..].to_lowercase())
+        );
         assert_eq!(topic("not-an-address"), "");
     }
 
@@ -335,7 +363,10 @@ mod tests {
             "0x1",
         );
         // An empty hash is still a hash field; a missing one is not a log.
-        assert_eq!(parse_transfer_logs(&[no_hash], TransferKind::Deposit, 6).len(), 1);
+        assert_eq!(
+            parse_transfer_logs(&[no_hash], TransferKind::Deposit, 6).len(),
+            1
+        );
         let absent = json!({ "topics": [&topic(TREASURY), &topic(TREASURY)], "data": "0x1", "blockNumber": "0x1" });
         assert!(parse_transfer_logs(&[absent], TransferKind::Deposit, 6).is_empty());
 
@@ -368,7 +399,11 @@ mod tests {
             "block 10 first, and the deposit listed before the payout inside it"
         );
 
-        assert_eq!(top_events(&deposits, &payouts, 2).len(), 2, "the cap is enforced");
+        assert_eq!(
+            top_events(&deposits, &payouts, 2).len(),
+            2,
+            "the cap is enforced"
+        );
         assert!(top_events(&[], &[], 6).is_empty());
     }
 
@@ -401,8 +436,14 @@ mod tests {
 
     #[test]
     fn cache_and_error_bodies_are_the_routes_own() {
-        assert_eq!(TREASURY_CACHE_CONTROL, "public, s-maxage=10, stale-while-revalidate=60");
-        assert_eq!(TREASURY_NOT_CONFIGURED_BODY, "{\"error\":\"Treasury not configured\"}");
+        assert_eq!(
+            TREASURY_CACHE_CONTROL,
+            "public, s-maxage=10, stale-while-revalidate=60"
+        );
+        assert_eq!(
+            TREASURY_NOT_CONFIGURED_BODY,
+            "{\"error\":\"Treasury not configured\"}"
+        );
         assert_eq!(RPC_UNAVAILABLE_BODY, "{\"error\":\"Arc RPC unavailable\"}");
     }
 }

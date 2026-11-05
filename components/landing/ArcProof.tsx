@@ -46,7 +46,7 @@ export function ArcProof() {
     <section className="border-t border-[#0A0C10]/[0.06]">
       <div className="mx-auto max-w-[1040px] px-5 py-28 sm:px-8">
         <BlurFade className="text-center">
-          <div className="font-jet text-xs uppercase tracking-[0.18em] text-[#9AA1AD]">On Arc</div>
+          <div className="font-jet text-xs uppercase tracking-[0.18em] text-[#6B7280]">On Arc</div>
           <h2 className="mt-4 font-serif text-[clamp(40px,5vw,60px)] font-normal leading-[1] tracking-[-0.02em]">
             Every dollar, <span className="italic text-[#2151F5]">on-chain.</span>
           </h2>
@@ -57,7 +57,7 @@ export function ArcProof() {
             <div className="text-sm text-[#6B7280]">Treasury balance · live</div>
             <div className="my-8 font-jet text-[44px] font-medium leading-none tracking-[-0.04em]">
               {treasury ? treasury.balance.toFixed(2) : '—'}
-              <span className="ml-2 text-base text-[#9AA1AD]">USDC</span>
+              <span className="ml-2 text-base text-[#6B7280]">USDC</span>
             </div>
             {treasury && (
               <a
@@ -66,7 +66,7 @@ export function ArcProof() {
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 font-jet text-xs text-[#6B7280] hover:text-[#0A0C10]"
               >
-                StrikeTreasury {short(treasury.address)} <ArrowUpRight size={12} />
+                StrikeTreasury {short(treasury.address)} <ArrowUpRight size={12} aria-hidden="true" />
               </a>
             )}
           </BlurFade>
@@ -85,10 +85,10 @@ export function ArcProof() {
                     >
                       <span className="flex items-center gap-3">
                         <span className={`grid h-7 w-7 place-items-center rounded-full ${e.type === 'deposit' ? 'bg-[#EEF2FF] text-[#2151F5]' : 'bg-[#F6F7F9] text-[#0A0C10]'}`}>
-                          {e.type === 'deposit' ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}
+                          {e.type === 'deposit' ? <ArrowDownLeft size={14} aria-hidden="true" /> : <ArrowUpRight size={14} aria-hidden="true" />}
                         </span>
                         <span>{e.type === 'deposit' ? 'Deposit' : 'Payout'}</span>
-                        <span className="hidden font-jet text-xs text-[#9AA1AD] sm:inline">{short(e.counterparty)}</span>
+                        <span className="hidden font-jet text-xs text-[#6B7280] sm:inline">{short(e.counterparty)}</span>
                       </span>
                       <span className="font-jet">{e.amount.toFixed(2)} USDC</span>
                     </a>
@@ -96,7 +96,7 @@ export function ArcProof() {
                 ))}
               </ul>
             ) : (
-              <p className="mt-4 text-sm text-[#9AA1AD]">{treasury ? 'No flows in the last hour.' : 'Reading Arc…'}</p>
+              <p className="mt-4 text-sm text-[#6B7280]">{treasury ? 'No flows in the last hour.' : 'Reading Arc…'}</p>
             )}
           </BlurFade>
         </div>

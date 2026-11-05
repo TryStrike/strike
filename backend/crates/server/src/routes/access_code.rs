@@ -40,14 +40,20 @@ pub fn normalize_code(raw: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.len() > MAX_CODE_LENGTH {
         return None;
     }
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return None;
     }
     Some(trimmed.to_uppercase())
 }
 
 async fn validate(headers: HeaderMap, body: Bytes) -> Response {
-    match spend(&headers, &body).await {
+    if let Err(deny) = http::require_balance_session(&headers) {
+        return deny.into_response();
+    }
+    match spend(&body).await {
         Ok(response) => response,
         // The catch-all: Postgres payloads can echo the offending value, so the
         // cause is logged as an error code only and the browser gets a fixed
@@ -62,9 +68,7 @@ async fn validate(headers: HeaderMap, body: Bytes) -> Response {
     }
 }
 
-async fn spend(headers: &HeaderMap, body: &Bytes) -> ApiResult<Response> {
-    http::require_balance_session(headers)?;
-
+async fn spend(body: &Bytes) -> ApiResult<Response> {
     let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
 
     // `if (!code)` / `if (!walletAddress)` — presence before shape.
@@ -82,7 +86,10 @@ async fn spend(headers: &HeaderMap, body: &Bytes) -> ApiResult<Response> {
 
     // A banned wallet may neither burn a code nor claim an account.
     if bans::is_globally_banned(&wallet_key).await {
-        return Ok(error(StatusCode::FORBIDDEN, "This wallet is banned from the platform."));
+        return Ok(error(
+            StatusCode::FORBIDDEN,
+            "This wallet is banned from the platform.",
+        ));
     }
 
     // Existence first, purely to choose between 404 and 400 below; the spend is
@@ -198,16 +205,26 @@ mod tests {
 
     #[test]
     fn a_code_is_valid_only_in_its_own_shape() {
-        assert_eq!(normalize_code(" BYN-2026-01 ").as_deref(), Some("BYN-2026-01"));
+        assert_eq!(
+            normalize_code(" BYN-2026-01 ").as_deref(),
+            Some("BYN-2026-01")
+        );
         assert_eq!(normalize_code("abc123").as_deref(), Some("ABC123"));
         // Junk never reaches the database, and the message never repeats it.
         assert_eq!(normalize_code(""), None);
         assert_eq!(normalize_code("   "), None);
-        assert_eq!(normalize_code("BYN 2026"), None, "spaces are not code characters");
+        assert_eq!(
+            normalize_code("BYN 2026"),
+            None,
+            "spaces are not code characters"
+        );
         assert_eq!(normalize_code("BYN' OR 1=1--"), None);
         assert_eq!(normalize_code("byn/2026"), None);
         assert_eq!(normalize_code(&"A".repeat(65)), None, "64 is the ceiling");
-        assert_eq!(normalize_code(&"A".repeat(64)).as_deref(), Some("A".repeat(64).as_str()));
+        assert_eq!(
+            normalize_code(&"A".repeat(64)).as_deref(),
+            Some("A".repeat(64).as_str())
+        );
     }
 
     #[test]

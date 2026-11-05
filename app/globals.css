@@ -40,6 +40,24 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
   min-height: 100vh;
+  /* dvh keeps the trade board from being clipped by the mobile URL bar;
+     the vh line above is the fallback for engines without dvh. */
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
+}
+
+/* Respect reduced motion globally (also quiets LiveChart cell transitions and
+   the stall-dim fade; JS loops in LiveChart/GridScan check the same query). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Interactive affordance: native controls default to arrow; align with user expectations */
@@ -101,4 +119,81 @@ input[type="reset"]:disabled {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #00F0FF;
+}
+
+/* ── Polish layer (additive only): tokens, focus rings, skeleton, motion damping ── */
+:root {
+  /* Focus + interaction accents for the shared UI primitives. */
+  --ui-focus: #2151F5;
+  --ui-focus-offset: 2px;
+  /* Skeleton shimmer (light surfaces; route fallbacks render on white/surface). */
+  --skeleton-base: rgba(10, 12, 16, 0.06);
+  --skeleton-highlight: rgba(10, 12, 16, 0.10);
+  /* Consistent rhythm/shape tokens for components/ui + components/states. */
+  --ui-gap-xs: 0.5rem;
+  --ui-gap-sm: 0.75rem;
+  --ui-gap-md: 1rem;
+  --ui-gap-lg: 1.5rem;
+  --ui-radius-md: 0.75rem;
+  --ui-radius-lg: 1.5rem;
+}
+
+/* Visible focus ring for every interactive element. Written unlayered so it
+   beats Tailwind's `outline-none` utilities, but only on :focus-visible —
+   pointer users keep the clean look. */
+:where(a[href], button, input, select, textarea, summary, [role="button"],
+  [role="switch"], [role="tab"], [role="checkbox"], [role="radio"],
+  [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: var(--ui-focus-offset);
+}
+
+/* Skeleton shimmer used by components/states/Skeleton.tsx. */
+.by-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--skeleton-base);
+}
+
+.by-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg,
+      transparent 0%,
+      var(--skeleton-highlight) 55%,
+      transparent 100%);
+  animation: by-skeleton-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes by-skeleton-sweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Spinner for StateScreen loading variant. */
+.by-spin {
+  animation: by-spin 0.9s linear infinite;
+}
+
+@keyframes by-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Belt-and-braces reduced-motion damping for the newly added animations
+   (the global block near the top already covers most transitions). */
+@media (prefers-reduced-motion: reduce) {
+
+  .by-skeleton::after,
+  .by-spin {
+    animation: none;
+  }
+
+  .animate-slide-in {
+    animation: none;
+  }
 }

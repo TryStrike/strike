@@ -107,7 +107,10 @@ pub fn currencies_body(current: &BTreeMap<String, f64>) -> Value {
 
 /// The route's one round trip: quote every feed symbol, then shape the board.
 pub async fn load_currencies() -> ApiResult<Value> {
-    let symbols: Vec<String> = VALID_ASSETS.iter().map(|symbol| symbol.to_string()).collect();
+    let symbols: Vec<String> = VALID_ASSETS
+        .iter()
+        .map(|symbol| symbol.to_string())
+        .collect();
     let current = fetch_latest_prices(&symbols, false).await;
     Ok(currencies_body(&current))
 }
@@ -124,7 +127,10 @@ const BANNED_KEYS: [&str; 3] = ["wallet_address", "reason", "created_at"];
 /// `{ bans: [...] }` — the row shape the panel already reads, projected so a
 /// widened column list cannot leak a future field.
 pub fn banned_wallets_body(rows: &[Value]) -> Value {
-    let bans: Vec<Value> = rows.iter().map(|row| project_row(row, &BANNED_KEYS)).collect();
+    let bans: Vec<Value> = rows
+        .iter()
+        .map(|row| project_row(row, &BANNED_KEYS))
+        .collect();
     let mut body = Map::new();
     body.insert("bans".into(), Value::Array(bans));
     Value::Object(body)
@@ -139,7 +145,10 @@ pub async fn load_banned_wallets() -> ApiResult<Value> {
 /// (the TS answers 503 with a migration hint) from a genuine failure (500).
 pub fn is_missing_table_message(message: &str) -> bool {
     let lower = message.to_lowercase();
-    lower.contains("schema cache") || lower.contains("does not exist") || lower.contains("banned_wallets")
+    lower.contains("schema cache")
+        || lower.contains("does not exist")
+        || lower.contains("no such table")
+        || lower.contains("banned_wallets")
 }
 
 /// The banned-wallets failure mapping: `503` for a missing table, `500`
@@ -167,8 +176,18 @@ pub fn banned_wallets_failure(err: &ApiError, fallback: &str, label: &str) -> Ap
 const PENDING_SELECT: &str = "id, user_address, currency, amount, net_amount, fee_amount, \
      requested_at, status, decided_by, tx_hash, created_at, signed_at";
 const PENDING_KEYS: [&str; 12] = [
-    "id", "user_address", "currency", "amount", "net_amount", "fee_amount", "requested_at",
-    "status", "decided_by", "tx_hash", "created_at", "signed_at",
+    "id",
+    "user_address",
+    "currency",
+    "amount",
+    "net_amount",
+    "fee_amount",
+    "requested_at",
+    "status",
+    "decided_by",
+    "tx_hash",
+    "created_at",
+    "signed_at",
 ];
 
 /// The pending-filtered, paged statement with an exact count over the same
@@ -182,7 +201,7 @@ pub fn withdrawal_pending_statement(p: &ListParams) -> Prepared {
     clauses.push(format!("status = {status_ph}"));
     if let Some(q) = &p.q {
         let ph = binds.push(TEXT, Value::String(like_pattern(q)));
-        clauses.push(format!("user_address ILIKE {ph}"));
+        clauses.push(format!("pg_ilike(user_address, {ph})"));
     }
     if let Some(currency) = &p.currency {
         let ph = binds.push(TEXT, Value::String(currency.clone()));
@@ -208,7 +227,7 @@ pub fn withdrawal_pending_statement(p: &ListParams) -> Prepared {
              ORDER BY requested_at DESC, id DESC LIMIT {limit_ph} OFFSET {offset_ph}"
         ),
         count_sql: Some(format!(
-            "SELECT COUNT(*)::bigint AS count FROM withdrawal_requests {where_sql}"
+            "SELECT COUNT(*) AS count FROM withdrawal_requests {where_sql}"
         )),
         binds,
         filter_binds,
@@ -228,13 +247,98 @@ pub async fn load_withdrawal_pending(p: &ListParams) -> ApiResult<Value> {
         None => rows.len() as i64,
     };
 
-    let requests: Vec<Value> = rows.iter().map(|row| project_row(row, &PENDING_KEYS)).collect();
+    let requests: Vec<Value> = rows
+        .iter()
+        .map(|row| project_row(row, &PENDING_KEYS))
+        .collect();
+    // Unfiltered and not paged: what is debited but not settled has to stay in
+    // view until someone is done with it. An accept keeps running after the admin's
+    // request is gone, so this is where they see how it ended.
+    let unresolved = db::fetch(
+        "SELECT id, user_address, currency, amount, net_amount, status, notes, decided_at \
+         FROM withdrawal_requests \
+         WHERE (status = 'accepted' AND tx_hash IS NULL) OR status = 'paid_needs_reconciliation' \
+         ORDER BY decided_at DESC LIMIT 200",
+        &[],
+    )
+    .await?;
     let mut body = Map::new();
     body.insert("requests".into(), Value::Array(requests));
+    body.insert("unresolved".into(), Value::Array(unresolved));
     body.insert("total".into(), json_int(total));
     body.insert("limit".into(), json_int(p.limit));
     body.insert("offset".into(), json_int(p.offset));
     body.insert("maxAcceptAgeMs".into(), json_int(MAX_ACCEPT_INTENT_AGE_MS));
+    Ok(Value::Object(body))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/access-codes
+// ---------------------------------------------------------------------------
+
+/// `status` is the usage state, mirroring the panel's ready/consumed filter.
+pub const ACCESS_CODE_STATUS_VALUES: [&str; 2] = ["ready", "consumed"];
+
+/// The filtered, paged list with an exact count over the same WHERE prefix.
+pub fn access_codes_statement(p: &ListParams) -> Prepared {
+    let mut binds = Binds::new();
+    let mut clauses: Vec<String> = Vec::new();
+
+    match p.status.as_deref() {
+        Some("ready") => clauses.push("is_used = false".to_string()),
+        Some("consumed") => clauses.push("is_used = true".to_string()),
+        _ => {}
+    }
+    if let Some(q) = &p.q {
+        let ph = binds.push(TEXT, Value::String(like_pattern(q)));
+        clauses.push(format!(
+            "(pg_ilike(code, {ph}) OR pg_ilike(wallet_address, {ph}))"
+        ));
+    }
+    if let Some(from) = &p.from {
+        let ph = binds.push(TIMESTAMPTZ, Value::String(from.clone()));
+        clauses.push(format!("created_at >= {ph}"));
+    }
+    if let Some(to) = &p.to {
+        let ph = binds.push(TIMESTAMPTZ, Value::String(to.clone()));
+        clauses.push(format!("created_at <= {ph}"));
+    }
+
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    let filter_binds = binds.len();
+    let limit_ph = binds.push(INT8, json_int(p.limit));
+    let offset_ph = binds.push(INT8, json_int(p.offset));
+
+    Prepared {
+        sql: format!(
+            "SELECT id, code, is_used, wallet_address, used_at, created_at FROM access_codes {where_sql} \
+             ORDER BY created_at DESC, id DESC LIMIT {limit_ph} OFFSET {offset_ph}"
+        ),
+        count_sql: Some(format!("SELECT COUNT(*) AS count FROM access_codes {where_sql}")),
+        binds,
+        filter_binds,
+    }
+}
+
+/// `{ codes, total, limit, offset }`: `codes` keeps its historical shape, the
+/// rest lets the panel paginate server-side.
+pub async fn load_access_codes(p: &ListParams) -> ApiResult<Value> {
+    let prepared = access_codes_statement(p);
+    let rows = db::fetch(&prepared.sql, &prepared.row_refs()).await?;
+    let count_sql = prepared.count_sql.as_deref().unwrap_or_default();
+    let total = db::fetch_scalar(count_sql, &prepared.count_refs()).await?;
+
+    let total = total.as_i64().unwrap_or(rows.len() as i64);
+
+    let mut body = Map::new();
+    body.insert("codes".into(), Value::Array(rows));
+    body.insert("total".into(), json_int(total));
+    body.insert("limit".into(), json_int(p.limit));
+    body.insert("offset".into(), json_int(p.offset));
     Ok(Value::Object(body))
 }
 
@@ -277,14 +381,37 @@ pub fn resolve_dataset(raw: Option<&str>) -> Option<ExportDataset> {
 }
 
 const TX_COLUMNS: [&str; 10] = [
-    "id", "created_at", "user_address", "operation_type", "currency", "amount", "balance_before",
-    "balance_after", "transaction_hash", "bet_id",
+    "id",
+    "created_at",
+    "user_address",
+    "operation_type",
+    "currency",
+    "amount",
+    "balance_before",
+    "balance_after",
+    "transaction_hash",
+    "bet_id",
 ];
 const BET_COLUMNS: [&str; 10] = [
-    "id", "created_at", "wallet_address", "asset", "direction", "amount", "payout", "won", "mode",
+    "id",
+    "created_at",
+    "wallet_address",
+    "asset",
+    "direction",
+    "amount",
+    "payout",
+    "won",
+    "mode",
     "network",
 ];
-const CODE_COLUMNS: [&str; 6] = ["id", "code", "is_used", "wallet_address", "used_at", "created_at"];
+const CODE_COLUMNS: [&str; 6] = [
+    "id",
+    "code",
+    "is_used",
+    "wallet_address",
+    "used_at",
+    "created_at",
+];
 
 fn dataset_columns(dataset: ExportDataset) -> &'static [&'static str] {
     match dataset {
@@ -331,7 +458,7 @@ pub fn export_statement(dataset: ExportDataset, p: &ListParams, from: i64) -> Pr
                 let address_ph = binds.push(TEXT, pattern.clone());
                 let hash_ph = binds.push(TEXT, pattern);
                 clauses.push(format!(
-                    "(user_address ILIKE {address_ph} OR transaction_hash ILIKE {hash_ph})"
+                    "(pg_ilike(user_address, {address_ph}) OR pg_ilike(transaction_hash, {hash_ph}))"
                 ));
             }
             push_created_bounds(&mut binds, &mut clauses, p);
@@ -358,7 +485,7 @@ pub fn export_statement(dataset: ExportDataset, p: &ListParams, from: i64) -> Pr
                 let asset_ph = binds.push(TEXT, pattern.clone());
                 let id_ph = binds.push(TEXT, pattern);
                 clauses.push(format!(
-                    "(wallet_address ILIKE {wallet_ph} OR asset ILIKE {asset_ph} OR id ILIKE {id_ph})"
+                    "(pg_ilike(wallet_address, {wallet_ph}) OR pg_ilike(asset, {asset_ph}) OR pg_ilike(id, {id_ph}))"
                 ));
             }
             push_created_bounds(&mut binds, &mut clauses, p);
@@ -380,7 +507,7 @@ pub fn export_statement(dataset: ExportDataset, p: &ListParams, from: i64) -> Pr
                 let code_ph = binds.push(TEXT, pattern.clone());
                 let wallet_ph = binds.push(TEXT, pattern);
                 clauses.push(format!(
-                    "(code ILIKE {code_ph} OR wallet_address ILIKE {wallet_ph})"
+                    "(pg_ilike(code, {code_ph}) OR pg_ilike(wallet_address, {wallet_ph}))"
                 ));
             }
             push_created_bounds(&mut binds, &mut clauses, p);
@@ -465,7 +592,10 @@ fn cell_to_string(value: &Value) -> (bool, String) {
 
 fn normalize_line_breaks(input: &str) -> String {
     // `\r\n?` -> `\n`, then `\n` -> `\r\n`, exactly as the TS does.
-    input.replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n")
+    input
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n")
 }
 
 /// `csvEscape`: RFC-4180 quoting with the formula-injection guard. A finite
@@ -478,8 +608,7 @@ pub fn csv_escape(value: &Value) -> String {
     }
     let mut s = normalize_line_breaks(&raw);
 
-    let injection = !is_numeric
-        && s.starts_with(['=', '+', '-', '@', '\t', '\r']);
+    let injection = !is_numeric && s.starts_with(['=', '+', '-', '@', '\t', '\r']);
     if injection {
         s = format!("'{s}");
     }
@@ -500,7 +629,10 @@ fn csv_row(cells: &[Value]) -> String {
 /// `buildCsv`: header row then one row per record, CRLF throughout. Column
 /// order is the dataset's declared whitelist; a missing column is the empty cell.
 pub fn build_csv(columns: &[&str], rows: &[Value]) -> String {
-    let header: Vec<Value> = columns.iter().map(|c| Value::String(c.to_string())).collect();
+    let header: Vec<Value> = columns
+        .iter()
+        .map(|c| Value::String(c.to_string()))
+        .collect();
     let mut out = csv_row(&header);
     for row in rows {
         let cells: Vec<Value> = columns
@@ -548,7 +680,9 @@ pub fn usd_per_unit(asset: &str) -> Option<f64> {
 /// `balanceTimesUsd`: null when either side is missing or non-finite.
 pub fn balance_times_usd(balance: Option<f64>, unit_usd: Option<f64>) -> Option<f64> {
     match (balance, unit_usd) {
-        (Some(balance), Some(unit)) if balance.is_finite() && unit.is_finite() => Some(balance * unit),
+        (Some(balance), Some(unit)) if balance.is_finite() && unit.is_finite() => {
+            Some(balance * unit)
+        }
         _ => None,
     }
 }
@@ -572,7 +706,11 @@ fn fmt_grouped(value: f64, min_frac: usize, max_frac: usize) -> String {
     }
 
     let grouped = group_thousands(integer);
-    let sign = if negative && (integer != 0 || fraction != 0) { "-" } else { "" };
+    let sign = if negative && (integer != 0 || fraction != 0) {
+        "-"
+    } else {
+        ""
+    };
     if max_frac == 0 || (fraction == 0 && min_frac == 0) {
         return format!("{sign}{grouped}");
     }
@@ -594,7 +732,7 @@ fn group_thousands(mut value: i64) -> String {
     let digits = value.to_string();
     let mut out = String::new();
     for (idx, ch) in digits.chars().enumerate() {
-        if idx > 0 && (digits.len() - idx) % 3 == 0 {
+        if idx > 0 && (digits.len() - idx).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -630,13 +768,22 @@ fn iso_now() -> String {
 
 /// A snapshot row: the fixed `base` fields, the balance (or its absence), the
 /// display string and the per-row error, best-effort as the TS is.
-fn treasury_row(asset: &str, address: &str, balance: Option<f64>, error: Option<String>, explorer_url: Option<String>) -> Value {
+fn treasury_row(
+    asset: &str,
+    address: &str,
+    balance: Option<f64>,
+    error: Option<String>,
+    explorer_url: Option<String>,
+) -> Value {
     let mut map = Map::new();
     map.insert("chain".into(), Value::String("ARC".to_string()));
     map.insert("label".into(), Value::String(ARC_NETWORK_NAME.to_string()));
     map.insert("address".into(), Value::String(address.to_string()));
     map.insert("asset".into(), Value::String(asset.to_string()));
-    map.insert("balance".into(), balance.map(json_number).unwrap_or(Value::Null));
+    map.insert(
+        "balance".into(),
+        balance.map(json_number).unwrap_or(Value::Null),
+    );
     map.insert("formatted".into(), Value::String(fmt_balance(balance)));
     map.insert(
         "explorerUrl".into(),
@@ -661,7 +808,7 @@ pub async fn build_treasury_balance_snapshot() -> Vec<Value> {
             .iter()
             .map(|asset| {
                 treasury_row(
-                    *asset,
+                    asset,
                     "",
                     None,
                     Some("NEXT_PUBLIC_TREASURY_ADDRESS is not configured".to_string()),
@@ -684,12 +831,28 @@ pub async fn build_treasury_balance_snapshot() -> Vec<Value> {
         match rpc.call_uint256(&usdc, &calldata).await {
             Ok(raw) => {
                 let balance = eth::format_units(raw, USDC_DECIMALS);
-                rows.push(treasury_row(asset, &address, Some(balance), None, explorer_url.clone()));
+                rows.push(treasury_row(
+                    asset,
+                    &address,
+                    Some(balance),
+                    None,
+                    explorer_url.clone(),
+                ));
             }
             Err(err) => {
                 let message = err.to_string();
-                let message = if message.is_empty() { "failed".to_string() } else { message };
-                rows.push(treasury_row(asset, &address, None, Some(message), explorer_url.clone()));
+                let message = if message.is_empty() {
+                    "failed".to_string()
+                } else {
+                    message
+                };
+                rows.push(treasury_row(
+                    asset,
+                    &address,
+                    None,
+                    Some(message),
+                    explorer_url.clone(),
+                ));
             }
         }
     }
@@ -705,16 +868,26 @@ pub async fn treasury_balances_body() -> ApiResult<Value> {
         .iter()
         .map(|row| {
             let mut map = row.as_object().cloned().unwrap_or_default();
-            let asset = map.get("asset").and_then(Value::as_str).unwrap_or("").to_string();
+            let asset = map
+                .get("asset")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let balance = map.get("balance").and_then(Value::as_f64);
             let unit = usd_per_unit(&asset);
             let balance_usd = balance_times_usd(balance, unit);
-            map.insert("unitUsd".into(), unit.map(json_number).unwrap_or(Value::Null));
+            map.insert(
+                "unitUsd".into(),
+                unit.map(json_number).unwrap_or(Value::Null),
+            );
             map.insert(
                 "balanceUsd".into(),
                 balance_usd.map(json_number).unwrap_or(Value::Null),
             );
-            map.insert("formattedUsd".into(), Value::String(format_usd(balance_usd)));
+            map.insert(
+                "formattedUsd".into(),
+                Value::String(format_usd(balance_usd)),
+            );
             Value::Object(map)
         })
         .collect();
@@ -727,4 +900,70 @@ pub async fn treasury_balances_body() -> ApiResult<Value> {
         Value::String("USD is indicative. USDC is quoted at $1.".to_string()),
     );
     Ok(Value::Object(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin_reads_a::{parse_list_params, ListOptions};
+
+    fn params(pairs: &[(&str, &str)]) -> Result<ListParams, String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let opts = ListOptions {
+            status_values: Some(&ACCESS_CODE_STATUS_VALUES),
+            extra_enums: &[],
+        };
+        parse_list_params(&owned, &opts)
+    }
+
+    #[test]
+    fn access_codes_default_to_the_whole_table_newest_first() {
+        let p = access_codes_statement(&params(&[]).unwrap());
+        assert_eq!(
+            p.sql,
+            "SELECT id, code, is_used, wallet_address, used_at, created_at FROM access_codes  \
+             ORDER BY created_at DESC, id DESC LIMIT CAST($1 AS int8) OFFSET CAST($2 AS int8)"
+        );
+        assert_eq!(
+            p.count_sql.as_deref(),
+            Some("SELECT COUNT(*) AS count FROM access_codes ")
+        );
+        assert_eq!((p.filter_binds, p.binds.len()), (0, 2));
+    }
+
+    #[test]
+    fn access_code_filters_share_one_where_with_the_count() {
+        let parsed = params(&[
+            ("status", "consumed"),
+            ("q", "AB12"),
+            ("from", "2026-01-01"),
+        ])
+        .unwrap();
+        let p = access_codes_statement(&parsed);
+        let count = p.count_sql.clone().unwrap();
+        assert!(count.contains("is_used = true"), "{count}");
+        // One bind drives both ILIKEs, as the single or-expression term did.
+        assert!(
+            count.contains(
+                "(pg_ilike(code, CAST($1 AS text)) OR pg_ilike(wallet_address, CAST($1 AS text)))"
+            ),
+            "{count}"
+        );
+        assert!(count.contains("created_at >= "), "{count}");
+        assert!(p.sql.contains(count.split("access_codes ").nth(1).unwrap()));
+        assert_eq!(p.filter_binds, 2);
+        assert_eq!(p.count_refs().len(), 2);
+
+        let ready = access_codes_statement(&params(&[("status", "ready")]).unwrap());
+        assert!(ready.sql.contains("is_used = false"));
+    }
+
+    #[test]
+    fn access_code_status_outside_the_enum_is_a_400_message() {
+        assert!(params(&[("status", "used")]).is_err());
+        assert!(params(&[("limit", "abc")]).is_err());
+    }
 }

@@ -4,7 +4,7 @@
  * This is what lets the Supabase migration touch almost nothing: every call
  * site keeps writing `supabase.from('t').select('*').eq('a', 1)`, but the chain
  * now produces a serialisable descriptor which is executed either directly
- * against Neon (server) or forwarded to /api/db (browser).
+ * by /api/db (browser).
  *
  * Only the surface the app actually uses is implemented — see README notes in
  * ARC_MIGRATION.md. Anything unsupported throws loudly rather than
@@ -195,6 +195,19 @@ function compileOr(expr: string, values: unknown[]): string {
   return `(${compiled.join(' OR ')})`;
 }
 
+/**
+ * Ceiling for a LIMIT that reaches SQL. The browser gateway narrows this per
+ * allow-list rule; this is the last line of defence for every other caller.
+ */
+const MAX_LIMIT_ROWS = 1000;
+
+/** Whole numbers only: `LIMIT 1.5` / `LIMIT NaN` must never hit Postgres. */
+function intLiteral(value: unknown, name: string, max: number): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`Unsafe ${name}: ${String(value)}`);
+  return Math.min(n, max);
+}
+
 function orderLimit(desc: QueryDescriptor): string {
   let sql = '';
   if (desc.order.length) {
@@ -205,8 +218,10 @@ function orderLimit(desc: QueryDescriptor): string {
     });
     sql += ` ORDER BY ${parts.join(', ')}`;
   }
-  if (desc.limit !== undefined) sql += ` LIMIT ${Number(desc.limit)}`;
-  if (desc.offset !== undefined) sql += ` OFFSET ${Number(desc.offset)}`;
+  if (desc.limit !== undefined) {
+    sql += ` LIMIT ${Math.max(intLiteral(desc.limit, 'limit', MAX_LIMIT_ROWS), 1)}`;
+  }
+  if (desc.offset !== undefined) sql += ` OFFSET ${intLiteral(desc.offset, 'offset', Number.MAX_SAFE_INTEGER)}`;
   return sql;
 }
 

@@ -1,9 +1,13 @@
 //! `POST /api/bets/save` — `app/api/bets/save/route.ts`.
 //!
-//! Authorised upsert of one settled bet into `bet_history`. Every field is
+//! Authorised upsert of one play-money bet into `bet_history`. Every field is
 //! coerced with the same defaults the TS route applied (`asset || 'BNB'`,
 //! `parseFloat(multiplier) || 1.9`, …), the wallet is canonicalised, and the
 //! row is keyed on `id` (`ON CONFLICT (id) DO UPDATE`).
+//!
+//! A real bet's row belongs to settlement. Any id outside the `demo-` namespace,
+//! which every reader of real money filters out, is acknowledged and not written,
+//! so a client can neither overwrite a result nor invent one.
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
@@ -12,8 +16,9 @@ use axum::routing::post;
 use axum::Router;
 use serde_json::{Map, Value};
 
+use strike_core::address::is_address;
 use strike_core::bets::{
-    canonical_address, is_truthy, iso_ms, now_ms, save_float, save_float_or,
+    canonical_address, is_demo_bet_row, is_truthy, iso_ms, now_ms, save_float, save_float_or,
     save_string_or_default, value_to_string,
 };
 use strike_core::error::ApiError;
@@ -62,6 +67,17 @@ async fn handle(headers: HeaderMap, raw: Bytes) -> Response {
     if !is_truthy(body.get("id")) || !is_truthy(body.get("walletAddress")) {
         return error_response(400, "Missing required fields");
     }
+    // `bet_history` feeds admin totals and leaderboards, so only a real wallet
+    // gets a row. The TS threw on a non-string here and stored any other text.
+    let wallet = body.get("walletAddress").and_then(Value::as_str);
+    if !wallet.is_some_and(|w| is_address(w.trim())) {
+        return error_response(400, "Invalid walletAddress");
+    }
+
+    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    if !is_demo_bet_row(&Value::Object(Map::from_iter([("id".to_string(), id)]))) {
+        return axum::Json(success()).into_response();
+    }
 
     match run(&body).await {
         Ok(body) => axum::Json(body).into_response(),
@@ -71,23 +87,41 @@ async fn handle(headers: HeaderMap, raw: Bytes) -> Response {
 
 async fn run(body: &Value) -> Result<Value, ApiError> {
     let values: [(&str, Value); 13] = [
-        ("id", Value::String(value_to_string(body.get("id").unwrap_or(&Value::Null)))),
+        (
+            "id",
+            Value::String(value_to_string(body.get("id").unwrap_or(&Value::Null))),
+        ),
         (
             "wallet_address",
             Value::String(canonical_address(&value_to_string(
                 body.get("walletAddress").unwrap_or(&Value::Null),
             ))),
         ),
-        ("asset", Value::String(save_string_or_default(body, "asset", "BNB"))),
-        ("direction", Value::String(save_string_or_default(body, "direction", "UP"))),
+        (
+            "asset",
+            Value::String(save_string_or_default(body, "asset", "BNB")),
+        ),
+        (
+            "direction",
+            Value::String(save_string_or_default(body, "direction", "UP")),
+        ),
         ("amount", Value::from(save_float(body, "amount"))),
-        ("multiplier", Value::from(save_float_or(body, "multiplier", 1.9))),
+        (
+            "multiplier",
+            Value::from(save_float_or(body, "multiplier", 1.9)),
+        ),
         ("strike_price", Value::from(save_float(body, "strikePrice"))),
         ("end_price", Value::from(save_float(body, "endPrice"))),
         ("payout", Value::from(save_float(body, "payout"))),
         ("won", Value::Bool(is_truthy(body.get("won")))),
-        ("mode", Value::String(save_string_or_default(body, "mode", "strike"))),
-        ("network", Value::String(save_string_or_default(body, "network", "USDC"))),
+        (
+            "mode",
+            Value::String(save_string_or_default(body, "mode", "strike")),
+        ),
+        (
+            "network",
+            Value::String(save_string_or_default(body, "network", "USDC")),
+        ),
         ("resolved_at", Value::String(iso_ms(now_ms()))),
     ];
 
@@ -120,16 +154,25 @@ async fn run(body: &Value) -> Result<Value, ApiError> {
         updates.join(", "),
     );
 
-    sql::execute(&statement, &binds.refs()).await.map_err(|err| {
-        tracing::error!("Supabase bet save error: {err}");
-        ApiError::internal("Failed to save bet")
-    })?;
+    sql::execute(&statement, &binds.refs())
+        .await
+        .map_err(|err| {
+            tracing::error!("Supabase bet save error: {err}");
+            ApiError::internal("Failed to save bet")
+        })?;
 
-    Ok(Value::Object(Map::from_iter([("success".to_string(), Value::Bool(true))])))
+    Ok(success())
+}
+
+fn success() -> Value {
+    Value::Object(Map::from_iter([("success".to_string(), Value::Bool(true))]))
 }
 
 fn error_response(status: u16, message: &str) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = Value::Object(Map::from_iter([("error".to_string(), Value::String(message.to_string()))]));
+    let body = Value::Object(Map::from_iter([(
+        "error".to_string(),
+        Value::String(message.to_string()),
+    )]));
     (code, axum::Json(body)).into_response()
 }

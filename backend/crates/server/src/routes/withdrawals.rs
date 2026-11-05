@@ -44,8 +44,17 @@ const PLAYER_COLUMNS: &str =
 
 /// The only keys the response may carry, in this order.
 const PLAYER_KEYS: [&str; 11] = [
-    "id", "currency", "amount", "fee_amount", "net_amount", "status", "requested_at",
-    "decided_at", "tx_hash", "fee_tx_hash", "signed_at",
+    "id",
+    "currency",
+    "amount",
+    "fee_amount",
+    "net_amount",
+    "status",
+    "requested_at",
+    "decided_at",
+    "tx_hash",
+    "fee_tx_hash",
+    "signed_at",
 ];
 
 pub fn routes() -> Router {
@@ -59,6 +68,9 @@ struct Paging {
 }
 
 async fn list(headers: HeaderMap, Query(query): Query<Paging>) -> Response {
+    if let Err(deny) = http::require_balance_session(&headers) {
+        return deny.into_response();
+    }
     match fetch(&headers, query).await {
         Ok(response) => response,
         Err(err) => {
@@ -73,8 +85,6 @@ async fn list(headers: HeaderMap, Query(query): Query<Paging>) -> Response {
 }
 
 async fn fetch(headers: &HeaderMap, query: Paging) -> ApiResult<Response> {
-    http::require_balance_session(headers)?;
-
     let raw = http::header_str(headers, READ_AUTH_HEADER);
     let proof = match read_auth::verify_read_auth(raw.as_deref(), now_ms()) {
         Ok(proof) => proof,
@@ -95,7 +105,10 @@ async fn fetch(headers: &HeaderMap, query: Paging) -> ApiResult<Response> {
     let variants = search_variants(&proof.address);
     let binds: Vec<Value> = variants.iter().map(|v| Value::String(v.clone())).collect();
     let bind_refs: Vec<(&str, &Value)> = binds.iter().map(|v| ("text", v)).collect();
-    let where_clause = format!("user_address IN ({})", sql::in_list(1, "text", bind_refs.len()));
+    let where_clause = format!(
+        "user_address IN ({})",
+        sql::in_list(1, "text", bind_refs.len())
+    );
 
     let (limit, offset) = parse_paging(query);
     let total = count_rows(&where_clause, &bind_refs).await.unwrap_or(0);
@@ -178,11 +191,14 @@ async fn rows_for(
 }
 
 async fn count_rows(where_clause: &str, wallet_binds: &[(&str, &Value)]) -> ApiResult<i64> {
-    let statement = format!("SELECT count(*) AS total FROM withdrawal_requests WHERE {where_clause}");
-    let scalar = db::fetch_scalar(&statement, wallet_binds).await.map_err(|err| {
-        tracing::error!("[withdrawals] count sql: {statement} || err: {err}");
-        err
-    })?;
+    let statement =
+        format!("SELECT count(*) AS total FROM withdrawal_requests WHERE {where_clause}");
+    let scalar = db::fetch_scalar(&statement, wallet_binds)
+        .await
+        .map_err(|err| {
+            tracing::error!("[withdrawals] count sql: {statement} || err: {err}");
+            err
+        })?;
     Ok(scalar.as_i64().unwrap_or(0))
 }
 
@@ -246,7 +262,10 @@ mod tests {
         for forbidden in ["signature", "notes", "decided_by"] {
             assert!(map.get(forbidden).is_none(), "{forbidden} must never ship");
         }
-        assert!(!map.contains_key("signature"), "absent, not withheld-but-present");
+        assert!(
+            !map.contains_key("signature"),
+            "absent, not withheld-but-present"
+        );
         let serialized = projected.to_string();
         assert!(!serialized.contains("0xdeadbeef"));
         assert!(!serialized.contains("admin@strike"));
@@ -279,7 +298,10 @@ mod tests {
         // hide the next page.
         let has_more = |offset: i64, rows: i64, total: i64| offset + rows < total;
         assert!(has_more(0, 20, 21));
-        assert!(!has_more(0, 20, 20), "exactly one page read is not \"more\"");
+        assert!(
+            !has_more(0, 20, 20),
+            "exactly one page read is not \"more\""
+        );
         assert!(has_more(20, 20, 45));
         assert!(!has_more(20, 5, 25));
     }

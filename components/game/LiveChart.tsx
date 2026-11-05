@@ -6,6 +6,7 @@ import { line, curveMonotoneX } from 'd3-shape';
 import { useStore } from '@/lib/store';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { AssetType } from '@/lib/utils/priceFeed';
+import { usePriceStream } from '@/lib/hooks/usePriceStream';
 import { motion, AnimatePresence } from 'framer-motion';
 import { playWinSound, playLoseSound } from '@/lib/utils/sounds';
 import { useToast } from '@/lib/hooks/useToast';
@@ -176,6 +177,61 @@ const STOCK_DOMAIN_MAP: Record<string, string> = {
   CAC: 'euronext.com',           // CAC 40
 };
 
+// ── Y-domain math, pure and unit-tested ──────────────────────────────────────
+// The "no jumping of graph on changing the token" rule: on an asset switch the
+// domain SNAPS to the new asset's own data; it never lerps from the previous
+// asset's domain, because two unrelated price domains have nothing to
+// interpolate between. Within one asset the domain eases toward its target so
+// the axis follows real moves smoothly.
+
+export interface YDomainBounds {
+  min: number;
+  max: number;
+}
+
+/** Fit a domain to one asset's own visible points (padding + a zoom floor). */
+export function computeYDomainTarget(
+  points: readonly { price: number }[],
+  price: number,
+  paddingFactor = 0.35,
+  minSpanFactor = 0.00002,
+): YDomainBounds {
+  let low = price;
+  let high = price;
+  for (const p of points) {
+    if (p.price < low) low = p.price;
+    if (p.price > high) high = p.price;
+  }
+  const spread = high - low;
+  const padding = spread > 0 ? spread * paddingFactor : Math.max(price * 0.0002, 1e-8);
+  let min = low - padding;
+  let max = high + padding;
+  const minSpan = price * minSpanFactor;
+  if (max - min < minSpan) {
+    const mid = (max + min) / 2;
+    min = mid - minSpan / 2;
+    max = mid + minSpan / 2;
+  }
+  return { min, max };
+}
+
+/**
+ * Next domain given the previous one and this frame's target. `assetChanged`
+ * (or a missing previous) snaps to the target; otherwise ease by `lerpFactor`.
+ */
+export function nextYDomain(
+  prev: YDomainBounds | null,
+  target: YDomainBounds,
+  assetChanged: boolean,
+  lerpFactor = 0.25,
+): YDomainBounds {
+  if (!prev || assetChanged) return { min: target.min, max: target.max };
+  return {
+    min: prev.min + (target.min - prev.min) * lerpFactor,
+    max: prev.max + (target.max - prev.max) * lerpFactor,
+  };
+}
+
 // Component to safely display asset logos with multiple fallback sources
 const AssetIcon = ({ src, asset, className }: { src: string; asset: string; className: string }) => {
 
@@ -317,12 +373,24 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const lastResult = useStore((state) => state.lastResult);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
+  // Server-pushed ticks for the selected asset. They are fed into
+  // updateAllPrices — the exact ingest path the 1s poller already uses — so
+  // history appends, settlement, y-domain seeding on token switch, tip
+  // clamping and lastTickAt stall detection all behave identically, just
+  // earlier. When SSE cannot deliver (no EventSource, proxy stripping, silent
+  // stream), the hook transparently falls back to that same poller.
+  const updateAllPrices = useStore((state) => state.updateAllPrices);
+  const { mode: feedMode, connected: streamLive } = usePriceStream(selectedAsset, updateAllPrices);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [now, setNow] = useState(Date.now());
-  // Display-only price for the chart tip: eases toward the live price each frame so
-  // ticks flow instead of snapping. Settlement always uses the real store price.
-  const [tipPrice, setTipPrice] = useState(0);
+  // Display-only price for the chart tip: always the latest real tick (snapped, no easing).
+  // Tagged with the asset it belongs to — after a token switch a stale tip from the
+  // previous asset must never be drawn on the new domain (that read as a jump).
+  // Settlement always uses the real store price.
+  const [tip, setTip] = useState<{ asset: AssetType | null; price: number }>({ asset: null, price: 0 });
+  const tipPrice = tip.asset === selectedAsset && tip.price > 0 ? tip.price : currentPrice;
   const [isAssetDropdownOpen, setIsAssetDropdownOpen] = useState(false);
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
@@ -403,15 +471,33 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }, [assetSearchQuery, activeAssetCategory]);
 
 
-  // Stable Y-Axis Domain
-  const yDomain = useRef({ min: 0, max: 100, initialized: false });
+  // Stable Y-Axis Domain. Tagged with the asset it was computed for: when the
+  // traded asset changes, the next scales computation SNAPS to the new asset's
+  // own domain inside the render (before paint) — see nextYDomain. The old
+  // asset's domain is never blended in.
+  const yDomain = useRef<{ min: number; max: number } | null>(null);
+  const yDomainAsset = useRef<AssetType | null>(null);
 
-  // Reset Y-axis domain when asset changes
+  // Asset switch: clear overlays and re-seed the tip from the new asset's own
+  // data. `setSelectedAsset` updates selectedAsset, priceHistory and
+  // currentPrice atomically, so this render already carries the new asset's
+  // values; reading them from the closure (deps = selectedAsset only) is
+  // intentional. The y-domain itself is re-seeded during the next scales
+  // computation so no frame between render and effect can show a mixed domain.
   useEffect(() => {
-    yDomain.current = { min: 0, max: 100, initialized: false };
     setBetResults([]); // Clear bet results
     setCellBets(new Map()); // Clear cell bets
-    setIsLoadingPrice(true); // Show loading when switching assets
+
+    const lastPoint = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : null;
+    const assetPrice = currentPrice > 0 ? currentPrice : (lastPoint?.price ?? 0);
+
+    // Tip shows the new asset's own last value (or nothing), never the old
+    // asset's eased tip.
+    setTip({ asset: selectedAsset, price: assetPrice });
+
+    // Show the loading overlay only when the new asset has no history to render yet.
+    setIsLoadingPrice(priceHistory.length === 0 || assetPrice <= 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAsset]);
 
   // Box mode: map active bets onto grid cells so crossing / settlement runs (cellBets was never filled after placement).
@@ -515,23 +601,58 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => observer.disconnect();
   }, []);
 
-  // Reset Y-axis domain when asset changes to avoid getting stuck at old price levels
+  // Reduced motion: no idle RAF loop. New ticks still render IMMEDIATELY —
+  // the currentPrice effect below snaps the tip the moment a tick lands — and
+  // the scrolling x-axis clock only needs a slow 1s heartbeat.
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
   useEffect(() => {
-    yDomain.current.initialized = false;
-  }, [selectedAsset]);
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = () => setPrefersReducedMotion(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  // The tip must show the LATEST real tick immediately (snap, no easing) in both modes.
+  useEffect(() => {
+    if (currentPrice > 0) setTip({ asset: selectedAsset, price: currentPrice });
+  }, [currentPrice, selectedAsset]);
+
+  // Feed stall detection for the dimmed-line treatment. Polled from getState()
+  // rather than subscribed: lastTickAt changes every second and must not
+  // rerender the chart.
+  const [feedStalled, setFeedStalled] = useState(false);
+  useEffect(() => {
+    const check = () => {
+      const t = useStore.getState().lastTickAt;
+      setFeedStalled(t > 0 && Date.now() - t > 8000);
+    };
+    check();
+    const id = setInterval(check, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Feed state for the header badge: live = SSE ticks flowing, polling = the
+  // 1s fallback owns the feed, stale = neither produced a fresh tick (the
+  // same condition that dims the chart line).
+  const feedState = feedStalled ? 'stale' : feedMode === 'stream' && streamLive ? 'live' : 'polling';
 
   // Animation Loop - Optimized for performance
   useEffect(() => {
+    if (prefersReducedMotion) {
+      // No decorative idle frames; only keep the time axis loosely accurate.
+      const id = setInterval(() => setNow(Date.now()), 1000);
+      return () => clearInterval(id);
+    }
     let frameId: number;
     let lastTime = Date.now();
 
     const animate = () => {
       const currentTime = Date.now();
-      // Throttle to ~15fps (64ms) for significantly better performance
+      // Throttle the scrolling clock to ~15fps (64ms) for performance.
       if (currentTime - lastTime > 64) {
         setNow(currentTime);
-        const target = currentPriceRef.current;
-        setTipPrice((prev) => (prev <= 0 || target <= 0 || Math.abs(target - prev) / target > 0.01 ? target : prev + (target - prev) * 0.25));
         lastTime = currentTime;
       }
 
@@ -539,7 +660,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     };
     frameId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(frameId);
-  }, []);
+  }, [prefersReducedMotion]);
 
   // Configuration - Responsive + Timeframe
   const isMobile = dimensions.width < 640;
@@ -564,30 +685,14 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     const windowMs = (dimensions.width / Math.max(pixelsPerSecond, 0.0001)) * 1000;
     const cutoff = now - windowMs;
 
-    let low = currentPrice;
-    let high = currentPrice;
+    // Fit the domain to what THIS asset's price actually did inside the
+    // visible window (headroom + zoom floor live in computeYDomainTarget, the
+    // same function the switch re-seed uses).
+    const visiblePoints: { price: number }[] = [];
     for (const point of priceHistory) {
-      if (point.timestamp < cutoff) continue;
-      if (point.price < low) low = point.price;
-      if (point.price > high) high = point.price;
+      if (point.timestamp >= cutoff) visiblePoints.push(point);
     }
-
-    // Headroom above and below the extremes so the line never touches an edge.
-    const spread = high - low;
-    const padding = spread > 0 ? spread * 0.35 : Math.max(currentPrice * 0.0002, 1e-8);
-
-    // Floor on how far we zoom in, so a still market does not look volatile.
-    // Kept near real tick size: 0.002% of 78,000 BTC is about 1.5 dollars,
-    // roughly a second of genuine movement, so real ticks still fill the chart
-    // while a one-cent drift stays visibly flat.
-    const minSpan = currentPrice * 0.00002;
-    let targetMin = low - padding;
-    let targetMax = high + padding;
-    if (targetMax - targetMin < minSpan) {
-      const mid = (targetMax + targetMin) / 2;
-      targetMin = mid - minSpan / 2;
-      targetMax = mid + minSpan / 2;
-    }
+    let { min: targetMin, max: targetMax } = computeYDomainTarget(visiblePoints, currentPrice);
 
     const mobileZoomFactor = isMobile ? 0.75 : 1.0;
     if (mobileZoomFactor !== 1) {
@@ -597,15 +702,17 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       targetMax = mid + half;
     }
 
-    // DYNAMIC Y-axis - lerp towards target to follow price
-    if (!yDomain.current.initialized) {
-      yDomain.current = { min: targetMin, max: targetMax, initialized: true };
-    } else {
-      // Faster axis tracking to avoid "flat/straight-line" feel on real feed moves.
-      const lerpFactor = 0.25;
-      yDomain.current.min = yDomain.current.min + (targetMin - yDomain.current.min) * lerpFactor;
-      yDomain.current.max = yDomain.current.max + (targetMax - yDomain.current.max) * lerpFactor;
-    }
+    // DYNAMIC Y-axis. Asset switch: snap to this asset's own domain — the
+    // switch never lerps from the previous asset's prices (that interpolation
+    // was the visible "jump on changing the token"). Same asset: ease toward
+    // the target so the axis follows real moves without jarring steps.
+    const assetChanged = yDomainAsset.current !== selectedAsset;
+    if (assetChanged) yDomainAsset.current = selectedAsset;
+    yDomain.current = nextYDomain(
+      assetChanged ? null : yDomain.current,
+      { min: targetMin, max: targetMax },
+      assetChanged,
+    );
 
     const { min: minY, max: maxY } = yDomain.current;
 
@@ -841,9 +948,13 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     // where the price actually changed lets the curve flow instead of stepping.
     const pointsToRender = visiblePoints.filter((p, i) => i === 0 || p.price !== visiblePoints[i - 1].price);
 
-    // Always include current live point (eased for display)
+    // Always include current live point (the latest real tick, snapped — no easing)
     if (currentPrice > 0) {
-      pointsToRender.push({ timestamp: now, price: tipPrice || currentPrice });
+      // Store points are stamped Date.now() while `now` is the RAF clock; if a tick landed
+      // after the last RAF update the tip would go backwards in x and kink curveMonotoneX.
+      // Clamp the tip timestamp to strictly after the last rendered point.
+      const lastTs = pointsToRender.length > 0 ? pointsToRender[pointsToRender.length - 1].timestamp : 0;
+      pointsToRender.push({ timestamp: Math.max(now, lastTs + 16), price: tipPrice });
     }
 
     // Need at least 2 points for a line
@@ -1110,6 +1221,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
         cells.push({
           id: `cell-${colTimestamp}-${priceLevelIndex}`,
+          colTimestamp,
           x: colX,
           y,
           // Flush cells: neighbours share a hairline instead of leaving a gutter.
@@ -1304,6 +1416,13 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                     targetId,
                     userAddress,
                     cell.id,
+                    // The server settles a cell at the moment the tip enters it.
+                    {
+                      priceTop: cell.priceTop,
+                      priceBottom: cell.priceBottom,
+                      startTime: cell.colTimestamp,
+                      endTime: cell.colTimestamp,
+                    },
                   );
 
                   if (result && result.bet) {
@@ -1582,9 +1701,10 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         })}
       </svg>
 
-      {/* SVG Layer for Chart - ON TOP */}
+      {/* SVG Layer for Chart - ON TOP (no asset-switch remount: the switch re-seeds
+          tip/overlays in the effect and the y-domain snaps to the new asset inside the
+          scales computation itself, and nothing here holds stale DOM state) */}
       <svg
-        key={`chart-${selectedAsset}`}
         className="absolute inset-0 w-full h-full z-10 pointer-events-none"
       >
         {scales && (
@@ -1662,7 +1782,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
             {chartPath && currentPrice > 0 && (
               <>
-                {/* Main line */}
+                {/* Main line — dimmed (opacity only, no layout shift) while the feed is stalled */}
                 <path
                   d={chartPath}
                   fill="none"
@@ -1670,10 +1790,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  opacity={feedStalled ? 0.35 : 1}
+                  style={{ transition: 'opacity 0.4s ease' }}
                 />
 
                 {/* Current price: dashed guide, tip dot, right-axis tag */}
-                <g transform={`translate(0, ${scales.yScale(tipPrice || currentPrice)})`}>
+                <g transform={`translate(0, ${scales.yScale(tipPrice)})`}>
                   <line
                     x1={0}
                     y1={0}
@@ -1849,6 +1971,25 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
                 </span>
               );
             })()}
+            {/* Feed-state badge: inline in the existing price row — no layout churn. */}
+            <span
+              data-testid="feed-state"
+              title={
+                feedState === 'live'
+                  ? 'Streaming live ticks'
+                  : feedState === 'stale'
+                    ? 'Price feed delayed'
+                    : 'Polling price feed (1s)'
+              }
+              className="self-center flex items-center gap-1 font-jet text-[10px] uppercase tracking-wide text-faint"
+            >
+              <span
+                className={`inline-block w-1.5 h-1.5 rounded-full ${
+                  feedState === 'live' ? 'bg-up' : feedState === 'stale' ? 'bg-down' : 'bg-faint'
+                }`}
+              />
+              {feedState}
+            </span>
           </div>
         </div>
 

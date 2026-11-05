@@ -41,13 +41,15 @@ export function Header() {
     };
 
 
-    // The landing page and the trade screen bring their own light nav.
-    if (pathname === '/' || pathname === '/trade') return null;
+    // Routes that bring their own light SiteNav: rendering this dark bar on
+    // top of it would double-nest two headers and two wallet controls.
+    const LIGHT_NAV_ROUTES = ['/', '/trade', '/history'];
+    if (LIGHT_NAV_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`))) return null;
 
     return (
         <header className="z-[100] px-4 sm:px-8 py-3 flex justify-between items-center bg-black/40 backdrop-blur-3xl border-b border-white/5">
             <div className="flex items-center gap-4">
-                <Link href="/" className="group flex items-center gap-2">
+                <Link href="/" aria-label={`${BRAND.name} home`} className="group flex items-center gap-2">
                     <motion.span
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
@@ -58,38 +60,29 @@ export function Header() {
                     </motion.span>
                 </Link>
                 {demoActivated && (
-                    <span className="text-[8px] font-mono text-emerald-400 border border-emerald-400/30 px-2 py-0.5 rounded bg-emerald-400/5 animate-pulse uppercase tracking-widest">
+                    <span role="status" className="text-[8px] font-mono text-emerald-400 border border-emerald-400/30 px-2 py-0.5 rounded bg-emerald-400/5 animate-pulse uppercase tracking-widest">
                         Demo Activated
                     </span>
                 )}
             </div>
 
             <div className="flex items-center gap-2 sm:gap-4">
-                {pathname !== '/' && accessCode !== null && (
+                {accessCode !== null && (
                     <button
+                        type="button"
                         onClick={activateDemoMode}
+                        aria-pressed={accountType === 'demo'}
                         className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-full transition-all group"
                     >
-                        <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                        <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" aria-hidden="true" />
                         <span className="text-[9px] font-black uppercase tracking-widest text-emerald-400/80 group-hover:text-emerald-400">
                             Demo Mode
                         </span>
                     </button>
                 )}
 
-                {pathname === '/' ? (
-                    <Link
-                        href="/trade"
-                        className="px-6 py-2.5 bg-white text-black font-black uppercase tracking-widest text-[10px] rounded-full hover:bg-gray-200 transition-all active:scale-95 shadow-[0_0_20px_rgba(255,255,255,0.2)]"
-                    >
-                        Launch DApp
-                    </Link>
-                ) : (
-                    <>
-                        <HeaderMenu />
-                        <WalletConnect />
-                    </>
-                )}
+                <HeaderMenu />
+                <WalletConnect />
             </div>
         </header>
     );

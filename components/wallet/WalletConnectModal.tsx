@@ -1,29 +1,50 @@
 'use client';
 
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { useStore } from '@/lib/store';
-import { usePrivy } from '@privy-io/react-auth';
+import { useLogin } from '@privy-io/react-auth';
 import { useModal } from 'connectkit';
+import { useConnect, useConnectors, useSwitchChain } from 'wagmi';
+import { useToast } from '@/lib/hooks/useToast';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CaretRight, EnvelopeSimple, Wallet, X } from '@phosphor-icons/react';
+import { CaretRight, ClockCounterClockwise, EnvelopeSimple, Wallet, WarningCircle, X } from '@phosphor-icons/react';
 import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
+import { arcChainLabel, arcTargetChainId } from '@/lib/wallet/arcChain';
+import { classifyConnectError, safeConnectErrorMessage } from '@/lib/wallet/connectErrors';
+import { connectCopyForError, isConnectingPhase } from '@/lib/wallet/connectMachine';
+import { truncateAddress } from '@/lib/wallet/addressDisplay';
+import { saveRecentWallets } from '@/lib/wallet/recentWallets';
 
 type IconType = typeof Wallet;
 
-function OptionRow({ icon: Icon, title, description, onClick }: {
+function Spinner() {
+  return (
+    <span
+      role="status"
+      aria-label="Working"
+      className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-ink/20 border-t-ink"
+    />
+  );
+}
+
+function OptionRow({ icon: Icon, title, description, onClick, busy, disabled }: {
     icon: IconType;
     title: string;
-    description: string;
+    description: React.ReactNode;
     onClick: () => void;
+    busy?: boolean;
+    disabled?: boolean;
 }) {
     return (
         <button
             type="button"
             onClick={onClick}
-            className="group flex w-full items-center gap-4 rounded-2xl bg-white p-4 text-left ring-1 ring-inset ring-line transition-shadow hover:ring-ink"
+            disabled={disabled}
+            aria-busy={busy || undefined}
+            className="group flex w-full items-center gap-4 rounded-2xl bg-white p-4 text-left ring-1 ring-inset ring-line transition-shadow hover:ring-ink disabled:cursor-wait disabled:opacity-50 disabled:hover:ring-line"
         >
             <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-surface text-ink">
-                <Icon size={20} />
+                {busy ? <Spinner /> : <Icon size={20} />}
             </span>
             <span className="min-w-0 flex-1">
                 <span className="block text-[15px] font-semibold">{title}</span>
@@ -34,18 +55,126 @@ function OptionRow({ icon: Icon, title, description, onClick }: {
     );
 }
 
-function PrivySocialLoginButton({ onConnected }: { onConnected: () => void }) {
-    const { login } = usePrivy();
+function PrivySocialLoginButton({ onConnected, disabled }: { onConnected: () => void; disabled?: boolean }) {
+    const toast = useToast();
+    // useLogin exposes the onError callback (PrivyInterface.login has none),
+    // so rejected/failed logins surface in the app toast instead of silently.
+    const { login } = useLogin({
+        onError: (error?: unknown) => {
+            const kind = classifyConnectError(error);
+            useStore.getState().dispatchConnectEvent({ type: 'CONNECT_FAILURE', error: kind });
+            toast.error(connectCopyForError(kind)?.title ?? 'Sign-in failed. Please try again.');
+        },
+    });
 
     return (
         <OptionRow
             icon={EnvelopeSimple}
             title="Email or social"
             description="Sign in with Google, X or email."
+            disabled={disabled}
             onClick={() => {
+                useStore.getState().dispatchConnectEvent({ type: 'START_CONNECT' });
                 login();
                 onConnected();
             }}
+        />
+    );
+}
+
+function ErrorPanel() {
+    const connectPhase = useStore((s) => s.connectPhase);
+    const lastError = useStore((s) => s.lastError);
+    const clearLastError = useStore((s) => s.clearLastError);
+    const { switchChainAsync } = useSwitchChain();
+
+    if (connectPhase !== 'failed' || !lastError) return null;
+    const copy = connectCopyForError(lastError.kind)!;
+    const targetChainId = arcTargetChainId();
+
+    return (
+        <div role="alert" className="mt-5 rounded-2xl bg-down/5 p-4 ring-1 ring-inset ring-down/20">
+            <div className="flex items-start gap-3">
+                <WarningCircle size={18} className="mt-0.5 shrink-0 text-down" />
+                <div className="min-w-0 flex-1">
+                    <p className="text-[14px] font-semibold text-down">{copy.title}</p>
+                    <p className="mt-0.5 text-[13px] text-muted">{copy.hint}</p>
+                </div>
+                <button
+                    type="button"
+                    onClick={clearLastError}
+                    aria-label="Dismiss error"
+                    className="-mr-1 -mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full text-subtle hover:bg-surface"
+                >
+                    <X size={14} />
+                </button>
+            </div>
+            {lastError.kind === 'wrong_network' ? (
+                <button
+                    type="button"
+                    onClick={async () => {
+                        try {
+                            await switchChainAsync({ chainId: targetChainId });
+                            clearLastError();
+                        } catch (err) {
+                            useStore.getState().setLastError({
+                                kind: classifyConnectError(err),
+                                message: safeConnectErrorMessage(err),
+                            });
+                        }
+                    }}
+                    className="mt-3 inline-flex h-9 items-center gap-2 rounded-full bg-ink px-4 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
+                >
+                    Switch to {arcChainLabel(targetChainId)}
+                </button>
+            ) : null}
+        </div>
+    );
+}
+
+/** One-tap reconnect to wallets used earlier in this tab (sessionStorage only). */
+function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string; address: string } }) {
+    const toast = useToast();
+    const pending = useStore((s) => isConnectingPhase(s.connectPhase));
+    const [busy, setBusy] = useState(false);
+    const connectors = useConnectors();
+    const { connectAsync } = useConnect();
+    const dispatchConnectEvent = useStore((s) => s.dispatchConnectEvent);
+    const recordRecentWallet = useStore((s) => s.recordRecentWallet);
+    const setConnectModalOpen = useStore((s) => s.setConnectModalOpen);
+    const targetChainId = arcTargetChainId();
+
+    const connector = connectors.find((c) => c.id === entry.connectorId);
+
+    const handleReconnect = useCallback(async () => {
+        if (!connector || busy || pending) return;
+        setBusy(true);
+        dispatchConnectEvent({ type: 'START_RECONNECT' });
+        try {
+            await connectAsync({ connector, chainId: targetChainId });
+            dispatchConnectEvent({ type: 'CONNECT_SUCCESS' });
+            recordRecentWallet({ connectorId: connector.id, name: connector.name, address: entry.address });
+            saveRecentWallets(useStore.getState().recentWallets);
+            setConnectModalOpen(false);
+        } catch (err) {
+            const kind = classifyConnectError(err);
+            dispatchConnectEvent({ type: 'RECONNECT_FAILURE', error: kind, message: safeConnectErrorMessage(err) });
+            toast.error(connectCopyForError(kind)?.title ?? 'Could not reconnect.');
+        } finally {
+            setBusy(false);
+        }
+    }, [connector, busy, pending, dispatchConnectEvent, connectAsync, targetChainId, recordRecentWallet, setConnectModalOpen, entry.address, toast]);
+
+    if (!connector) return null; // provider uninstalled since last use
+
+    return (
+        <OptionRow
+            icon={ClockCounterClockwise}
+            title={`${entry.name || 'Wallet'} — reconnect`}
+            description={<span className="font-jet">{truncateAddress(entry.address)}</span>}
+            busy={busy}
+            disabled={pending && !busy}
+            onClick={() => void handleReconnect()}
         />
     );
 }
@@ -55,8 +184,15 @@ export const WalletConnectModal: React.FC = () => {
     const setOpen = useStore(state => state.setConnectModalOpen);
     const privyEnabled = usePrivyEnabled();
     const { setOpen: openConnectKit } = useModal();
+    const connectPhase = useStore((s) => s.connectPhase);
+    const recentWallets = useStore((s) => s.recentWallets);
+    const dispatchConnectEvent = useStore((s) => s.dispatchConnectEvent);
+
+    const pending = isConnectingPhase(connectPhase);
 
     const handleArcConnect = () => {
+        if (pending) return; // never stack provider prompts on double-click
+        dispatchConnectEvent({ type: 'START_CONNECT' });
         openConnectKit(true);
         setOpen(false);
     };
@@ -99,16 +235,32 @@ export const WalletConnectModal: React.FC = () => {
                     </div>
 
                     <div className="mt-7 space-y-3">
+                        {recentWallets.length > 0 ? (
+                            <>
+                                {recentWallets.map((entry) => (
+                                    <RecentWalletRow key={`${entry.connectorId}:${entry.address.toLowerCase()}`} entry={entry} />
+                                ))}
+                                <div className="mx-auto my-1 h-px w-16 bg-line" aria-hidden="true" />
+                            </>
+                        ) : null}
                         <OptionRow
                             icon={Wallet}
                             title="Browser wallet"
                             description="MetaMask, WalletConnect and others."
+                            busy={pending}
+                            disabled={pending}
                             onClick={handleArcConnect}
                         />
                         {privyEnabled ? (
-                            <PrivySocialLoginButton onConnected={() => setOpen(false)} />
+                            <PrivySocialLoginButton onConnected={() => setOpen(false)} disabled={pending} />
                         ) : null}
                     </div>
+
+                    <ErrorPanel />
+
+                    <p className="mt-5 text-[12px] leading-relaxed text-faint">
+                        We never store your wallet address beyond this browser tab.
+                    </p>
                 </motion.div>
             </div>
         </AnimatePresence>

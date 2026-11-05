@@ -64,7 +64,10 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     // catalog via `column_type`, never from the client.
     clauses.push(format!(
         "wallet_address = {}",
-        binds.push(bind_type("wallet_address").await?, Value::String(q.address.clone()))
+        binds.push(
+            bind_type("wallet_address").await?,
+            Value::String(q.address.clone())
+        )
     ));
     if let Some(asset) = &q.asset {
         clauses.push(format!(
@@ -75,16 +78,16 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     if let Some(outcome) = &q.outcome {
         clauses.push(format!(
             "won = {}",
-            binds.push(
-                bind_type("won").await?,
-                Value::Bool(outcome == "won"),
-            )
+            binds.push(bind_type("won").await?, Value::Bool(outcome == "won"),)
         ));
     }
     if let Some(direction) = &q.direction {
         clauses.push(format!(
             "direction = {}",
-            binds.push(bind_type("direction").await?, Value::String(direction.clone()))
+            binds.push(
+                bind_type("direction").await?,
+                Value::String(direction.clone())
+            )
         ));
     }
     if let Some(from) = &q.from {
@@ -105,10 +108,10 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     let filter_binds = binds.len();
     let where_sql = format!("WHERE {}", clauses.join(" AND "));
 
-    let count_sql = format!("SELECT COUNT(*)::bigint AS count FROM bet_history {where_sql}");
+    let count_sql = format!("SELECT COUNT(*) AS count FROM bet_history {where_sql}");
     let mut rows_sql = format!(
         "SELECT {BET_COLUMNS} FROM bet_history {where_sql} \
-         ORDER BY resolved_at DESC, created_at DESC"
+         ORDER BY resolved_at DESC NULLS FIRST, created_at DESC"
     );
     if q.paged {
         let limit_ph = binds.push_static("bigint", Value::String(q.limit.to_string()));
@@ -122,12 +125,16 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     let count_row = sql::fetch_one(&count_sql, &binds.refs_upto(filter_binds))
         .await
         .map_err(query_failure)?;
-    let count_value = count_row.and_then(|row| row.get("count").cloned()).unwrap_or(Value::Null);
-    let rows = sql::fetch(&rows_sql, &binds.refs()).await.map_err(query_failure)?;
+    let count_value = count_row
+        .and_then(|row| row.get("count").cloned())
+        .unwrap_or(Value::Null);
+    let rows = sql::fetch(&rows_sql, &binds.refs())
+        .await
+        .map_err(query_failure)?;
 
     let bets: Vec<Value> = rows.iter().map(decorate_history_row).collect();
     // `typeof count === 'number' ? count : bets.length`
-    let total = count_value.as_i64().unwrap_or_else(|| bets.len() as i64);
+    let total = count_value.as_i64().unwrap_or(bets.len() as i64);
     let has_more = if q.paged {
         q.offset + (bets.len() as i64) < total
     } else {
@@ -139,7 +146,10 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     body.insert("count".into(), Value::from(total));
     body.insert("total".into(), Value::from(total));
     body.insert("limit".into(), Value::from(q.limit));
-    body.insert("offset".into(), Value::from(if q.paged { q.offset } else { 0 }));
+    body.insert(
+        "offset".into(),
+        Value::from(if q.paged { q.offset } else { 0 }),
+    );
     body.insert("hasMore".into(), Value::Bool(has_more));
 
     let mut filters = Map::new();
@@ -160,7 +170,9 @@ fn optional(value: &Option<String>) -> Value {
 /// A catalog lookup is part of the read for the browser's sake: the TS route
 /// had no schema step, so a miss can only surface as its query failure.
 async fn bind_type(column: &str) -> Result<String, ApiError> {
-    column_type("bet_history", column).await.map_err(query_failure)
+    column_type("bet_history", column)
+        .await
+        .map_err(query_failure)
 }
 
 fn query_failure(err: ApiError) -> ApiError {
@@ -172,7 +184,8 @@ fn query_failure(err: ApiError) -> ApiError {
 fn error_json(status: u16, message: &str) -> Response {
     let body = Map::from_iter([("error".to_string(), Value::String(message.to_string()))]);
     json_status(
-        axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        axum::http::StatusCode::from_u16(status)
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
         Value::Object(body),
     )
 }

@@ -30,7 +30,10 @@ pub fn arc_asset(value: Option<&str>) -> Option<&'static str> {
 }
 
 fn str_var(key: &str) -> Option<String> {
-    env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn parse_num<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -39,9 +42,32 @@ fn parse_num<T: std::str::FromStr>(key: &str) -> Option<T> {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub database_url: Option<String>,
-    pub pool_max: u32,
+    /// Path of the SQLite file. `DATABASE_URL` is deliberately not read.
+    pub sqlite_path: Option<String>,
+    pub read_pool: usize,
     pub statement_timeout_ms: u64,
+    /// `SQLITE_FULLFSYNC`, on unless set to `OFF`. Forces the drive cache on
+    /// macOS and does nothing on Linux.
+    pub sqlite_fullfsync: bool,
+    /// Tick history. Never the ledger file; unset keeps ticks in memory only.
+    pub ticks_sqlite_path: Option<String>,
+    pub tick_flush_secs: u64,
+    pub tick_retention_days: u64,
+    /// Ticks kept in memory per asset.
+    pub tick_ring_secs: usize,
+    /// An accepted withdrawal with no hash after this long needs an operator.
+    pub withdrawal_stuck_secs: i64,
+    /// Upstream quote URLs. Overridable so a test decides what the market did.
+    pub binance_endpoint: String,
+    pub yahoo_spark_endpoint: String,
+    /// How long between samples of every tradable asset.
+    pub price_sample_ms: u64,
+    /// The newest crypto tick a bet may take its strike from.
+    pub bet_tick_max_age_ms: i64,
+    /// How far a client's strike may sit from the server's, in basis points.
+    pub bet_price_tolerance_bps: f64,
+    /// How far before `end_time` a crypto tick may be and still settle a round.
+    pub settle_tick_tolerance_ms: i64,
     pub balance_internal_secret: Option<String>,
     pub balance_settlement_secret: Option<String>,
     pub dashboard_password: Option<String>,
@@ -65,12 +91,10 @@ impl Config {
     /// Reads the environment with the same defaults the TS service used.
     ///
     /// Nothing here panics: a missing secret disables the feature it guards
-    /// (exactly like the `process.env` reads did) and a missing `DATABASE_URL`
+    /// (exactly like the `process.env` reads did) and a missing `SQLITE_PATH`
     /// fails at the first query instead, so pure functions stay testable
     /// without a fully populated environment.
     pub fn from_env() -> Self {
-        let database_url = str_var("DATABASE_URL");
-
         let node_env = str_var("NODE_ENV").unwrap_or_default();
         let production = node_env == "production" || str_var("VERCEL_ENV").is_some();
 
@@ -82,9 +106,25 @@ impl Config {
             .unwrap_or_default();
 
         Self {
-            database_url,
-            pool_max: parse_num("PGPOOL_MAX").unwrap_or(5),
-            statement_timeout_ms: parse_num("PGSTATEMENT_TIMEOUT_MS").unwrap_or(8_000),
+            sqlite_path: str_var("SQLITE_PATH"),
+            read_pool: parse_num("SQLITE_READ_POOL").unwrap_or(8),
+            statement_timeout_ms: parse_num("SQLITE_STATEMENT_TIMEOUT_MS").unwrap_or(8_000),
+            sqlite_fullfsync: !str_var("SQLITE_FULLFSYNC")
+                .is_some_and(|v| v.eq_ignore_ascii_case("off")),
+            ticks_sqlite_path: str_var("TICKS_SQLITE_PATH"),
+            tick_flush_secs: parse_num("TICK_FLUSH_SECS").unwrap_or(120),
+            tick_retention_days: parse_num("TICK_RETENTION_DAYS").unwrap_or(3),
+            tick_ring_secs: parse_num("TICK_RING_SECS").unwrap_or(900),
+            // Two transfers can each wait 180 s for confirmations.
+            withdrawal_stuck_secs: parse_num("WITHDRAWAL_STUCK_SECS").unwrap_or(600),
+            binance_endpoint: str_var("BINANCE_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::BINANCE_ENDPOINT.to_string()),
+            yahoo_spark_endpoint: str_var("YAHOO_SPARK_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::SPARK_ENDPOINT.to_string()),
+            price_sample_ms: parse_num("PRICE_SAMPLE_MS").unwrap_or(1_000),
+            bet_tick_max_age_ms: parse_num("BET_TICK_MAX_AGE_MS").unwrap_or(3_000),
+            bet_price_tolerance_bps: parse_num("BET_PRICE_TOLERANCE_BPS").unwrap_or(50.0),
+            settle_tick_tolerance_ms: parse_num("SETTLE_TICK_TOLERANCE_MS").unwrap_or(5_000),
             balance_internal_secret: str_var("BALANCE_INTERNAL_SECRET"),
             balance_settlement_secret: str_var("BALANCE_SETTLEMENT_SECRET"),
             dashboard_password: str_var("DASHBOARD_PASSWORD"),

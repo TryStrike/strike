@@ -17,7 +17,10 @@ pub fn keccak256(input: &[u8]) -> [u8; 32] {
 
 /// True for a 0x-prefixed 40-hex-character address.
 pub fn is_address_shape(value: &str) -> bool {
-    let Some(hex_part) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) else {
+    let Some(hex_part) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
         return false;
     };
     hex_part.len() == 40 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
@@ -42,10 +45,18 @@ pub fn is_address(value: &str) -> bool {
     if body.len() != 40 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
         return false;
     }
-    let has_upper_letter = body.chars().any(|c| c.is_ascii_alphabetic() && c.is_ascii_uppercase());
-    let has_lower_letter = body.chars().any(|c| c.is_ascii_alphabetic() && c.is_ascii_lowercase());
+    let has_upper_letter = body
+        .chars()
+        .any(|c| c.is_ascii_alphabetic() && c.is_ascii_uppercase());
+    let has_lower_letter = body
+        .chars()
+        .any(|c| c.is_ascii_alphabetic() && c.is_ascii_lowercase());
     if has_upper_letter && has_lower_letter {
-        let prefixed = if value.starts_with("0x") { value.to_string() } else { format!("0x{body}") };
+        let prefixed = if value.starts_with("0x") {
+            value.to_string()
+        } else {
+            format!("0x{body}")
+        };
         return to_checksum(&prefixed) == prefixed;
     }
     true
@@ -68,7 +79,10 @@ pub fn canonical(value: &str) -> String {
 /// EIP-55 checksummed form, for display and for RPC calls.
 pub fn to_checksum(value: &str) -> String {
     let trimmed = value.trim();
-    let body = match trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    let body = match trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         Some(b) if b.len() == 40 && b.chars().all(|c| c.is_ascii_hexdigit()) => b.to_lowercase(),
         _ => return trimmed.to_string(),
     };
@@ -80,7 +94,11 @@ pub fn to_checksum(value: &str) -> String {
     for (i, c) in body.chars().enumerate() {
         if c.is_ascii_alphabetic() {
             let nibble = u8::from_str_radix(&hash_hex[i..i + 1], 16).unwrap_or(0);
-            out.push(if nibble >= 8 { c.to_ascii_uppercase() } else { c });
+            out.push(if nibble >= 8 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            });
         } else {
             out.push(c);
         }
@@ -118,7 +136,11 @@ pub fn shorten(value: &str, prefix: usize, suffix: usize) -> String {
     if trimmed.len() <= prefix + suffix {
         return trimmed.to_string();
     }
-    format!("{}…{}", &trimmed[..prefix], &trimmed[trimmed.len() - suffix..])
+    format!(
+        "{}…{}",
+        &trimmed[..prefix],
+        &trimmed[trimmed.len() - suffix..]
+    )
 }
 
 #[cfg(test)]
@@ -146,7 +168,9 @@ mod tests {
     fn canonical_lowercases_and_trims() {
         assert_eq!(canonical(" 0xAbC123 "), "0xabc123");
         assert_eq!(canonical(""), "");
-        assert!(is_address_shape("0x1111111111111111111111111111111111111111"));
+        assert!(is_address_shape(
+            "0x1111111111111111111111111111111111111111"
+        ));
         assert!(!is_address_shape("0x123"));
         assert!(!is_address_shape("vitalik.eth"));
     }
@@ -159,7 +183,10 @@ mod tests {
             vec![mixed.to_string(), mixed.to_lowercase()]
         );
         // Already canonical: one spelling, not two identical rows in an IN list.
-        assert_eq!(search_variants(&mixed.to_lowercase()), vec![mixed.to_lowercase()]);
+        assert_eq!(
+            search_variants(&mixed.to_lowercase()),
+            vec![mixed.to_lowercase()]
+        );
         assert_eq!(search_variants("  "), Vec::<String>::new());
         // Non-EVM identifier of the length some code paths lowercased.
         let external = "APrivyStyleExternalIdWithALongBody";
@@ -179,9 +206,18 @@ mod tests {
         let lower = "0xd1220a0cf47c7b9be7a2e6ba89f429762b72db5b";
         let mixed = "0xd1220A0Cf47c7B9be7A2E6Ba89F429762B72dB5B";
         assert!(is_address(lower), "lowercase must be accepted");
-        assert!(is_address(&lower[2..]), "missing 0x prefix is still an address");
-        assert!(is_address(mixed), "a correct mixed-case checksum must be accepted");
-        assert!(!is_address("0xd1220A0Cf47c7B9be7A2E6Ba89F429762B72dB5a"), "bad checksum must be rejected");
+        assert!(
+            is_address(&lower[2..]),
+            "missing 0x prefix is still an address"
+        );
+        assert!(
+            is_address(mixed),
+            "a correct mixed-case checksum must be accepted"
+        );
+        assert!(
+            !is_address("0xd1220A0Cf47c7B9be7A2E6Ba89F429762B72dB5a"),
+            "bad checksum must be rejected"
+        );
         // `0X` prefix: rejected by the shape regex.
         assert!(!is_address(&lower.replace("0x", "0X")));
         assert!(!is_address("0x123"));
@@ -194,7 +230,8 @@ mod tests {
     }
 
     #[test]
-    fn shorten_keeps_ends() {        let addr = "0x1234567890123456789012345678901234567890";
+    fn shorten_keeps_ends() {
+        let addr = "0x1234567890123456789012345678901234567890";
         assert_eq!(shorten(addr, 6, 4), "0x1234…7890");
         assert_eq!(shorten("0x12", 6, 4), "0x12");
     }

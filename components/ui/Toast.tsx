@@ -1,9 +1,14 @@
 'use client';
 
-import React, { useEffect } from 'react';
-import { X } from '@phosphor-icons/react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { X, ArrowCounterClockwise } from '@phosphor-icons/react';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
+
+export interface ToastActionView {
+  label: string;
+  onClick: () => void;
+}
 
 interface ToastProps {
   message: string;
@@ -11,6 +16,10 @@ interface ToastProps {
   onClose: () => void;
   duration?: number;
   links?: Array<{ label: string; href: string }>;
+  /** Optional single action button (e.g. "Undo"). */
+  action?: ToastActionView;
+  /** Error variant shorthand: renders a Retry button wired to this callback. */
+  onRetry?: () => void;
 }
 
 const DOT: Record<ToastType, string> = {
@@ -20,24 +29,89 @@ const DOT: Record<ToastType, string> = {
   info: 'bg-faint',
 };
 
+export const DEFAULT_TOAST_DURATION_MS = 5000;
+
+interface DismissTimer {
+  remaining: number;
+  startedAt: number;
+  handle: ReturnType<typeof setTimeout> | null;
+}
+
+/**
+ * A single toast. Auto-dismiss pauses while the pointer or keyboard focus is
+ * inside the toast and resumes on leave, tracking elapsed time so a paused
+ * toast never dismisses early. duration <= 0 pins it open.
+ */
 const Toast: React.FC<ToastProps> = ({
   message,
   type,
   onClose,
-  duration = 5000,
-  links
+  duration = DEFAULT_TOAST_DURATION_MS,
+  links,
+  action,
+  onRetry
 }) => {
+  // Keep onClose in a ref: the container passes an inline closure, so putting
+  // it in the deps below would restart the dismissal timer on every parent
+  // rerender — toasts could then live forever.
+  const onCloseRef = useRef(onClose);
   useEffect(() => {
-    if (duration > 0) {
-      const timer = setTimeout(onClose, duration);
-      return () => clearTimeout(timer);
+    onCloseRef.current = onClose;
+  });
+
+  const timerRef = useRef<DismissTimer>({ remaining: duration, startedAt: 0, handle: null });
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current.handle !== null) {
+      clearTimeout(timerRef.current.handle);
+      timerRef.current.handle = null;
     }
-  }, [duration, onClose]);
+  }, []);
+
+  const startTimer = useCallback(() => {
+    if (duration <= 0 || timerRef.current.handle !== null || timerRef.current.remaining <= 0) return;
+    timerRef.current.startedAt = Date.now();
+    timerRef.current.handle = setTimeout(() => {
+      timerRef.current.handle = null;
+      onCloseRef.current();
+    }, timerRef.current.remaining);
+  }, [duration]);
+
+  const pauseTimer = useCallback(() => {
+    if (timerRef.current.handle === null) return;
+    clearTimeout(timerRef.current.handle);
+    timerRef.current.handle = null;
+    timerRef.current.remaining = Math.max(0, timerRef.current.remaining - (Date.now() - timerRef.current.startedAt));
+  }, []);
+
+  useEffect(() => {
+    timerRef.current.remaining = duration;
+    startTimer();
+    return clearTimer;
+    // Only restart when the configured duration changes.
+  }, [duration, startTimer, clearTimer]);
+
+  // Hover / focus pause handlers on the toast root.
+  const interactiveProps = duration > 0
+    ? {
+        onMouseEnter: pauseTimer,
+        onMouseLeave: startTimer,
+        onFocus: pauseTimer,
+        onBlur: (e: React.FocusEvent<HTMLDivElement>) => {
+          // Resume only when focus left the toast entirely.
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) startTimer();
+        }
+      }
+    : {};
+
+  const retryLabel = action ? action.label : onRetry ? 'Retry' : null;
+  const retryClick = action ? action.onClick : onRetry;
 
   return (
     <div
-      role={type === 'error' ? 'alert' : 'status'}
+      role={type === 'error' || type === 'warning' ? 'alert' : 'status'}
       className="flex items-start gap-3 rounded-2xl bg-white px-4 py-3 font-tight text-ink ring-1 ring-line shadow-[0_20px_40px_-24px_rgba(10,12,16,0.3)] animate-slide-in"
+      {...interactiveProps}
     >
       <span className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full ${DOT[type]}`} aria-hidden="true" />
       <div className="min-w-0 flex-1">
@@ -57,6 +131,20 @@ const Toast: React.FC<ToastProps> = ({
             ))}
           </div>
         )}
+        {retryLabel && retryClick && (
+          <button
+            type="button"
+            onClick={retryClick}
+            className={`mt-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition-colors ${
+              type === 'error'
+                ? 'bg-down-soft text-down hover:brightness-95'
+                : 'bg-up-soft text-up hover:brightness-95'
+            }`}
+          >
+            {type === 'error' && <ArrowCounterClockwise size={12} weight="bold" aria-hidden="true" />}
+            {retryLabel}
+          </button>
+        )}
       </div>
       <button
         type="button"
@@ -72,22 +160,77 @@ const Toast: React.FC<ToastProps> = ({
 
 // Toast Container Component
 interface ToastContainerProps {
-  toasts: Array<{ id: string; message: string; type: ToastType; links?: Array<{ label: string; href: string }> }>;
+  toasts: Array<{
+    id: string;
+    message: string;
+    type: ToastType;
+    links?: Array<{ label: string; href: string }>;
+    action?: ToastActionView;
+    duration?: number;
+  }>;
   onRemove: (id: string) => void;
+  /** Max toasts rendered before older ones collapse. */
+  maxVisible?: number;
 }
 
-export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onRemove }) => {
+export const DEFAULT_MAX_VISIBLE = 3;
+
+/**
+ * Fixed stack in the top-right. Bounded: the newest `maxVisible` toasts are
+ * rendered; anything older collapses into a "+N earlier" chip that expands
+ * back on click (never silently swallowing notifications).
+ * The container is a plain labelled region — each toast carries its own
+ * severity role (alert for error/warning, status for success/info), which
+ * makes every toast its own live region at the right politeness level and
+ * avoids double announcements from a nested polite region.
+ */
+export const ToastContainer: React.FC<ToastContainerProps> = ({
+  toasts,
+  onRemove,
+  maxVisible = DEFAULT_MAX_VISIBLE
+}) => {
+  const [expanded, setExpanded] = useState(false);
+
+  // Collapse again automatically once the backlog shrinks below the cap.
+  useEffect(() => {
+    if (toasts.length <= maxVisible) setExpanded(false);
+  }, [toasts.length, maxVisible]);
+
+  const collapsedCount = Math.max(0, toasts.length - maxVisible);
+  const visible = expanded || collapsedCount === 0
+    ? toasts
+    : toasts.slice(toasts.length - maxVisible);
+
   return (
-    <div className="fixed top-4 right-4 z-[200] w-[min(360px,calc(100vw-2rem))] space-y-2">
-      {toasts.map((toast) => (
-        <Toast
-          key={toast.id}
-          message={toast.message}
-          type={toast.type}
-          links={toast.links}
-          onClose={() => onRemove(toast.id)}
-        />
+    <div
+      role="region"
+      aria-label="Notifications"
+      className="pointer-events-none fixed right-4 top-4 z-[200] w-[min(360px,calc(100vw-2rem))] space-y-2"
+    >
+      {collapsedCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="pointer-events-auto ml-auto block rounded-full bg-ink/70 px-3 py-1 font-jet text-[11px] font-medium text-white backdrop-blur-xl transition-colors hover:bg-ink"
+        >
+          {expanded ? 'Collapse' : `+${collapsedCount} earlier`}
+        </button>
+      )}
+      {visible.map((toast) => (
+        <div key={toast.id} className="pointer-events-auto">
+          <Toast
+            message={toast.message}
+            type={toast.type}
+            links={toast.links}
+            action={toast.action}
+            duration={toast.duration}
+            onClose={() => onRemove(toast.id)}
+          />
+        </div>
       ))}
     </div>
   );
 };
+
+export default Toast;

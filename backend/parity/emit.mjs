@@ -2,12 +2,12 @@
 /**
  * Token parity harness.
  *
- * The functions below are transcriptions of the production TypeScript in
- * lib/balance/balanceSession.ts, lib/balance/settlementToken.ts and
- * lib/admin/adminToken.ts. They are kept here instead of imported because the
- * service is TypeScript and this harness must run without a build step.
+ * The functions below are a frozen copy of the TypeScript algorithms the tokens
+ * were first defined by. That code is gone and Rust is the only implementation,
+ * so this file is the independent one it is tested against: edit it only for a
+ * deliberate change to the token format, and then in both places.
  *
- *   node backend/parity/emit.mjs                -> writes vectors.json  (TS-minted)
+ *   node backend/parity/emit.mjs                -> writes vectors.json  (JS-minted)
  *   node backend/parity/emit.mjs --verify FILE  -> verifies Rust-minted tokens
  */
 import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
@@ -42,7 +42,7 @@ function sign(input, secret) {
   return createHmac('sha256', secret).update(input).digest('base64url');
 }
 
-// --- minters (verbatim from the TS) -----------------------------------------
+// --- minters ----------------------------------------------------------------
 
 function mintBalanceSession(secret, ttlSeconds = TTL_SECONDS) {
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
@@ -171,7 +171,7 @@ if (process.argv[2] === '--verify') {
     console.error(`${failed} Rust->TS parity check(s) failed`);
     process.exit(1);
   }
-  console.log('Rust-minted tokens verify under the TypeScript implementation.');
+  console.log('Rust-minted tokens verify under the frozen JS implementation.');
   process.exit(0);
 }
 

@@ -7,9 +7,11 @@
 //! across instances - it exists to blunt brute force, not to be a durable ban.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 
 use axum::body::Bytes;
+use axum::extract::ConnectInfo;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -22,7 +24,7 @@ use strike_core::crypto::{dashboard_password_matches, issue_admin_token, ADMIN_C
 use strike_core::error::ApiResult;
 
 use crate::http::{
-    client_ip, cleared_cookie, json_status, json_with_cookie, ok_false_error, too_many, Cookie,
+    cleared_cookie, client_ip, json_status, json_with_cookie, ok_false_error, too_many, Cookie,
 };
 
 const MAX_FAILURES_BEFORE_LOCK: u32 = 5;
@@ -44,7 +46,10 @@ pub struct AttemptState {
 }
 
 impl AttemptState {
-    const NEW: Self = Self { failures: 0, locked_until_ms: 0 };
+    const NEW: Self = Self {
+        failures: 0,
+        locked_until_ms: 0,
+    };
 
     /// Whole seconds until the lock expires, rounded up; 0 when not locked.
     pub fn retry_after_seconds(&self, now_ms: i64) -> i64 {
@@ -61,11 +66,17 @@ impl AttemptState {
     pub fn with_failure(&self, now_ms: i64) -> Self {
         let failures = self.failures + 1;
         if failures < MAX_FAILURES_BEFORE_LOCK {
-            return Self { failures, locked_until_ms: self.locked_until_ms };
+            return Self {
+                failures,
+                locked_until_ms: self.locked_until_ms,
+            };
         }
         let exponent = (failures - MAX_FAILURES_BEFORE_LOCK).min(10);
         let penalty = (BASE_LOCK_MS * (1_i64 << exponent)).min(MAX_LOCK_MS);
-        Self { failures, locked_until_ms: now_ms + penalty }
+        Self {
+            failures,
+            locked_until_ms: now_ms + penalty,
+        }
     }
 }
 
@@ -99,8 +110,9 @@ impl AttemptTable {
         if self.entries.len() < MAX_TRACKED_IPS {
             return;
         }
-        self.entries
-            .retain(|_, (state, _)| state.locked_until_ms > now_ms || state.failures >= MAX_FAILURES_BEFORE_LOCK);
+        self.entries.retain(|_, (state, _)| {
+            state.locked_until_ms > now_ms || state.failures >= MAX_FAILURES_BEFORE_LOCK
+        });
         if self.entries.len() < MAX_TRACKED_IPS {
             return;
         }
@@ -122,20 +134,28 @@ fn attempts() -> &'static Mutex<AttemptTable> {
 }
 
 /// `POST /api/admin/auth`
-async fn auth(headers: HeaderMap, raw: Bytes) -> Response {
-    match authenticate(&headers, &raw).await {
+async fn auth(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    raw: Bytes,
+) -> Response {
+    match authenticate(&client_ip(&headers, peer.ip()), &raw).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
     }
 }
 
-async fn authenticate(headers: &HeaderMap, raw: &Bytes) -> ApiResult<Response> {
-    let ip = client_ip(headers);
+async fn authenticate(ip: &str, raw: &Bytes) -> ApiResult<Response> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let locked = attempts()
         .lock()
-        .map(|table| table.state(&ip).map(|s| s.retry_after_seconds(now_ms)).unwrap_or(0))
+        .map(|table| {
+            table
+                .state(ip)
+                .map(|s| s.retry_after_seconds(now_ms))
+                .unwrap_or(0)
+        })
         .unwrap_or(0);
     if locked > 0 {
         return Ok(too_many(LOCKED_MESSAGE, locked));
@@ -146,7 +166,10 @@ async fn authenticate(headers: &HeaderMap, raw: &Bytes) -> ApiResult<Response> {
     let body: Value = match serde_json::from_slice(raw) {
         Ok(value @ Value::Object(_)) => value,
         Ok(Value::Null) | Err(_) => {
-            return Ok(json_status(StatusCode::BAD_REQUEST, ok_false_error("Bad request")))
+            return Ok(json_status(
+                StatusCode::BAD_REQUEST,
+                ok_false_error("Bad request"),
+            ))
         }
         Ok(other) => other,
     };
@@ -160,24 +183,30 @@ async fn authenticate(headers: &HeaderMap, raw: &Bytes) -> ApiResult<Response> {
     };
 
     let Some(candidate) = password.filter(|p| !p.is_empty()) else {
-        return Ok(json_status(StatusCode::UNAUTHORIZED, ok_false_error_empty()));
+        return Ok(json_status(
+            StatusCode::UNAUTHORIZED,
+            ok_false_error_empty(),
+        ));
     };
 
     if !dashboard_password_matches(&stored, candidate) {
         let state = attempts()
             .lock()
-            .map(|mut table| table.note_failure(&ip, chrono::Utc::now().timestamp_millis()))
+            .map(|mut table| table.note_failure(ip, chrono::Utc::now().timestamp_millis()))
             .unwrap_or(AttemptState::NEW);
         let retry_after = state.retry_after_seconds(chrono::Utc::now().timestamp_millis());
         if retry_after > 0 {
             return Ok(too_many(LOCKED_MESSAGE, retry_after));
         }
-        return Ok(json_status(StatusCode::UNAUTHORIZED, ok_false_error_empty()));
+        return Ok(json_status(
+            StatusCode::UNAUTHORIZED,
+            ok_false_error_empty(),
+        ));
     }
 
     // Success clears this IP's history.
     if let Ok(mut table) = attempts().lock() {
-        table.clear(&ip);
+        table.clear(ip);
     }
 
     let ttl_seconds = (config().admin_session_hours * 3600.0) as i64;
@@ -188,7 +217,13 @@ async fn authenticate(headers: &HeaderMap, raw: &Bytes) -> ApiResult<Response> {
             "ok".to_string(),
             Value::Bool(true),
         )])),
-        Cookie { name: ADMIN_COOKIE_NAME, value: token, max_age: ttl_seconds, same_site: "strict", http_only: true },
+        Cookie {
+            name: ADMIN_COOKIE_NAME,
+            value: token,
+            max_age: ttl_seconds,
+            same_site: "strict",
+            http_only: true,
+        },
     ))
 }
 
@@ -223,7 +258,11 @@ mod tests {
         for attempt in 1..MAX_FAILURES_BEFORE_LOCK {
             state = state.with_failure(now);
             assert_eq!(state.failures, attempt);
-            assert_eq!(state.retry_after_seconds(now), 0, "locked too early at {attempt}");
+            assert_eq!(
+                state.retry_after_seconds(now),
+                0,
+                "locked too early at {attempt}"
+            );
         }
     }
 
@@ -256,7 +295,10 @@ mod tests {
 
     #[test]
     fn retry_after_rounds_up_and_ignores_expired_locks() {
-        let state = AttemptState { failures: 5, locked_until_ms: 10_000 };
+        let state = AttemptState {
+            failures: 5,
+            locked_until_ms: 10_000,
+        };
         assert_eq!(state.retry_after_seconds(9_501), 1);
         assert_eq!(state.retry_after_seconds(10_000), 0);
         assert_eq!(state.retry_after_seconds(11_000), 0);
@@ -280,7 +322,16 @@ mod tests {
         let now = 1_000_000_000_000;
         // Fill to the cap with unlocked rows whose lock is already past.
         for i in 0..MAX_TRACKED_IPS {
-            table.entries.insert(format!("ip-{i}"), (AttemptState { failures: 1, locked_until_ms: now - 1 }, i as u64));
+            table.entries.insert(
+                format!("ip-{i}"),
+                (
+                    AttemptState {
+                        failures: 1,
+                        locked_until_ms: now - 1,
+                    },
+                    i as u64,
+                ),
+            );
             table.sequence = i as u64;
         }
         table.note_failure("newcomer", now);

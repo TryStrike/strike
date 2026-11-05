@@ -80,13 +80,30 @@ step('balance');
 r = await api(`/api/balance/${player.address}`);
 console.log(' ', JSON.stringify(r.json));
 
-step('place a 0.1 USDC bet from the house balance (no wallet signature)');
+step('place a 0.1 USDC 5s classic bet; the server freezes strike and end time');
+const ticker = await (await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')).json();
+const strike = Number(ticker.price);
 r = await api('/api/balance/bet', {
   userAddress: player.address, betAmount: 0.1, currency: 'USDC', roundId: Date.now(),
-  targetPrice: 0, isOver: true, multiplier: 1.9, targetCell: { id: 1, priceChange: 0 },
+  targetPrice: strike, strikePrice: strike, asset: 'BTC', mode: 'binomo', isOver: true, multiplier: 1.75,
+  targetCell: { id: 1, priceChange: 0, direction: 'UP', timeframe: 5 },
 });
-console.log(' ', r.status, JSON.stringify(r.json).slice(0, 200));
+console.log(' ', r.status, JSON.stringify(r.json).slice(0, 300));
 assert.equal(r.status, 200, 'bet rejected');
+const { betId, settlementToken, endTime } = r.json;
+assert.ok(betId && settlementToken, 'bet response missing settlement fields');
+
+step('a win claim before the round ends is refused');
+r = await api('/api/balance/win', { userAddress: player.address, winAmount: 999, currency: 'USDC', betId, settlementToken });
+console.log(' ', r.status, JSON.stringify(r.json));
+assert.equal(r.status, 409, 'early claim was not refused');
+
+step('wait for the round; the server decides the result');
+await new Promise((done) => setTimeout(done, Math.max(0, Number(new Date(endTime)) - Date.now()) + 3000));
+r = await api('/api/balance/win', { userAddress: player.address, winAmount: 999, currency: 'USDC', betId, settlementToken });
+console.log(' ', r.status, JSON.stringify(r.json));
+assert.equal(r.status, 200, 'settlement failed');
+assert.ok(Number(r.json.payout ?? 0) <= 0.175, 'payout exceeded the frozen terms');
 
 step('signed withdrawal request for 0.5 USDC');
 const amount = 0.5;

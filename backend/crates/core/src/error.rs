@@ -15,7 +15,7 @@ pub enum ApiError {
         extra: Option<Map<String, Value>>,
     },
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] rusqlite::Error),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error(transparent)]
@@ -27,7 +27,11 @@ pub enum ApiError {
 impl ApiError {
     /// `{"error": message, ...extra}` with the given status.
     pub fn json(status: StatusCode, message: impl Into<String>) -> Self {
-        Self::Json { status, message: message.into(), extra: None }
+        Self::Json {
+            status,
+            message: message.into(),
+            extra: None,
+        }
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -69,25 +73,45 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message, extra) = match self {
-            // sqlx::Error can carry connection strings / query text; never
-            // forward it to a browser.
+            // rusqlite::Error can carry query text; never forward it to a
+            // browser.
             ApiError::Db(err) => {
                 tracing::error!("database error: {err}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error".to_string(),
+                    None,
+                )
             }
             ApiError::Http(err) => {
                 tracing::error!("upstream error: {err}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error".to_string(),
+                    None,
+                )
             }
             ApiError::Serde(err) => {
                 tracing::error!("serialization error: {err}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error".to_string(),
+                    None,
+                )
             }
             ApiError::Other(msg) => {
                 tracing::error!("{msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error".to_string(),
+                    None,
+                )
             }
-            ApiError::Json { status, message, extra } => (status, message, extra),
+            ApiError::Json {
+                status,
+                message,
+                extra,
+            } => (status, message, extra),
         };
 
         let mut body = Map::new();

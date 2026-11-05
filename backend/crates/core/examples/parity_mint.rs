@@ -15,9 +15,15 @@ fn main() {
         .unwrap_or_else(|e| panic!("{path} not found (run node backend/parity/emit.mjs): {e}"));
     let vectors: serde_json::Value = serde_json::from_str(&raw).expect("valid vectors.json");
 
-    let internal = vectors["secrets"]["internal"].as_str().expect("secrets.internal");
-    let settlement_secret = vectors["secrets"]["settlement"].as_str().expect("secrets.settlement");
-    let dashboard = vectors["secrets"]["dashboard"].as_str().expect("secrets.dashboard");
+    let internal = vectors["secrets"]["internal"]
+        .as_str()
+        .expect("secrets.internal");
+    let settlement_secret = vectors["secrets"]["settlement"]
+        .as_str()
+        .expect("secrets.settlement");
+    let dashboard = vectors["secrets"]["dashboard"]
+        .as_str()
+        .expect("secrets.dashboard");
 
     let session = crypto::mint_balance_session_with(Some(internal)).expect("mint session");
     let settlement = crypto::create_settlement_token_with(

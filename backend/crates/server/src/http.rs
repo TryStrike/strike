@@ -3,14 +3,17 @@
 //! bodies and cookie attributes here reproduce them byte for byte, because the
 //! browser bundle is unchanged during the migration.
 
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use std::net::IpAddr;
+
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Router;
 use serde_json::{Map, Value};
+use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use strike_core::config::config;
-use strike_core::crypto::{
-    self, ADMIN_COOKIE_NAME, BALANCE_SESSION_COOKIE,
-};
+use strike_core::crypto::{self, ADMIN_COOKIE_NAME, BALANCE_SESSION_COOKIE};
 use strike_core::error::ApiError;
 
 /// The header the browser may send with the raw internal secret, which the TS
@@ -48,7 +51,10 @@ pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         let Ok(all) = raw.to_str() else { continue };
         for pair in all.split(';') {
             let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix(name).and_then(|rest| rest.strip_prefix('=')) {
+            if let Some(value) = pair
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
                 if !value.is_empty() {
                     return Some(value.to_string());
                 }
@@ -71,7 +77,13 @@ pub fn json_with_cookie(body: Value, cookie: Cookie) -> Response {
 
 /// The cookie value that clears a session cookie (Max-Age=0).
 pub fn cleared_cookie(name: &'static str, same_site: &'static str) -> Cookie {
-    Cookie { name, value: String::new(), max_age: 0, same_site, http_only: true }
+    Cookie {
+        name,
+        value: String::new(),
+        max_age: 0,
+        same_site,
+        http_only: true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,9 +109,7 @@ pub fn require_balance_session(headers: &HeaderMap) -> Result<(), ApiError> {
         return Ok(());
     }
 
-    if crypto::verify_balance_session(
-        cookie(headers, BALANCE_SESSION_COOKIE).as_deref(),
-    ) {
+    if crypto::verify_balance_session(cookie(headers, BALANCE_SESSION_COOKIE).as_deref()) {
         return Ok(());
     }
 
@@ -141,18 +151,70 @@ pub fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// `clientIp()` from the admin auth route: first hop of X-Forwarded-For, then
-/// X-Real-Ip, then the literal "unknown" the TS used.
-pub fn client_ip(headers: &HeaderMap) -> String {
-    if let Some(forwarded) = header_str(headers, "x-forwarded-for") {
-        if let Some(first) = forwarded.split(',').next() {
-            let first = first.trim();
-            if !first.is_empty() {
-                return first.to_string();
-            }
+/// The address a limit keys on. The trusted hop is the TCP peer: the service
+/// binds loopback, so a loopback peer is Next, and Next passes on what Caddy wrote.
+/// Caddy replaces any `x-forwarded-for` a client sends, so the rightmost entry is
+/// the real client, and anything further left could be the client's own text.
+/// Any other peer is the client, whatever it claims. `x-real-ip` is ignored:
+/// nothing in the chain sets it, so only a client could.
+pub fn client_ip(headers: &HeaderMap, peer: IpAddr) -> String {
+    let forwarded = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty());
+    match forwarded {
+        Some(ip) if peer.is_loopback() => ip.to_string(),
+        _ => peer.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Response headers
+// ---------------------------------------------------------------------------
+
+/// JSON and CSV only, so nothing on `/api` needs to load or frame anything.
+const API_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
+/// What every API response carries, 404s and the price stream included. These set
+/// headers only and leave the body alone. Browsers calling from `origin` get CORS;
+/// without one, only same-origin callers work, which is every page of this app.
+pub fn with_api_headers(router: Router, origin: Option<&str>) -> Router {
+    let set = |name: &'static str, value: &'static str| {
+        SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        )
+    };
+    let router = router
+        .layer(set("x-content-type-options", "nosniff"))
+        .layer(set("x-frame-options", "DENY"))
+        .layer(set("referrer-policy", "strict-origin-when-cross-origin"))
+        .layer(set("content-security-policy", API_CSP));
+    let Some(origin) = origin.map(|o| o.trim().trim_end_matches('/')) else {
+        return router;
+    };
+    match HeaderValue::from_str(origin) {
+        Ok(origin) => router.layer(
+            CorsLayer::new()
+                .allow_origin(origin)
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                ])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
+        ),
+        Err(_) => {
+            tracing::error!("NEXT_PUBLIC_APP_URL is not a valid origin; CORS stays off");
+            router
         }
     }
-    header_str(headers, "x-real-ip").unwrap_or_else(|| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +287,10 @@ mod tests {
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (k, v) in pairs {
-            map.insert(HeaderName::from_lowercase(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
+            map.insert(
+                HeaderName::from_lowercase(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
         }
         map
     }
@@ -233,7 +298,10 @@ mod tests {
     #[test]
     fn cookie_parsing_matches_the_browser_format() {
         let map = headers(&[("cookie", "a=1; strike_balance_gate=payload.sig; b=2")]);
-        assert_eq!(cookie(&map, BALANCE_SESSION_COOKIE).as_deref(), Some("payload.sig"));
+        assert_eq!(
+            cookie(&map, BALANCE_SESSION_COOKIE).as_deref(),
+            Some("payload.sig")
+        );
         assert_eq!(cookie(&map, "missing"), None);
         // A prefix collision must not match: `strike_balance_gate_x` is a
         // different cookie.
@@ -253,7 +321,10 @@ mod tests {
             http_only: true,
         };
         let rendered = cookie.render();
-        assert!(rendered.starts_with("strike_balance_gate=p.s; Path=/; Max-Age=43200; HttpOnly"), "{rendered}");
+        assert!(
+            rendered.starts_with("strike_balance_gate=p.s; Path=/; Max-Age=43200; HttpOnly"),
+            "{rendered}"
+        );
         assert!(rendered.contains("SameSite=lax"));
     }
 
@@ -265,11 +336,26 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_falls_back_like_the_ts_route() {
-        assert_eq!(client_ip(&headers(&[("x-forwarded-for", " 1.2.3.4, 5.6.7.8 ")])), "1.2.3.4");
-        assert_eq!(client_ip(&headers(&[("x-real-ip", "9.9.9.9")])), "9.9.9.9");
-        assert_eq!(client_ip(&headers(&[("x-forwarded-for", ", ")])), "unknown");
-        assert_eq!(client_ip(&headers(&[])), "unknown");
+    fn only_a_loopback_peer_can_name_a_client() {
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        let stranger: IpAddr = "203.0.113.9".parse().unwrap();
+        let forwarded = headers(&[("x-forwarded-for", " 6.6.6.6, 1.2.3.4 ")]);
+
+        // The rightmost entry is the trusted hop's; the left is client text.
+        assert_eq!(client_ip(&forwarded, proxy), "1.2.3.4");
+        assert_eq!(client_ip(&forwarded, stranger), "203.0.113.9");
+        // No header never means a shared bucket for the world.
+        assert_eq!(client_ip(&headers(&[]), stranger), "203.0.113.9");
+        assert_eq!(client_ip(&headers(&[]), proxy), "127.0.0.1");
+        assert_eq!(
+            client_ip(&headers(&[("x-forwarded-for", ", ")]), proxy),
+            "127.0.0.1"
+        );
+        // Nothing in the chain sets x-real-ip, so only a client could.
+        assert_eq!(
+            client_ip(&headers(&[("x-real-ip", "9.9.9.9")]), proxy),
+            "127.0.0.1"
+        );
     }
 
     #[test]

@@ -20,8 +20,7 @@ struct LatestQuery {
 }
 
 pub fn routes() -> Router {
-    Router::new()
-        .route("/api/prices/latest", get(latest_get).post(latest_post))
+    Router::new().route("/api/prices/latest", get(latest_get).post(latest_post))
 }
 
 /// `GET ?asset=BTC` - one asset if asked for one, otherwise the whole feed list.
@@ -42,7 +41,11 @@ async fn latest_post(raw: Bytes) -> Response {
     let mut requested: Vec<String> = serde_json::from_slice::<Value>(&raw)
         .ok()
         .and_then(|body| body.get("assets").and_then(Value::as_array).cloned())
-        .map(|rows| rows.into_iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if requested.is_empty() {
         requested = prices::default_assets();
@@ -72,17 +75,18 @@ async fn render(result: strike_core::error::ApiResult<PricesResponse>) -> Respon
     if !response.cache_control.is_empty() {
         headers.insert(
             HeaderName::from_static("cache-control"),
-            HeaderValue::from_str(&response.cache_control).unwrap_or_else(|_| HeaderValue::from_static("no-store")),
+            HeaderValue::from_str(&response.cache_control)
+                .unwrap_or_else(|_| HeaderValue::from_static("no-store")),
         );
     }
     if let Some(vary) = response.vary {
         headers.insert(
             HeaderName::from_static("vary"),
-            HeaderValue::from_str(&vary).unwrap_or_else(|_| HeaderValue::from_static("accept-encoding")),
+            HeaderValue::from_str(&vary)
+                .unwrap_or_else(|_| HeaderValue::from_static("accept-encoding")),
         );
     }
 
-    let status =
-        StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, headers, response.body).into_response()
 }

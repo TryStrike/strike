@@ -68,7 +68,10 @@ async fn handle(
 async fn run(bet_id: &str, address: &str) -> Result<Value, ApiError> {
     // Row lookup: id + wallet in the predicate, wallet never in the projection.
     let mut binds = Binds::new();
-    let id_ph = binds.push(column_type("bet_history", "id").await?, Value::String(bet_id.to_string()));
+    let id_ph = binds.push(
+        column_type("bet_history", "id").await?,
+        Value::String(bet_id.to_string()),
+    );
     let wallet_ph = binds.push(
         column_type("bet_history", "wallet_address").await?,
         Value::String(address.to_string()),
@@ -91,7 +94,28 @@ async fn run(bet_id: &str, address: &str) -> Result<Value, ApiError> {
     // Ledger references. Any failure degrades to `available: false` and an empty
     // audit list rather than failing the whole proof.
     let (available, audit) = read_audit(&row, address).await;
-    Ok(build_proof(&row, audit, available))
+    let mut proof = build_proof(&row, audit, available);
+    if let Some(round) = read_round(bet_id).await {
+        proof["bet"]["server_settlement"] = round;
+    }
+    Ok(proof)
+}
+
+/// The permanent record, for rounds the server settled. A failed read leaves the
+/// proof as it was, like the audit read above.
+async fn read_round(bet_id: &str) -> Option<Value> {
+    let id = Value::String(bet_id.to_string());
+    sql::fetch_one(
+        "SELECT outcome, strike_at, strike_source, end_time, end_price_at, end_source, \
+                settled_by, settled_at \
+         FROM bet_rounds WHERE bet_id = CAST($1 AS text)",
+        &[("text", &id)],
+    )
+    .await
+    .unwrap_or_else(|err| {
+        tracing::error!("[bets/[id]] round lookup failed {err}");
+        None
+    })
 }
 
 /// Returns `(available, rows)`; `available` is false only when the read failed.
@@ -99,11 +123,15 @@ async fn read_audit(row: &Value, address: &str) -> (bool, Vec<Value>) {
     let bet_ref = value_to_string(row.get("id").unwrap_or(&Value::Null));
     let mut binds = Binds::new();
     let bet_id_ph = binds.push(
-        column_type("balance_audit_log", "bet_id").await.unwrap_or_else(|_| "text".to_string()),
+        column_type("balance_audit_log", "bet_id")
+            .await
+            .unwrap_or_else(|_| "text".to_string()),
         Value::String(bet_ref),
     );
     let user_ph = binds.push(
-        column_type("balance_audit_log", "user_address").await.unwrap_or_else(|_| "text".to_string()),
+        column_type("balance_audit_log", "user_address")
+            .await
+            .unwrap_or_else(|_| "text".to_string()),
         Value::String(address.to_string()),
     );
     let limit_ph = binds.push_static("bigint", Value::String("25".to_string()));
@@ -147,7 +175,13 @@ fn build_proof(bet: &Value, audit: Vec<Value>, available: bool) -> Value {
         && payout.is_some()
         && payout == stake
         && multiplier.map(|m| m > 1.0).unwrap_or(true);
-    let outcome = if tie_refund { "draw" } else if won { "win" } else { "loss" };
+    let outcome = if tie_refund {
+        "draw"
+    } else if won {
+        "win"
+    } else {
+        "loss"
+    };
 
     let resolved_at = bet.get("resolved_at").and_then(|v| proof_iso(Some(v)));
     let taken_at = ledger_end_time.clone().or_else(|| resolved_at.clone());
@@ -173,33 +207,62 @@ fn build_proof(bet: &Value, audit: Vec<Value>, available: bool) -> Value {
         Value::Bool(audit.iter().any(|a| is_truthy(a.get("settlement_token")))),
     );
     ledger.insert("tx_hashes".into(), Value::Array(tx_hashes));
-    ledger.insert("currency".into(), coalesce_idempotency(bet_lock, &audit, "currency"));
-    let ledger_amount = bet_lock.and_then(|bl| bl.get("amount")).and_then(|v| proof_num(Some(v)));
+    ledger.insert(
+        "currency".into(),
+        coalesce_idempotency(bet_lock, &audit, "currency"),
+    );
+    let ledger_amount = bet_lock
+        .and_then(|bl| bl.get("amount"))
+        .and_then(|v| proof_num(Some(v)));
     ledger.insert("ledger_amount".into(), opt_num(ledger_amount));
 
     let mut settlement = Map::new();
     settlement.insert("price".into(), opt_num(proof_num(bet.get("end_price"))));
     settlement.insert("taken_at".into(), opt_string(taken_at));
     settlement.insert("taken_at_source".into(), taken_at_source);
-    settlement.insert("asset".into(), bet.get("asset").cloned().unwrap_or(Value::Null));
+    settlement.insert(
+        "asset".into(),
+        bet.get("asset").cloned().unwrap_or(Value::Null),
+    );
 
     let mut out = Map::new();
     out.insert("id".into(), bet.get("id").cloned().unwrap_or(Value::Null));
-    out.insert("asset".into(), bet.get("asset").cloned().unwrap_or(Value::Null));
-    out.insert("mode".into(), bet.get("mode").cloned().unwrap_or(Value::Null));
-    out.insert("direction".into(), bet.get("direction").cloned().unwrap_or(Value::Null));
+    out.insert(
+        "asset".into(),
+        bet.get("asset").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "mode".into(),
+        bet.get("mode").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "direction".into(),
+        bet.get("direction").cloned().unwrap_or(Value::Null),
+    );
     out.insert("stake".into(), opt_num(stake));
     out.insert("multiplier".into(), opt_num(multiplier));
     out.insert("payout".into(), opt_num(payout));
     out.insert("won".into(), Value::Bool(won));
     out.insert("tie_refund".into(), Value::Bool(tie_refund));
     out.insert("outcome".into(), Value::String(outcome.to_string()));
-    out.insert("strike_price".into(), opt_num(proof_num(bet.get("strike_price"))));
-    out.insert("recorded_end_price".into(), opt_num(proof_num(bet.get("end_price"))));
+    out.insert(
+        "strike_price".into(),
+        opt_num(proof_num(bet.get("strike_price"))),
+    );
+    out.insert(
+        "recorded_end_price".into(),
+        opt_num(proof_num(bet.get("end_price"))),
+    );
     out.insert("settlement".into(), Value::Object(settlement));
-    out.insert("network".into(), bet.get("network").cloned().unwrap_or(Value::Null));
+    out.insert(
+        "network".into(),
+        bet.get("network").cloned().unwrap_or(Value::Null),
+    );
     out.insert("resolved_at".into(), opt_string(resolved_at));
-    out.insert("created_at".into(), opt_string(bet.get("created_at").and_then(|v| proof_iso(Some(v)))));
+    out.insert(
+        "created_at".into(),
+        opt_string(bet.get("created_at").and_then(|v| proof_iso(Some(v)))),
+    );
     out.insert("ledger".into(), Value::Object(ledger));
 
     Value::Object(Map::from_iter([("bet".to_string(), Value::Object(out))]))
@@ -235,7 +298,9 @@ fn collect_tx_hashes(audit: &[Value]) -> Vec<Value> {
                 .unwrap_or(part)
                 .trim()
                 .to_string();
-            if is_chain_hash_strict(&scrubbed) && !out.iter().any(|v| v.as_str() == Some(scrubbed.as_str())) {
+            if is_chain_hash_strict(&scrubbed)
+                && !out.iter().any(|v| v.as_str() == Some(scrubbed.as_str()))
+            {
                 out.push(Value::String(scrubbed));
             }
         }
@@ -262,13 +327,16 @@ fn string_or_empty(value: Option<&Value>) -> String {
 fn bet_id_ok(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     (1..=120).contains(&bytes.len())
-        && bytes.iter().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-')
-        })
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
 }
 
 fn error_json(status: u16, message: &str) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = Value::Object(Map::from_iter([("error".to_string(), Value::String(message.to_string()))]));
+    let body = Value::Object(Map::from_iter([(
+        "error".to_string(),
+        Value::String(message.to_string()),
+    )]));
     (code, axum::Json(body)).into_response()
 }

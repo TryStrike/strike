@@ -14,30 +14,29 @@
 //!     binds. Every identifier is re-validated with `db::is_identifier`
 //!     before it is written literally; every value goes through a
 //!     placeholder.
-//!   * [`execute`] - thin async wrapper that turns the binds into
-//!     `PgArguments` in placeholder order and runs the main and COUNT
-//!     queries concurrently, like the TS `Promise.all` did.
+//!   * [`execute`] - thin async wrapper that turns the binds into SQLite
+//!     params in placeholder order and runs the main and COUNT queries
+//!     concurrently, like the TS `Promise.all` did.
 //!   * [`handle`] - the POST body handler: the exact status/body shapes of
 //!     `app/api/db/route.ts` (`{rows, count}` on success, object-shaped
 //!     `{error: {message, code?}}` on failure; the real cause is logged
 //!     server-side and never sent to the browser).
 //!
-//! Why the SQL differs textually from the TS compiler in one respect:
-//! node-pg sends every parameter with an unspecified OID and Postgres infers
-//! the type, sqlx cannot, so each bind carries the column's catalog type and
-//! the placeholder is written `CAST($n AS <type>)` (see `crate::db` and
-//! `crate::schema`). Everything else - clause layout, bind order, the
-//! separate renumbered COUNT query - reproduces `query.ts` exactly.
+//! Where the SQL differs textually from the TS compiler: each bind carries the
+//! column's catalog type and is written `CAST($n AS <type>)`, which
+//! `db::typed_param` and `db::sqlite_sql` turn into a stored value and `?n`.
+//! `like`/`ilike` are the `pg_like`/`pg_ilike` functions, because SQLite's LIKE
+//! differs on case, Unicode and escapes (see `db::like_match`). `in` is a plain
+//! `IN`, and sort direction states Postgres' default NULL placement, which is the
+//! opposite of SQLite's. Clause layout, bind order and the separate renumbered
+//! COUNT query reproduce `query.ts`.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
-use sqlx::postgres::PgArguments;
-use sqlx::Row;
 
 use crate::db::{
-    is_identifier, is_safe_type_expression, pool, push_arg, push_typed_arg, rows_to_json,
-    typed_placeholder,
+    db, is_identifier, is_safe_type_expression, typed_param, typed_placeholder, untyped_param,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::schema::Schema;
@@ -158,7 +157,10 @@ pub fn normalize(body: &Value) -> Option<Descriptor> {
     Some(Descriptor {
         table: table.to_string(),
         op: op.to_string(),
-        columns: body.get("columns").and_then(Value::as_str).map(str::to_string),
+        columns: body
+            .get("columns")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         values: body.get("values").and_then(Value::as_array).cloned(),
         patch: body
             .get("patch")
@@ -173,7 +175,10 @@ pub fn normalize(body: &Value) -> Option<Descriptor> {
             .and_then(Value::as_array)
             .map(|arr| arr.iter().map(filter_from).collect())
             .unwrap_or_default(),
-        or_filter: body.get("orFilter").and_then(Value::as_str).map(str::to_string),
+        or_filter: body
+            .get("orFilter")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         order: body
             .get("order")
             .and_then(Value::as_array)
@@ -246,7 +251,11 @@ fn denied(reason: impl Into<String>) -> AllowResult {
 
 /// Splits a comma list, trimming and dropping blanks.
 fn split_list(raw: &str) -> Vec<String> {
-    raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// PostgREST column list; `'*'` / empty means "every column" -> `None`.
@@ -294,7 +303,10 @@ fn row_value<'a>(row: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 pub fn check_allowed(desc: &Descriptor) -> AllowResult {
-    let Some(rule) = RULES.iter().find(|r| r.table == desc.table && r.op == desc.op) else {
+    let Some(rule) = RULES
+        .iter()
+        .find(|r| r.table == desc.table && r.op == desc.op)
+    else {
         return denied(format!(
             "{} on \"{}\" is not available to the browser",
             desc.op, desc.table
@@ -312,15 +324,23 @@ pub fn check_allowed(desc: &Descriptor) -> AllowResult {
             None
         }
         Some(cols) => {
-            let unknown: Vec<&String> =
-                cols.iter().filter(|c| !rule.columns.contains(&c.as_str())).collect();
-            let readable: Vec<&String> =
-                cols.iter().filter(|c| rule.columns.contains(&c.as_str())).collect();
+            let unknown: Vec<&String> = cols
+                .iter()
+                .filter(|c| !rule.columns.contains(&c.as_str()))
+                .collect();
+            let readable: Vec<&String> = cols
+                .iter()
+                .filter(|c| rule.columns.contains(&c.as_str()))
+                .collect();
             if desc.op == "select" || desc.returning {
                 if readable.is_empty() {
                     return denied(format!(
                         "columns not readable: {}",
-                        unknown.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+                        unknown
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
                 // Anything outside the rule is dropped rather than rejected.
@@ -333,7 +353,11 @@ pub fn check_allowed(desc: &Descriptor) -> AllowResult {
             if !unknown.is_empty() {
                 return denied(format!(
                     "columns not readable: {}",
-                    unknown.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+                    unknown
+                        .iter()
+                        .map(|c| c.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             Some(cols)
@@ -359,7 +383,11 @@ fn validate_rest(desc: &Descriptor, rule: &Rule, read_columns: Option<Vec<String
     if !bad_write.is_empty() {
         return denied(format!(
             "columns not writable: {}",
-            bad_write.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+            bad_write
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
@@ -434,8 +462,8 @@ fn validate_rest(desc: &Descriptor, rule: &Rule, read_columns: Option<Vec<String
         if !scoped {
             // A write that only inserts (no conflict target) cannot touch an
             // existing row, so it is exempt from the scoping requirement.
-            let write_only = desc.op != "select"
-                && desc.on_conflict.as_deref().unwrap_or("").trim().is_empty();
+            let write_only =
+                desc.op != "select" && desc.on_conflict.as_deref().unwrap_or("").trim().is_empty();
             if !write_only {
                 return denied(format!(
                     "a filter on one of {} is required",
@@ -448,7 +476,11 @@ fn validate_rest(desc: &Descriptor, rule: &Rule, read_columns: Option<Vec<String
     // Reads must be finite; writes must stay within the row ceiling.
     if let Some(max) = rule.max_limit {
         if desc.op == "select" {
-            let limit = if desc.single.is_some() { Some(1) } else { desc.limit };
+            let limit = if desc.single.is_some() {
+                Some(1)
+            } else {
+                desc.limit
+            };
             if !matches!(limit, Some(l) if l >= 1 && l <= max) {
                 return denied(format!("limit must be an integer between 1 and {max}"));
             }
@@ -475,7 +507,7 @@ fn validate_rest(desc: &Descriptor, rule: &Rule, read_columns: Option<Vec<String
 // ---------------------------------------------------------------------------
 
 /// A pending bind: the value plus the catalog type the SQL casts `$n` to
-/// (`None` = bare placeholder, bound like node-pg would have inferred).
+/// (`None` = bare placeholder, bound by the value's own JSON type).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bind {
     pub type_name: Option<String>,
@@ -527,7 +559,10 @@ impl Sink {
         let stored = type_name
             .filter(|t| is_safe_type_expression(t))
             .map(str::to_string);
-        self.binds.push(Bind { type_name: stored, value });
+        self.binds.push(Bind {
+            type_name: stored,
+            value,
+        });
         placeholder
     }
 }
@@ -569,12 +604,10 @@ fn build_where<S: ColumnTypes + ?Sized>(
             "gte" => format!("{col} >= {}", sink.push(ty, value)),
             "lt" => format!("{col} < {}", sink.push(ty, value)),
             "lte" => format!("{col} <= {}", sink.push(ty, value)),
-            "like" => format!("{col} LIKE {}", sink.push(ty, value)),
-            "ilike" => format!("{col} ILIKE {}", sink.push(ty, value)),
+            "like" => format!("pg_like({col}, {})", sink.push(ty, value)),
+            "ilike" => format!("pg_ilike({col}, {})", sink.push(ty, value)),
             "in" => {
-                // TS sent one array parameter and let Postgres infer the
-                // element type. sqlx cannot declare an inferred array, so
-                // expand to ANY(ARRAY[...]) with one typed bind per element.
+                // TS sent one array parameter; here, one typed bind per element.
                 let items = match &f.value {
                     Some(Value::Array(items)) => items.clone(),
                     _ => {
@@ -584,17 +617,11 @@ fn build_where<S: ColumnTypes + ?Sized>(
                         )))
                     }
                 };
-                let any = if items.is_empty() {
-                    match ty.filter(|t| is_safe_type_expression(t)) {
-                        Some(t) => format!("ARRAY[]::{t}"),
-                        None => "ARRAY[]::text".to_string(),
-                    }
-                } else {
-                    let parts: Vec<String> =
-                        items.iter().map(|item| sink.push(ty, item.clone())).collect();
-                    format!("ARRAY[{}]", parts.join(", "))
-                };
-                format!("{col} = ANY({any})")
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|item| sink.push(ty, item.clone()))
+                    .collect();
+                format!("{col} IN ({})", parts.join(", "))
             }
             // PostgREST .is() is only ever used for null / boolean checks.
             "is" => match &f.value {
@@ -613,10 +640,8 @@ fn build_where<S: ColumnTypes + ?Sized>(
                     )))
                 }
             },
-            "contains" => {
-                // JSON.stringify(value) -> a jsonb-cast bind, the ::jsonb of TS.
-                format!("{col} @> {}", sink.push(Some("jsonb"), value))
-            }
+            // `contains` was jsonb `@>`; no table has a jsonb column, and the
+            // allow-list could not reach one, so it joins the unsupported filters.
             other => return Err(ApiError::internal(format!("Unsupported filter: {other}"))),
         };
         clauses.push(clause);
@@ -659,8 +684,8 @@ fn compile_or<S: ColumnTypes + ?Sized>(
             Some("gte") => format!("{col} >= {}", sink.push(ty, value)),
             Some("lt") => format!("{col} < {}", sink.push(ty, value)),
             Some("lte") => format!("{col} <= {}", sink.push(ty, value)),
-            Some("like") => format!("{col} LIKE {}", sink.push(ty, value)),
-            Some("ilike") => format!("{col} ILIKE {}", sink.push(ty, value)),
+            Some("like") => format!("pg_like({col}, {})", sink.push(ty, value)),
+            Some("ilike") => format!("pg_ilike({col}, {})", sink.push(ty, value)),
             Some("is") => match raw {
                 "null" => format!("{col} IS NULL"),
                 "true" => format!("{col} IS TRUE"),
@@ -696,9 +721,15 @@ fn order_limit(desc: &Descriptor) -> Result<String, ApiError> {
         let mut parts: Vec<String> = Vec::new();
         for o in &desc.order {
             let col = quoted_identifier(o.get("column").and_then(Value::as_str).unwrap_or(""))?;
-            let dir = if js_truthy(o.get("ascending")) { "ASC" } else { "DESC" };
+            let dir = if js_truthy(o.get("ascending")) {
+                "ASC"
+            } else {
+                "DESC"
+            };
             let nulls = match o.get("nullsFirst") {
-                None => "",
+                // Postgres' default; SQLite's is the reverse.
+                None if dir == "DESC" => " NULLS FIRST",
+                None => " NULLS LAST",
                 Some(v) if js_truthy(Some(v)) => " NULLS FIRST",
                 Some(_) => " NULLS LAST",
             };
@@ -732,25 +763,42 @@ pub fn compile<S: ColumnTypes + ?Sized>(
 
     match desc.op.as_str() {
         "select" => {
-            let cols = if desc.head { "1".to_string() } else { column_list(desc.columns.as_deref())? };
+            let cols = if desc.head {
+                // The column name Postgres gave an unnamed `SELECT 1`.
+                "1 AS \"?column?\"".to_string()
+            } else {
+                column_list(desc.columns.as_deref())?
+            };
             let where_sql = build_where(desc, schema, &mut sink)?;
-            let sql = format!("SELECT {cols} FROM {table}{where_sql}{}", order_limit(desc)?);
+            let sql = format!(
+                "SELECT {cols} FROM {table}{where_sql}{}",
+                order_limit(desc)?
+            );
             let (count_sql, count_binds) = if desc.count.is_some() {
                 let mut count_sink = Sink { binds: Vec::new() };
                 let count_where = build_where(desc, schema, &mut count_sink)?;
                 (
-                    Some(format!("SELECT COUNT(*)::bigint AS count FROM {table}{count_where}")),
+                    Some(format!(
+                        "SELECT COUNT(*) AS count FROM {table}{count_where}"
+                    )),
                     count_sink.binds,
                 )
             } else {
                 (None, Vec::new())
             };
-            Ok(CompiledQuery { sql, binds: sink.binds, count_sql, count_binds })
+            Ok(CompiledQuery {
+                sql,
+                binds: sink.binds,
+                count_sql,
+                count_binds,
+            })
         }
         "insert" | "upsert" => {
             let rows = desc.values.clone().unwrap_or_default();
             if rows.is_empty() {
-                return Err(ApiError::internal("insert/upsert requires at least one row"));
+                return Err(ApiError::internal(
+                    "insert/upsert requires at least one row",
+                ));
             }
             // Union of keys so rows with differing shapes still line up.
             let mut keys: Vec<String> = Vec::new();
@@ -762,7 +810,9 @@ pub fn compile<S: ColumnTypes + ?Sized>(
                 }
             }
             if keys.is_empty() {
-                return Err(ApiError::internal("insert/upsert requires at least one column"));
+                return Err(ApiError::internal(
+                    "insert/upsert requires at least one column",
+                ));
             }
 
             let mut tuples: Vec<String> = Vec::new();
@@ -780,8 +830,11 @@ pub fn compile<S: ColumnTypes + ?Sized>(
                 .iter()
                 .map(|k| quoted_identifier(k))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut sql =
-                format!("INSERT INTO {table} ({}) VALUES {}", column_names.join(", "), tuples.join(", "));
+            let mut sql = format!(
+                "INSERT INTO {table} ({}) VALUES {}",
+                column_names.join(", "),
+                tuples.join(", ")
+            );
 
             if desc.op == "upsert" {
                 let conflict = split_list(desc.on_conflict.as_deref().unwrap_or(""));
@@ -809,9 +862,17 @@ pub fn compile<S: ColumnTypes + ?Sized>(
             }
 
             if desc.returning {
-                sql.push_str(&format!(" RETURNING {}", column_list(desc.columns.as_deref())?));
+                sql.push_str(&format!(
+                    " RETURNING {}",
+                    column_list(desc.columns.as_deref())?
+                ));
             }
-            Ok(CompiledQuery { sql, binds: sink.binds, count_sql: None, count_binds: Vec::new() })
+            Ok(CompiledQuery {
+                sql,
+                binds: sink.binds,
+                count_sql: None,
+                count_binds: Vec::new(),
+            })
         }
         "update" => {
             // Non-object patches contribute no keys, like Object.keys() did.
@@ -839,9 +900,17 @@ pub fn compile<S: ColumnTypes + ?Sized>(
             }
             let mut sql = format!("UPDATE {table} SET {}{where_sql}", sets.join(", "));
             if desc.returning {
-                sql.push_str(&format!(" RETURNING {}", column_list(desc.columns.as_deref())?));
+                sql.push_str(&format!(
+                    " RETURNING {}",
+                    column_list(desc.columns.as_deref())?
+                ));
             }
-            Ok(CompiledQuery { sql, binds: sink.binds, count_sql: None, count_binds: Vec::new() })
+            Ok(CompiledQuery {
+                sql,
+                binds: sink.binds,
+                count_sql: None,
+                count_binds: Vec::new(),
+            })
         }
         "delete" => {
             let where_sql = build_where(desc, schema, &mut sink)?;
@@ -853,11 +922,21 @@ pub fn compile<S: ColumnTypes + ?Sized>(
             }
             let mut sql = format!("DELETE FROM {table}{where_sql}");
             if desc.returning {
-                sql.push_str(&format!(" RETURNING {}", column_list(desc.columns.as_deref())?));
+                sql.push_str(&format!(
+                    " RETURNING {}",
+                    column_list(desc.columns.as_deref())?
+                ));
             }
-            Ok(CompiledQuery { sql, binds: sink.binds, count_sql: None, count_binds: Vec::new() })
+            Ok(CompiledQuery {
+                sql,
+                binds: sink.binds,
+                count_sql: None,
+                count_binds: Vec::new(),
+            })
         }
-        other => Err(ApiError::internal(format!("Unsupported operation: {other}"))),
+        other => Err(ApiError::internal(format!(
+            "Unsupported operation: {other}"
+        ))),
     }
 }
 
@@ -865,18 +944,16 @@ pub fn compile<S: ColumnTypes + ?Sized>(
 // Execution + HTTP surface (lib/db/server.ts + app/api/db/route.ts)
 // ---------------------------------------------------------------------------
 
-/// Binds must be pushed in the same order the placeholders were numbered;
-/// typed binds go through `db::push_typed_arg` (text encoding feeding the
-/// `CAST($n AS ...)`), untyped ones through `db::push_arg`.
-pub fn build_arguments(binds: &[Bind]) -> ApiResult<PgArguments> {
-    let mut args = PgArguments::default();
-    for bind in binds {
-        match bind.type_name.as_deref() {
-            Some(type_name) => push_typed_arg(&mut args, type_name, &bind.value)?,
-            None => push_arg(&mut args, &bind.value)?,
-        }
-    }
-    Ok(args)
+/// Params in the order the placeholders were numbered; typed binds go through
+/// `db::typed_param`, untyped ones through `db::untyped_param`.
+pub fn build_arguments(binds: &[Bind]) -> ApiResult<Vec<rusqlite::types::Value>> {
+    binds
+        .iter()
+        .map(|bind| match bind.type_name.as_deref() {
+            Some(type_name) => typed_param(type_name, &bind.value),
+            None => Ok(untyped_param(&bind.value)),
+        })
+        .collect()
 }
 
 /// Runs the main query and, when present, the COUNT query concurrently -
@@ -884,25 +961,23 @@ pub fn build_arguments(binds: &[Bind]) -> ApiResult<PgArguments> {
 /// The count defaults to zero when the COUNT query returned no row
 /// (`Number(rows[0]?.count ?? 0)`), and is `None` only when not requested.
 pub async fn execute(compiled: &CompiledQuery) -> ApiResult<(Vec<Value>, Option<i64>)> {
-    let pool = pool().await?;
-    let main = sqlx::query_with(compiled.sql.as_str(), build_arguments(&compiled.binds)?);
+    let db = db().await?;
+    let main = db.run(&compiled.sql, build_arguments(&compiled.binds)?);
 
     match &compiled.count_sql {
         Some(count_sql) => {
-            let count_args = build_arguments(&compiled.count_binds)?;
-            let count = sqlx::query_with(count_sql.as_str(), count_args);
-            let (rows_result, count_result) =
-                futures::future::join(main.fetch_all(pool), count.fetch_optional(pool)).await;
-            let rows = rows_result?;
+            let count = db.run(count_sql, build_arguments(&compiled.count_binds)?);
+            let (rows_result, count_result) = futures::future::join(main, count).await;
+            let (rows, _) = rows_result?;
             let count = count_result?
-                .and_then(|row| row.try_get::<i64, _>("count").ok())
+                .0
+                .first()
+                .and_then(|row| row.get("count"))
+                .and_then(Value::as_i64)
                 .unwrap_or(0);
-            Ok((rows_to_json(&rows), Some(count)))
+            Ok((rows, Some(count)))
         }
-        None => {
-            let rows = main.fetch_all(pool).await?;
-            Ok((rows_to_json(&rows), None))
-        }
+        None => Ok((main.await?.0, None)),
     }
 }
 
@@ -1025,7 +1100,6 @@ async fn schema_and_compile(desc: &Descriptor) -> ApiResult<CompiledQuery> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::Arguments;
     use std::collections::HashMap;
 
     /// Test catalog: the compiler is exercised with the types the real
@@ -1068,7 +1142,11 @@ mod tests {
     }
 
     fn filter(op: &str, column: &str, value: Option<Value>) -> QueryFilter {
-        QueryFilter { op: op.to_string(), column: column.to_string(), value }
+        QueryFilter {
+            op: op.to_string(),
+            column: column.to_string(),
+            value,
+        }
     }
 
     fn select_desc() -> Descriptor {
@@ -1147,8 +1225,8 @@ mod tests {
         assert_eq!(strict.count.as_deref(), Some("exact"));
 
         // Non-integer / fractional / NaN-ish values are dropped, not rejected.
-        let dropped = normalize(&json!({"table": "t", "op": "select", "limit": 1.5, "offset": "x"}))
-            .unwrap();
+        let dropped =
+            normalize(&json!({"table": "t", "op": "select", "limit": 1.5, "offset": "x"})).unwrap();
         assert_eq!(dropped.limit, None);
         assert_eq!(dropped.offset, None);
     }
@@ -1191,7 +1269,10 @@ mod tests {
     #[test]
     fn star_columns_are_refused_for_reads_and_returning_writes() {
         for columns in [None, Some("*"), Some("  ")] {
-            let desc = Descriptor { columns: columns.map(str::to_string), ..select_desc() };
+            let desc = Descriptor {
+                columns: columns.map(str::to_string),
+                ..select_desc()
+            };
             assert!(!check_allowed(&desc).allowed, "accepted {columns:?}");
         }
         let returning = Descriptor {
@@ -1214,7 +1295,10 @@ mod tests {
         };
         let verdict = check_allowed(&desc);
         assert!(verdict.allowed);
-        assert_eq!(verdict.columns.as_deref(), Some(&["username".to_string()][..]));
+        assert_eq!(
+            verdict.columns.as_deref(),
+            Some(&["username".to_string()][..])
+        );
 
         // Nothing readable left -> the whole read is refused.
         let only_secret = Descriptor {
@@ -1223,7 +1307,10 @@ mod tests {
         };
         let verdict = check_allowed(&only_secret);
         assert!(!verdict.allowed);
-        assert_eq!(verdict.reason.as_deref(), Some("columns not readable: access_code"));
+        assert_eq!(
+            verdict.reason.as_deref(),
+            Some("columns not readable: access_code")
+        );
 
         // A write without RETURNING is strict about unknown columns.
         let write_probe = Descriptor {
@@ -1233,7 +1320,10 @@ mod tests {
         };
         let verdict = check_allowed(&write_probe);
         assert!(!verdict.allowed);
-        assert_eq!(verdict.reason.as_deref(), Some("columns not readable: access_code"));
+        assert_eq!(
+            verdict.reason.as_deref(),
+            Some("columns not readable: access_code")
+        );
     }
 
     #[test]
@@ -1277,12 +1367,18 @@ mod tests {
             Some("a filter on one of user_address / username is required")
         );
 
-        let unlimit = Descriptor { limit: None, ..select_desc() };
+        let unlimit = Descriptor {
+            limit: None,
+            ..select_desc()
+        };
         assert_eq!(
             check_allowed(&unlimit).reason.as_deref(),
             Some("limit must be an integer between 1 and 1")
         );
-        let too_many = Descriptor { limit: Some(2), ..select_desc() };
+        let too_many = Descriptor {
+            limit: Some(2),
+            ..select_desc()
+        };
         assert!(!check_allowed(&too_many).allowed);
         // single() implies one row even without an explicit limit.
         let single = Descriptor {
@@ -1419,10 +1515,22 @@ mod tests {
         assert_eq!(
             compiled.binds,
             vec![
-                Bind { type_name: Some("bigint".into()), value: json!(7) },
-                Bind { type_name: Some("character varying".into()), value: json!("bob") },
-                Bind { type_name: Some("numeric".into()), value: json!(1.5) },
-                Bind { type_name: Some("uuid".into()), value: json!("8f1b-uuid") },
+                Bind {
+                    type_name: Some("bigint".into()),
+                    value: json!(7)
+                },
+                Bind {
+                    type_name: Some("character varying".into()),
+                    value: json!("bob")
+                },
+                Bind {
+                    type_name: Some("numeric".into()),
+                    value: json!(1.5)
+                },
+                Bind {
+                    type_name: Some("uuid".into()),
+                    value: json!("8f1b-uuid")
+                },
             ]
         );
     }
@@ -1451,7 +1559,6 @@ mod tests {
             op: "select".into(),
             filters: vec![
                 filter("in", "name", Some(json!(["a", "b"]))),
-                filter("contains", "payload", Some(json!({"success": true}))),
                 filter("like", "name", Some(json!("bo%"))),
                 filter("ilike", "name", Some(json!("%x%"))),
             ],
@@ -1461,15 +1568,14 @@ mod tests {
         let compiled = compile(&desc, &fixture()).unwrap();
         assert_eq!(
             compiled.sql,
-            "SELECT * FROM \"things\" WHERE \"name\" = ANY(ARRAY[CAST($1 AS character varying), \
-             CAST($2 AS character varying)]) AND \"payload\" @> CAST($3 AS jsonb) \
-             AND \"name\" LIKE CAST($4 AS character varying) \
-             AND \"name\" ILIKE CAST($5 AS character varying) LIMIT 1"
+            "SELECT * FROM \"things\" WHERE \"name\" IN (CAST($1 AS character varying), \
+             CAST($2 AS character varying)) \
+             AND pg_like(\"name\", CAST($3 AS character varying)) \
+             AND pg_ilike(\"name\", CAST($4 AS character varying)) LIMIT 1"
         );
-        assert_eq!(compiled.binds[2].type_name.as_deref(), Some("jsonb"));
-        assert_eq!(compiled.binds[2].value, json!({"success": true}));
+        assert_eq!(compiled.binds[2].value, json!("bo%"));
 
-        // Empty list: a typed empty array literal, no binds.
+        // Empty list: matches nothing, no binds.
         let empty = Descriptor {
             filters: vec![filter("in", "name", Some(json!([])))],
             ..desc.clone()
@@ -1477,7 +1583,7 @@ mod tests {
         let compiled = compile(&empty, &fixture()).unwrap();
         assert_eq!(
             compiled.sql,
-            "SELECT * FROM \"things\" WHERE \"name\" = ANY(ARRAY[]::character varying) LIMIT 1"
+            "SELECT * FROM \"things\" WHERE \"name\" IN () LIMIT 1"
         );
         assert!(compiled.binds.is_empty());
     }
@@ -1502,7 +1608,7 @@ mod tests {
         assert_eq!(
             compiled.count_sql.as_deref(),
             Some(
-                "SELECT COUNT(*)::bigint AS count FROM \"user_profiles\" \
+                "SELECT COUNT(*) AS count FROM \"user_profiles\" \
                  WHERE \"username\" = CAST($1 AS text)"
             )
         );
@@ -1527,12 +1633,12 @@ mod tests {
         let compiled = compile(&desc, &fixture()).unwrap();
         assert_eq!(
             compiled.sql,
-            "SELECT 1 FROM \"things\" ORDER BY \"id\" DESC NULLS FIRST, \
+            "SELECT 1 AS \"?column?\" FROM \"things\" ORDER BY \"id\" DESC NULLS FIRST, \
              \"name\" DESC NULLS LAST LIMIT 1000 OFFSET 20"
         );
         assert_eq!(
             compiled.count_sql.as_deref(),
-            Some("SELECT COUNT(*)::bigint AS count FROM \"things\"")
+            Some("SELECT COUNT(*) AS count FROM \"things\"")
         );
     }
 
@@ -1544,7 +1650,10 @@ mod tests {
         };
         assert!(compile(&inject, &fixture()).is_err());
 
-        let bad_table = Descriptor { table: "things; SELECT 1".into(), ..select_desc() };
+        let bad_table = Descriptor {
+            table: "things; SELECT 1".into(),
+            ..select_desc()
+        };
         assert!(compile(&bad_table, &fixture()).is_err());
 
         let bad_is = Descriptor {
@@ -1564,6 +1673,13 @@ mod tests {
             ..select_desc()
         };
         assert!(compile(&unknown_op, &fixture()).is_err());
+
+        // jsonb containment has no column to run against.
+        let contains = Descriptor {
+            filters: vec![filter("contains", "payload", Some(json!({"a": 1})))],
+            ..select_desc()
+        };
+        assert!(compile(&contains, &fixture()).is_err());
     }
 
     // -- compiler: writes ------------------------------------------------------
@@ -1573,7 +1689,10 @@ mod tests {
         let desc = Descriptor {
             table: "things".into(),
             op: "insert".into(),
-            values: Some(vec![json!({"id": 1, "name": "a"}), json!({"id": 2, "amount": 3})]),
+            values: Some(vec![
+                json!({"id": 1, "name": "a"}),
+                json!({"id": 2, "amount": 3}),
+            ]),
             ..Default::default()
         };
         let compiled = compile(&desc, &fixture()).unwrap();
@@ -1600,7 +1719,9 @@ mod tests {
             table: "user_profiles".into(),
             op: "upsert".into(),
             columns: Some("user_address, username".into()),
-            values: Some(vec![json!({"user_address": "0xabc", "username": "bob", "updated_at": null})]),
+            values: Some(vec![
+                json!({"user_address": "0xabc", "username": "bob", "updated_at": null}),
+            ]),
             on_conflict: Some("user_address".into()),
             returning: true,
             ..Default::default()
@@ -1608,10 +1729,10 @@ mod tests {
         let compiled = compile(&desc, &fixture()).unwrap();
         assert_eq!(
             compiled.sql,
-            "INSERT INTO \"user_profiles\" (\"updated_at\", \"user_address\", \"username\") \
-             VALUES (CAST($1 AS timestamp with time zone), CAST($2 AS text), CAST($3 AS text)) \
+            "INSERT INTO \"user_profiles\" (\"user_address\", \"username\", \"updated_at\") \
+             VALUES (CAST($1 AS text), CAST($2 AS text), CAST($3 AS timestamp with time zone)) \
              ON CONFLICT (\"user_address\") DO UPDATE SET \
-             \"updated_at\" = EXCLUDED.\"updated_at\", \"username\" = EXCLUDED.\"username\" \
+             \"username\" = EXCLUDED.\"username\", \"updated_at\" = EXCLUDED.\"updated_at\" \
              RETURNING \"user_address\", \"username\""
         );
 
@@ -1623,7 +1744,10 @@ mod tests {
         let compiled = compile(&plain, &fixture()).unwrap();
         assert!(compiled.sql.ends_with("ON CONFLICT DO NOTHING"));
 
-        let no_rows = Descriptor { values: Some(vec![]), ..desc.clone() };
+        let no_rows = Descriptor {
+            values: Some(vec![]),
+            ..desc.clone()
+        };
         assert!(compile(&no_rows, &fixture()).is_err());
     }
 
@@ -1647,14 +1771,20 @@ mod tests {
         assert_eq!(compiled.binds[0].value, json!("new"));
         assert_eq!(compiled.binds[1].value, json!("0xabc"));
 
-        let unscoped = Descriptor { filters: vec![], ..desc.clone() };
+        let unscoped = Descriptor {
+            filters: vec![],
+            ..desc.clone()
+        };
         let err = compile(&unscoped, &fixture()).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Refusing to UPDATE user_profiles without a filter"
         );
 
-        let empty_patch = Descriptor { patch: Some(json!({})), ..desc };
+        let empty_patch = Descriptor {
+            patch: Some(json!({})),
+            ..desc
+        };
         assert!(compile(&empty_patch, &fixture()).is_err());
     }
 
@@ -1675,10 +1805,16 @@ mod tests {
              RETURNING \"user_address\""
         );
 
-        let unscoped = Descriptor { filters: vec![], ..desc };
+        let unscoped = Descriptor {
+            filters: vec![],
+            ..desc
+        };
         assert!(compile(&unscoped, &fixture()).is_err());
         assert!(compile(
-            &Descriptor { op: "bogus".into(), ..select_desc() },
+            &Descriptor {
+                op: "bogus".into(),
+                ..select_desc()
+            },
             &fixture()
         )
         .is_err());
@@ -1703,7 +1839,10 @@ mod tests {
         );
         assert_eq!(compiled.binds.len(), 2);
 
-        let bad = Descriptor { or_filter: Some("name.eq.bob,amount.bogus.5".into()), ..desc };
+        let bad = Descriptor {
+            or_filter: Some("name.eq.bob,amount.bogus.5".into()),
+            ..desc
+        };
         assert!(compile(&bad, &fixture()).is_err());
     }
 
@@ -1712,8 +1851,7 @@ mod tests {
     #[test]
     fn bind_types_match_the_placeholders_written_in_sql() {
         // The same filter value bound for a bigint column and for a text one:
-        // this is the typing that node-pg got by inference and sqlx needs
-        // spelled out, or `operator does not exist: text = bigint`.
+        // the declared type decides the stored form.
         let desc = Descriptor {
             table: "things".into(),
             op: "select".into(),
@@ -1726,21 +1864,41 @@ mod tests {
         };
         let compiled = compile(&desc, &fixture()).unwrap();
         assert_eq!(compiled.binds[0].type_name.as_deref(), Some("bigint"));
-        assert_eq!(compiled.binds[1].type_name.as_deref(), Some("character varying"));
+        assert_eq!(
+            compiled.binds[1].type_name.as_deref(),
+            Some("character varying")
+        );
 
         let args = build_arguments(&compiled.binds).unwrap();
         assert_eq!(args.len(), compiled.binds.len());
+        assert_eq!(args[0], rusqlite::types::Value::Integer(12));
+        assert_eq!(args[1], rusqlite::types::Value::Text("12".into()));
 
         let typed = vec![
-            Bind { type_name: Some("numeric".into()), value: json!(7.5) },
-            Bind { type_name: Some("boolean".into()), value: json!(true) },
-            Bind { type_name: Some("text".into()), value: Value::Null },
-            Bind { type_name: None, value: json!("raw") },
+            Bind {
+                type_name: Some("numeric".into()),
+                value: json!(7.5),
+            },
+            Bind {
+                type_name: Some("boolean".into()),
+                value: json!(true),
+            },
+            Bind {
+                type_name: Some("text".into()),
+                value: Value::Null,
+            },
+            Bind {
+                type_name: None,
+                value: json!("raw"),
+            },
         ];
         let args = build_arguments(&typed).unwrap();
         assert_eq!(args.len(), 4);
-        assert_eq!(build_arguments(&[Bind { type_name: Some("text[]".into()), value: json!(["a"])}])
-            .is_err(), true);
+        assert!(build_arguments(&[Bind {
+            type_name: Some("text[]".into()),
+            value: json!(["a"])
+        }])
+        .is_err());
     }
 
     // -- HTTP response shapes (route.ts) ---------------------------------------

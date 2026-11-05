@@ -31,7 +31,34 @@ interface ArcConfig extends NetworkConfig {
   assets: Record<ArcAsset, ArcAssetConfig>;
 }
 
+/**
+ * The env values this config is derived from, as a single identity key.
+ *
+ * `getArcConfig()` is called from render bodies and effect dependency lists, so
+ * returning a fresh object every time makes those effects re-run on every
+ * render (the deposit balance check flickered back to `loading` indefinitely).
+ * Keying the cache on the env rather than on call count keeps the object
+ * referentially stable while the configuration is stable, and still rotates the
+ * moment an override changes — which tests do by setting
+ * `NEXT_PUBLIC_TREASURY_ADDRESS` between cases.
+ */
+function envKey(): string {
+  return [
+    process.env.NEXT_PUBLIC_ARC_CHAIN_ID ?? '',
+    process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT ?? '',
+    process.env.NEXT_PUBLIC_ARC_EXPLORER ?? '',
+    process.env.NEXT_PUBLIC_ARC_USDC_ADDRESS ?? '',
+    process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '',
+  ].join('|');
+}
+
+let cachedKey: string | null = null;
+let cachedConfig: ArcConfig | null = null;
+
 export function getArcConfig(): ArcConfig {
+  const key = envKey();
+  if (cachedConfig && cachedKey === key) return cachedConfig;
+
   const net = ARC_DEFAULTS;
 
   const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID) || net.chainId;
@@ -44,7 +71,8 @@ export function getArcConfig(): ArcConfig {
     console.warn('Missing NEXT_PUBLIC_TREASURY_ADDRESS. Please set it in your .env file.');
   }
 
-  return {
+  cachedKey = key;
+  cachedConfig = {
     ...net,
     chainId,
     rpcEndpoint,
@@ -60,6 +88,7 @@ export function getArcConfig(): ArcConfig {
       },
     },
   };
+  return cachedConfig;
 }
 
 export const ARC_ASSETS: ArcAsset[] = ['USDC'];

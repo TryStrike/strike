@@ -43,12 +43,15 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body
         suppressHydrationWarning
-        className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} ${interTight.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable} antialiased bg-[#02040a] text-white h-screen overflow-hidden flex flex-col`}
+        className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} ${interTight.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable} antialiased bg-[#02040a] text-white overflow-hidden flex flex-col`}
       >
         <PostHogProvider>
           <Providers>
             <Header />
-            {/* Body is h-screen overflow-hidden: this must scroll or every page taller than the viewport is clipped. */}
+            {/* Body height is dvh-based (see globals.css: 100vh with a 100dvh
+                override) so the mobile URL bar never clips the trade board.
+                Body is overflow-hidden: main below must scroll or every page
+                taller than the viewport is clipped. */}
             <main className="flex-1 relative flex flex-col min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
               {children}
             </main>

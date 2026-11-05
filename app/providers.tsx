@@ -70,6 +70,11 @@ function WalletSyncCore({
   // Track session dwell time for this wallet
   useSessionTracker(address, storeNetwork);
 
+  // Read cached username on the client only, after mount (no SSR/hydration split).
+  useEffect(() => {
+    useStore.getState().hydrateProfile();
+  }, []);
+
   // The connected address: a wagmi wallet, or Privy's embedded one.
   const connectedAddress = useMemo(() => {
     if (wagmiConnected && wagmiAddress) return wagmiAddress;

@@ -17,9 +17,9 @@ use axum::extract::Query;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Router};
-use serde_json::Value;
+use axum::Router;
 use serde::Deserialize;
+use serde_json::Value;
 
 use strike_core::prices;
 use strike_core::stream;
@@ -101,8 +101,14 @@ fn render_stream(
 
 fn sse_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(SSE_CONTENT_TYPE));
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(SSE_CACHE_CONTROL));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(SSE_CONTENT_TYPE),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(SSE_CACHE_CONTROL),
+    );
     headers.insert(header::CONNECTION, HeaderValue::from_static(SSE_CONNECTION));
     headers.insert(
         HeaderName::from_static("x-accel-buffering"),
@@ -135,7 +141,11 @@ mod tests {
     fn an_empty_selector_means_the_whole_feed() {
         for raw in [None, Some(""), Some("  "), Some(", , ")] {
             let assets = stream_assets(raw).unwrap();
-            assert_eq!(assets, prices::default_assets(), "{raw:?} must mean everything");
+            assert_eq!(
+                assets,
+                prices::default_assets(),
+                "{raw:?} must mean everything"
+            );
             assert!(!assets.is_empty());
         }
     }
@@ -153,7 +163,10 @@ mod tests {
         assert_eq!(headers[header::CACHE_CONTROL], SSE_CACHE_CONTROL);
         assert_eq!(headers[header::CONNECTION], SSE_CONNECTION);
         assert_eq!(headers["x-accel-buffering"], "no");
-        assert!(!headers.contains_key(header::ETAG), "a stream is not cacheable");
+        assert!(
+            !headers.contains_key(header::ETAG),
+            "a stream is not cacheable"
+        );
     }
 
     #[test]
@@ -179,8 +192,20 @@ mod tests {
         assert_eq!(stream::deliver(id, &[first.clone(), second.clone()]), 2);
 
         let mut rendered = Box::pin(render_stream(subscription, receiver));
-        assert_eq!(futures::StreamExt::next(&mut rendered).await.unwrap().unwrap(), first);
-        assert_eq!(futures::StreamExt::next(&mut rendered).await.unwrap().unwrap(), second);
+        assert_eq!(
+            futures::StreamExt::next(&mut rendered)
+                .await
+                .unwrap()
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            futures::StreamExt::next(&mut rendered)
+                .await
+                .unwrap()
+                .unwrap(),
+            second
+        );
 
         // Dropping the response is what unsubscribes: there is no explicit
         // teardown call for the handler to forget.

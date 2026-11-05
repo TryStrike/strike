@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use strike_core::address;
 use strike_core::crypto::{mint_balance_session, BALANCE_SESSION_COOKIE};
 use strike_core::error::{ApiError, ApiResult};
+use strike_core::ledger;
 
 use crate::bans::is_globally_banned;
 use crate::http::{json_with_cookie, Cookie};
@@ -55,7 +56,10 @@ async fn read_balance(
     Path(address_param): Path<String>,
     Query(query): Query<BalanceQuery>,
 ) -> ApiResult<Json<Value>> {
-    let currency = query.currency.filter(|c| !c.is_empty()).unwrap_or_else(|| "USDC".to_string());
+    let currency = query
+        .currency
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| "USDC".to_string());
 
     if !address::is_address(&address_param) {
         return Err(ApiError::bad_request(
@@ -84,28 +88,36 @@ async fn read_balance(
     }
     let bind_refs: Vec<(&str, &Value)> = binds.iter().map(|(t, v)| (*t, v)).collect();
 
-    let rows = sql::fetch(&statement, &bind_refs)
-        .await
-        .map_err(|err| {
-            tracing::error!("balance read failed: {err}");
-            ApiError::unavailable("Service temporarily unavailable. Please try again.")
-        })?;
+    let rows = sql::fetch(&statement, &bind_refs).await.map_err(|err| {
+        tracing::error!("balance read failed: {err}");
+        ApiError::unavailable("Service temporarily unavailable. Please try again.")
+    })?;
 
     if rows.is_empty() {
         return Ok(Json(Value::Object(Map::from_iter([
             ("balance".to_string(), Value::Number(0.into())),
             ("updatedAt".to_string(), Value::Null),
             ("tier".to_string(), Value::String("free".to_string())),
-            ("globallyBanned".to_string(), Value::Bool(is_globally_banned(&address_param).await)),
+            (
+                "globallyBanned".to_string(),
+                Value::Bool(is_globally_banned(&address_param).await),
+            ),
         ]))));
     }
 
-    // Sum in f64 exactly as the TS reduce did, and take the newest row for the
-    // timestamp: rows are ordered newest-first above.
-    let total: f64 = rows
-        .iter()
-        .filter_map(|row| row.get("balance").and_then(Value::as_f64))
-        .sum();
+    // Legacy duplicate rows sum in exact base units: this number is what the
+    // player sees as their money, so an unreadable row fails rather than
+    // quietly lowering it. Rows are ordered newest-first above.
+    let null = Value::Null;
+    let balances = rows.iter().map(|row| row.get("balance").unwrap_or(&null));
+    let Some(total_base) = ledger::sum_amounts_to_base_units(balances, ledger::USDC_DECIMALS)
+    else {
+        tracing::error!("Balance rows contain an unparseable amount: {rows:?}");
+        return Err(ApiError::unavailable(
+            "Service temporarily unavailable. Please try again.",
+        ));
+    };
+    let total = ledger::base_units_to_number(total_base, ledger::USDC_DECIMALS);
     let latest_updated = rows
         .first()
         .and_then(|row| row.get("updated_at"))
@@ -128,6 +140,9 @@ async fn read_balance(
         ("balance".to_string(), serde_json::json!(total)),
         ("updatedAt".to_string(), latest_updated),
         ("tier".to_string(), Value::String(tier)),
-        ("globallyBanned".to_string(), Value::Bool(is_globally_banned(&address_param).await)),
+        (
+            "globallyBanned".to_string(),
+            Value::Bool(is_globally_banned(&address_param).await),
+        ),
     ]))))
 }

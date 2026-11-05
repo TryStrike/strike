@@ -115,7 +115,10 @@ pub fn is_address_string(value: &str) -> bool {
 /// `/^[0-9a-f]{8,64}$/` — lowercase hex only, so an uppercase nonce is
 /// malformed rather than silently normalised.
 pub fn is_nonce(value: &str) -> bool {
-    (8..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    (8..=64).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 /// `/^0x[0-9a-fA-F]{130}$/` — 65 bytes, either casing.
@@ -129,7 +132,7 @@ pub fn verify_read_auth(raw: Option<&str>, now_ms: i64) -> Result<ReadAuthProof,
     let proof = parse_read_auth_header(raw).ok_or(ReadAuthFailure::Malformed)?;
 
     let age_ms = now_ms - proof.issued_at as i64;
-    if age_ms > READ_AUTH_MAX_AGE_MS || age_ms < -MAX_CLOCK_SKEW_MS {
+    if !(-MAX_CLOCK_SKEW_MS..=READ_AUTH_MAX_AGE_MS).contains(&age_ms) {
         return Err(ReadAuthFailure::Stale);
     }
 
@@ -195,7 +198,10 @@ mod tests {
         let address = address_of(key);
         let message = read_auth_message(&address, issued_at as f64, "deadbeef01");
         let signature = sign(key, &message);
-        (header(&address, issued_at as f64, "deadbeef01", &signature), address)
+        (
+            header(&address, issued_at as f64, "deadbeef01", &signature),
+            address,
+        )
     }
 
     #[test]
@@ -228,7 +234,11 @@ mod tests {
             Some("null"),
             Some("{\"address\":\"0x1\"}"),
         ] {
-            assert_eq!(verify_read_auth(raw, NOW).unwrap_err(), ReadAuthFailure::Malformed, "{raw:?}");
+            assert_eq!(
+                verify_read_auth(raw, NOW).unwrap_err(),
+                ReadAuthFailure::Malformed,
+                "{raw:?}"
+            );
         }
     }
 
@@ -241,7 +251,10 @@ mod tests {
         let signature = sign(&key, &message);
 
         // Address must be a full 0x + 40 hex.
-        assert!(parse_read_auth_header(Some(&header("0xabc", NOW as f64, good_nonce, &signature))).is_none());
+        assert!(
+            parse_read_auth_header(Some(&header("0xabc", NOW as f64, good_nonce, &signature)))
+                .is_none()
+        );
         // Nonce is lowercase hex, 8..64 long.
         assert!(!is_nonce("DEADBEEF"), "uppercase is not the declared shape");
         assert!(!is_nonce("abcdef"));
@@ -254,7 +267,8 @@ mod tests {
         // `issuedAt` must be a finite JSON number, not a stringified one.
         assert!(parse_read_auth_header(Some(
             &json!({ "address": address, "issuedAt": "1700000000000", "nonce": good_nonce,
-                     "signature": signature }).to_string()
+                     "signature": signature })
+            .to_string()
         ))
         .is_none());
     }
@@ -288,29 +302,46 @@ mod tests {
         let attacker = SigningKey::from_slice(&[0x22u8; 32]).unwrap();
         let victim_address = address_of(&signer());
         let message = read_auth_message(&victim_address, NOW as f64, "deadbeef01");
-        let raw = header(&victim_address, NOW as f64, "deadbeef01", &sign(&attacker, &message));
-        assert_eq!(verify_read_auth(Some(&raw), NOW).unwrap_err(), ReadAuthFailure::InvalidSignature);
+        let raw = header(
+            &victim_address,
+            NOW as f64,
+            "deadbeef01",
+            &sign(&attacker, &message),
+        );
+        assert_eq!(
+            verify_read_auth(Some(&raw), NOW).unwrap_err(),
+            ReadAuthFailure::InvalidSignature
+        );
 
         // A tampered nonce breaks the message the same way.
         let (good, _) = valid(&signer(), NOW);
         let tampered = good.replace("deadbeef01", "cafebabeff");
-        assert_eq!(verify_read_auth(Some(&tampered), NOW).unwrap_err(), ReadAuthFailure::InvalidSignature);
+        assert_eq!(
+            verify_read_auth(Some(&tampered), NOW).unwrap_err(),
+            ReadAuthFailure::InvalidSignature
+        );
     }
 
     #[test]
     fn failure_codes_match_the_route_body() {
         assert_eq!(ReadAuthFailure::Malformed.code(), "malformed");
         assert_eq!(ReadAuthFailure::Stale.code(), "stale");
-        assert_eq!(ReadAuthFailure::InvalidSignature.code(), "invalid_signature");
-        for failure in [ReadAuthFailure::Malformed, ReadAuthFailure::Stale, ReadAuthFailure::InvalidSignature] {
+        assert_eq!(
+            ReadAuthFailure::InvalidSignature.code(),
+            "invalid_signature"
+        );
+        for failure in [
+            ReadAuthFailure::Malformed,
+            ReadAuthFailure::Stale,
+            ReadAuthFailure::InvalidSignature,
+        ] {
             assert!(!failure.message().contains('%'), "no interpolated value");
         }
     }
 
     #[test]
     fn the_refresh_window_is_shorter_than_the_hard_cut_off() {
-        assert!(READ_AUTH_REFRESH_AFTER_MS < READ_AUTH_MAX_AGE_MS);
+        const _: () = assert!(READ_AUTH_REFRESH_AFTER_MS < READ_AUTH_MAX_AGE_MS);
         assert_eq!(READ_AUTH_MAX_AGE_MS, 10 * 60 * 1000);
     }
 }
-

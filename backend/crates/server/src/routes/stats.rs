@@ -35,8 +35,15 @@ pub fn routes() -> Router {
 fn unavailable_body() -> (StatusCode, Value) {
     let mut map = Map::new();
     for key in [
-        "totalBets", "totalWins", "totalLosses", "winRate", "totalWagered",
-        "totalPaidOut", "uniqueWallets", "totalDeposits", "totalWithdrawals",
+        "totalBets",
+        "totalWins",
+        "totalLosses",
+        "winRate",
+        "totalWagered",
+        "totalPaidOut",
+        "uniqueWallets",
+        "totalDeposits",
+        "totalWithdrawals",
     ] {
         map.insert(key.to_string(), Value::from(0));
     }
@@ -70,11 +77,10 @@ async fn serve() -> ApiResult<Value> {
     let body = platform_stats::compute(now_ms)
         .await
         .map(|stats| stats.public_value())
-        .map_err(|err| {
+        .inspect_err(|_err| {
             // A failed refresh drops the stale copy: serving week-old money
             // numbers as current would be worse than the zeros.
             *guard = None;
-            err
         })?;
     *guard = Some((Instant::now(), body.clone()));
     Ok(body)
@@ -92,7 +98,8 @@ fn respond(status: StatusCode, body: Value, cache_control: &str) -> Response {
     let mut response = (status, axum::Json(body)).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_str(cache_control).unwrap_or_else(|_| HeaderValue::from_static("no-store")),
+        HeaderValue::from_str(cache_control)
+            .unwrap_or_else(|_| HeaderValue::from_static("no-store")),
     );
     response
 }
@@ -107,13 +114,25 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         // Every key the landing page reads must exist, or its selectors throw.
         for key in [
-            "totalBets", "totalWins", "totalLosses", "winRate", "totalWagered",
-            "totalPaidOut", "uniqueWallets", "chainsActive", "totalDeposits",
-            "totalWithdrawals", "topCurrencies",
+            "totalBets",
+            "totalWins",
+            "totalLosses",
+            "winRate",
+            "totalWagered",
+            "totalPaidOut",
+            "uniqueWallets",
+            "chainsActive",
+            "totalDeposits",
+            "totalWithdrawals",
+            "topCurrencies",
         ] {
             assert!(body.get(key).is_some(), "{key} missing from the fallback");
         }
-        assert_eq!(body["chainsActive"], Value::from(1), "Arc only, like the TS");
+        assert_eq!(
+            body["chainsActive"],
+            Value::from(1),
+            "Arc only, like the TS"
+        );
         assert!(body["topCurrencies"].is_array());
         assert!(body.get("real").is_none() && body.get("demo").is_none());
     }

@@ -7,34 +7,36 @@ export interface ProfileState {
     isUpdatingUsername: boolean;
     recentTrades: any[];
     isLoadingTrades: boolean;
+    hydrateProfile: () => void;
     fetchProfile: (address: string) => Promise<void>;
     updateUsername: (address: string, username: string) => Promise<boolean>;
     fetchRecentTrades: (address: string) => Promise<void>;
 }
 
-export const createProfileSlice: StateCreator<ProfileState> = (set) => ({
-    username: (typeof window !== 'undefined' && localStorage.getItem('strike_username')) || null,
-    accessCode: (typeof window !== 'undefined' && localStorage.getItem('strike_access_code')) || null,
+export const createProfileSlice: StateCreator<ProfileState> = (set, get) => ({
+    username: null,
+    accessCode: null,
     isUpdatingUsername: false,
     recentTrades: [],
     isLoadingTrades: false,
+    hydrateProfile: () => {
+        if (typeof window === 'undefined') return;
+        const cached = localStorage.getItem('strike_username');
+        if (cached && !get().username) set({ username: cached });
+    },
     fetchProfile: async (address: string) => {
         if (!address || address.startsWith('0xDEMO')) return;
         try {
             const { data } = await supabase
                 .from('user_profiles')
-                .select('username, access_code')
+                .select('username')
                 .eq('user_address', address)
                 .single();
 
             if (data) {
-                set({
-                    username: data.username,
-                    accessCode: data.access_code
-                });
+                set({ username: data.username });
                 if (typeof window !== 'undefined') {
                     if (data.username) localStorage.setItem('strike_username', data.username);
-                    if (data.access_code) localStorage.setItem('strike_access_code', data.access_code);
                 }
             }
         } catch (error) {

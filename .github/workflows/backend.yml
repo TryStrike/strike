@@ -1,0 +1,198 @@
+# Backend (Rust) quality gates.
+#
+# The Rust service in backend/ is the production API. This workflow is the
+# merge gate for it and for the scripts that deploy it; deploy.yml only enforces
+# the commit-author policy.
+#
+# The server needs no Postgres. Only the `migrate` job does, because the tool it
+# tests exists to read a Postgres database: delete that job with the tool.
+
+name: Backend (Rust)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "backend/**"
+      # A workspace member, and the schema compiled into the server.
+      - "db/migrate_pg_to_sqlite/**"
+      - "db/schema.sqlite.sql"
+      - "scripts/deploy/**"
+      - ".github/workflows/backend.yml"
+      - "rust-toolchain.toml"
+      # The frontend job: the proxy config and what it builds from.
+      - "app/**"
+      - "components/**"
+      - "hooks/**"
+      - "lib/**"
+      - "next.config.ts"
+      - "package.json"
+      - "package-lock.json"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      # A workspace member, and the schema compiled into the server.
+      - "db/migrate_pg_to_sqlite/**"
+      - "db/schema.sqlite.sql"
+      - "scripts/deploy/**"
+      - ".github/workflows/backend.yml"
+      - "rust-toolchain.toml"
+      - "app/**"
+      - "components/**"
+      - "hooks/**"
+      - "lib/**"
+      - "next.config.ts"
+      - "package.json"
+      - "package-lock.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: fmt / clippy / build / test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+
+      - name: Format
+        run: cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --locked --manifest-path backend/Cargo.toml --workspace
+
+      # The core crate's test module is owned by the migration work; do not
+      # delete cases to make this pass. A red test job is a real signal.
+      - name: Test
+        run: cargo test --locked --manifest-path backend/Cargo.toml --workspace
+
+  parity:
+    name: Token parity gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+
+      # run.sh mints fixtures with the frozen JS algorithms in emit.mjs and
+      # verifies them with Rust, then does the reverse. It only needs Node's
+      # standard library.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Token parity
+        run: backend/parity/run.sh
+
+  migrate:
+    name: Postgres to SQLite migration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+
+      - name: Install clients
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client sqlite3
+
+      - name: Migrate a seeded database and check the abort paths
+        run: bash db/migrate_pg_to_sqlite/test.sh
+
+  frontend:
+    name: Lockfile, types, production build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install from the lockfile
+        run: npm ci --no-audit --no-fund
+
+      - name: Types
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+        env:
+          BACKEND_URL: http://127.0.0.1:8080
+
+  deploy-scripts:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install sqlite3 and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 shellcheck
+
+      - name: Shellcheck
+        run: shellcheck scripts/deploy/*.sh
+
+      - name: Install Litestream
+        run: sudo scripts/deploy/data.sh install-litestream
+
+      # sudo resets PATH, and Node from setup-node is not on the default one.
+      - name: Data, backup and restore logic
+        run: sudo env "PATH=$PATH" scripts/deploy/test.sh

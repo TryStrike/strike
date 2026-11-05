@@ -13,11 +13,10 @@
 //! `crates/server/src/routes/admin_reads_a.rs` add the guard and the wire shape.
 //!
 //! Wire discipline inherited from the TS, restated because it is load-bearing:
-//!   * **Bind typing.** node-pg sent every parameter with an unspecified OID and
-//!     let Postgres infer it; sqlx cannot. Each placeholder therefore carries the
-//!     column's own catalog type as `CAST($n AS <type>)` (see [`Binds`] and
-//!     `crate::db`). The types below are the primitive ones declared in
-//!     `supabase/migrations/001_complete_schema.sql` for exactly these tables
+//!   * **Bind typing.** Each placeholder carries the column's logical type as
+//!     `CAST($n AS <type>)` (see [`Binds`] and `crate::db`), which decides how the
+//!     value is stored. The types below are the primitive ones of
+//!     `crate::schema` for exactly these tables
 //!     (`text`, `timestamp with time zone`, `boolean`, `int8` for the paging
 //!     window), never a client-supplied string — same convention as
 //!     `routes/withdrawals.rs`.
@@ -26,7 +25,7 @@
 //!     named key list *after* the SELECT, so widening a column list cannot ship
 //!     a private column — the `routes/withdrawals.rs` discipline.
 //!   * **Numbers.** `NUMERIC(30,10)` reaches us as a JSON number via
-//!     `db::row_to_json`, which is what the TS sent too (`pg.types` parser =
+//!     `crate::db`, which is what the TS sent too (`pg.types` parser =
 //!     `parseFloat`), so `balance` / `amount` / `payout` stay numbers on both
 //!     sides. Where the TS *compared* one as a string (`currency`, `network`,
 //!     `asset`, `id` are TEXT and were lowercased/uppercased), that happens here
@@ -66,25 +65,51 @@ pub const SCAN_CAP: usize = 20_000;
 pub const MAX_CLIENT_MESSAGE_LENGTH: usize = 220;
 
 /// `user_balances` columns the users route reads (and ships).
-const BALANCE_SELECT: &str = "user_address, currency, balance, status, user_tier, updated_at, created_at";
+const BALANCE_SELECT: &str =
+    "user_address, currency, balance, status, user_tier, updated_at, created_at";
 /// The keys one user row may carry: the seven balance columns, then the four
 /// merged fields the dashboard reads. Nothing else reaches the client.
 pub const USER_ROW_KEYS: [&str; 11] = [
-    "user_address", "currency", "balance", "status", "user_tier", "updated_at", "created_at",
-    "tier", "username", "activity", "referral",
+    "user_address",
+    "currency",
+    "balance",
+    "status",
+    "user_tier",
+    "updated_at",
+    "created_at",
+    "tier",
+    "username",
+    "activity",
+    "referral",
 ];
 /// `SELECT_COLUMNS` from the transactions route, verbatim.
 const TRANSACTION_SELECT: &str = "id, user_address, currency, operation_type, amount, \
      balance_before, balance_after, transaction_hash, bet_id, created_at";
 pub const TRANSACTION_ROW_KEYS: [&str; 10] = [
-    "id", "user_address", "currency", "operation_type", "amount", "balance_before",
-    "balance_after", "transaction_hash", "bet_id", "created_at",
+    "id",
+    "user_address",
+    "currency",
+    "operation_type",
+    "amount",
+    "balance_before",
+    "balance_after",
+    "transaction_hash",
+    "bet_id",
+    "created_at",
 ];
 /// `SELECT_COLUMNS` from the game-history route, verbatim.
 const GAME_SELECT: &str = "id, wallet_address, asset, direction, amount, payout, won, mode, \
      network, created_at";
 pub const GAME_ROW_KEYS: [&str; 10] = [
-    "id", "wallet_address", "asset", "direction", "amount", "payout", "won", "mode", "network",
+    "id",
+    "wallet_address",
+    "asset",
+    "direction",
+    "amount",
+    "payout",
+    "won",
+    "mode",
+    "network",
     "created_at",
 ];
 /// The mode-analytics read needs the multiplier as well as the payout.
@@ -159,7 +184,10 @@ fn decode_form(raw: &str) -> String {
 /// `searchParams.get(name)`: the **first** occurrence wins, later duplicates are
 /// ignored. A stored `None` means the name was absent (`?? ''` in the parser).
 pub fn param<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    pairs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +218,10 @@ pub struct ListParams {
 impl ListParams {
     /// `p.extras.account ?? 'all'` and friends.
     pub fn extra(&self, name: &str) -> Option<&str> {
-        self.extras.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        self.extras
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -321,7 +352,10 @@ pub fn list_range(p: &ListParams) -> (i64, i64) {
 
 /// `parseListParams`. `Err(message)` is the 400 body text — client-safe by
 /// construction, which is why the routes echo it verbatim.
-pub fn parse_list_params(pairs: &[(String, String)], opts: &ListOptions) -> Result<ListParams, String> {
+pub fn parse_list_params(
+    pairs: &[(String, String)],
+    opts: &ListOptions,
+) -> Result<ListParams, String> {
     let mut params = ListParams::default();
 
     let limit_raw = param(pairs, "limit").unwrap_or("").trim().to_string();
@@ -347,7 +381,9 @@ pub fn parse_list_params(pairs: &[(String, String)], opts: &ListOptions) -> Resu
     if !q_raw.is_empty() {
         let q = sanitize_query_term(&q_raw);
         if utf16_len(&q_raw) > LIST_MAX_QUERY_LENGTH * 2 {
-            return Err(format!("q is too long (max {LIST_MAX_QUERY_LENGTH} characters)."));
+            return Err(format!(
+                "q is too long (max {LIST_MAX_QUERY_LENGTH} characters)."
+            ));
         }
         params.q = if q.is_empty() { None } else { Some(q) };
     }
@@ -355,7 +391,8 @@ pub fn parse_list_params(pairs: &[(String, String)], opts: &ListOptions) -> Resu
     let status_raw = param(pairs, "status").unwrap_or("").trim().to_lowercase();
     if !status_raw.is_empty() {
         let allowed = opts.status_values;
-        let known = allowed.is_some_and(|values| !values.is_empty() && values.contains(&status_raw.as_str()));
+        let known = allowed
+            .is_some_and(|values| !values.is_empty() && values.contains(&status_raw.as_str()));
         if !known {
             let allowed_text = match allowed {
                 Some(values) if !values.is_empty() => {
@@ -505,7 +542,9 @@ fn has_word_space_word(haystack: &str, first: &str, second: &str) -> bool {
 fn has_update_set(haystack: &str) -> bool {
     let bytes = haystack.as_bytes();
     word_positions(haystack, "update").into_iter().any(|i| {
-        let Some(after_first) = skip_ws(haystack, i + "update".len()) else { return false };
+        let Some(after_first) = skip_ws(haystack, i + "update".len()) else {
+            return false;
+        };
         let mut idx = after_first;
         let token_start = idx;
         while idx < bytes.len() && !(bytes[idx] as char).is_ascii_whitespace() {
@@ -514,7 +553,9 @@ fn has_update_set(haystack: &str) -> bool {
         if idx == token_start {
             return false; // `\S+` needs at least one character
         }
-        let Some(after_token) = skip_ws(haystack, idx) else { return false };
+        let Some(after_token) = skip_ws(haystack, idx) else {
+            return false;
+        };
         word_at(haystack, after_token, "set")
     })
 }
@@ -540,7 +581,9 @@ fn has_stack_frame(haystack: &str) -> bool {
         if start > 0 && is_word_byte(bytes[start - 1]) {
             continue;
         }
-        let Some(after_at) = skip_ws(haystack, start + 2) else { continue };
+        let Some(after_at) = skip_ws(haystack, start + 2) else {
+            continue;
+        };
         let mut idx = after_at;
         while idx < bytes.len() && !(bytes[idx] as char).is_ascii_whitespace() {
             idx += 1;
@@ -548,7 +591,9 @@ fn has_stack_frame(haystack: &str) -> bool {
         if idx == after_at {
             continue;
         }
-        let Some(after_token) = skip_ws(haystack, idx) else { continue };
+        let Some(after_token) = skip_ws(haystack, idx) else {
+            continue;
+        };
         if bytes.get(after_token) != Some(&b'(') {
             continue;
         }
@@ -562,7 +607,9 @@ fn has_stack_frame(haystack: &str) -> bool {
 /// The `\(.*:\d+:\d+\)` tail: two colon-separated digit runs before a `)`, on
 /// one line (`.` does not cross a newline in JS).
 fn line_ends_with_coords(rest: &str) -> bool {
-    let Some(line_end) = rest.find('\n') else { return ends_with_coords_line(rest) };
+    let Some(line_end) = rest.find('\n') else {
+        return ends_with_coords_line(rest);
+    };
     ends_with_coords_line(&rest[..line_end])
 }
 
@@ -594,7 +641,9 @@ impl DigitPair for str {
         parts.len() == 3
             && !parts[0].is_empty()
             && parts[0].bytes().all(|b| b.is_ascii_digit())
-            && parts[1].bytes().all(|b| !b.is_ascii_whitespace() && !(b as char).is_ascii_whitespace())
+            && parts[1]
+                .bytes()
+                .all(|b| !b.is_ascii_whitespace() && !(b as char).is_ascii_whitespace())
             && !parts[1].is_empty()
     }
 }
@@ -624,7 +673,7 @@ fn has_pg_error_json(haystack: &str) -> bool {
             .iter()
             .find(|key| {
                 let end = name_start + key.len();
-                end <= bytes.len() && lower[name_start..end].eq_ignore_ascii_case(*key)
+                end <= bytes.len() && lower[name_start..end].eq_ignore_ascii_case(key)
             })
             .map(|k| k.len())
             .unwrap_or(0);
@@ -648,7 +697,11 @@ pub fn looks_like_internal_error(message: &str) -> bool {
     if utf16_len(message) > MAX_CLIENT_MESSAGE_LENGTH {
         return true;
     }
-    if message.trim().chars().any(|c| matches!(c, '\r' | '\n' | '\t')) {
+    if message
+        .trim()
+        .chars()
+        .any(|c| matches!(c, '\r' | '\n' | '\t'))
+    {
         return true;
     }
     has_word_then(message, "select", "from")
@@ -681,6 +734,9 @@ pub fn looks_like_internal_error(message: &str) -> bool {
         || contains_ci(message, "TOKEN")
         || has_stack_frame(message)
         || message.contains("node_modules")
+        || message.contains("sqlite")
+        || message.contains("no such table")
+        || message.contains("no such column")
         || has_pg_error_json(message)
 }
 
@@ -720,7 +776,10 @@ pub fn sanitize_error_message(raw: &str, fallback: &str) -> String {
 
 /// `{ error: message }`, the one body shape every admin route uses.
 pub fn error_body(message: &str) -> Value {
-    Value::Object(Map::from_iter([("error".to_string(), Value::String(message.to_string()))]))
+    Value::Object(Map::from_iter([(
+        "error".to_string(),
+        Value::String(message.to_string()),
+    )]))
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +820,10 @@ impl Binds {
 
     /// The first `n` binds, for the COUNT query that shares the WHERE prefix.
     pub fn refs_upto(&self, n: usize) -> Vec<(&str, &Value)> {
-        self.entries[..n.min(self.len())].iter().map(|(t, v)| (t.as_str(), v)).collect()
+        self.entries[..n.min(self.len())]
+            .iter()
+            .map(|(t, v)| (t.as_str(), v))
+            .collect()
     }
 }
 
@@ -818,7 +880,10 @@ pub fn admin_stats_body(stats: &PlatformStats) -> Value {
     );
     map.insert("platformPnL".into(), json_number(combined_pnl));
     map.insert("revenue".into(), json_number(combined_pnl));
-    map.insert("currencyStats".into(), currency_stats_body(&stats.currency_stats));
+    map.insert(
+        "currencyStats".into(),
+        currency_stats_body(&stats.currency_stats),
+    );
     map.insert("demo".into(), stats.demo.to_value());
     map.insert("real".into(), stats.real.to_value());
     Value::Object(map)
@@ -937,6 +1002,7 @@ pub fn aggregate_user_activity(bets: &[Value]) -> HashMap<String, UserActivity> 
 /// `Err(())` models the TS `(x || '').toUpperCase()` TypeError a non-string,
 /// non-null asset would have thrown (caught by the route as a 500).
 /// `bet_history.asset` is `TEXT NOT NULL`, so it is unreachable in practice.
+#[allow(clippy::result_unit_err)]
 pub fn resolve_house_ledger_currency(selected_currency: Option<&Value>) -> Result<String, ()> {
     const PLAYABLE: [&str; 1] = ["USDC"];
     let selected = match selected_currency {
@@ -944,22 +1010,36 @@ pub fn resolve_house_ledger_currency(selected_currency: Option<&Value>) -> Resul
         Some(Value::String(s)) => s.to_uppercase(),
         Some(_) => return Err(()),
     };
-    Ok(if PLAYABLE.contains(&selected.as_str()) { selected } else { "USDC".to_string() })
+    Ok(if PLAYABLE.contains(&selected.as_str()) {
+        selected
+    } else {
+        "USDC".to_string()
+    })
 }
 
 /// `syntheticFromBets`: wallets that bet on an `(address, currency)` pair with
 /// no `user_balances` row yet appear as zero balances, so the list is not
 /// limited to people who have already deposited.
-pub fn synthetic_balance_rows(balances: &[Value], bets: &[Value], now_iso: &str) -> ApiResult<Vec<Value>> {
+pub fn synthetic_balance_rows(
+    balances: &[Value],
+    bets: &[Value],
+    now_iso: &str,
+) -> ApiResult<Vec<Value>> {
     let mut seen: HashSet<String> = balances
         .iter()
-        .map(|b| balance_row_key(b.get("user_address").unwrap_or(&Value::Null), b.get("currency").unwrap_or(&Value::Null)))
+        .map(|b| {
+            balance_row_key(
+                b.get("user_address").unwrap_or(&Value::Null),
+                b.get("currency").unwrap_or(&Value::Null),
+            )
+        })
         .collect();
     let mut out = Vec::new();
     for row in bets.iter().filter(|b| !is_demo_bet(b)) {
         let wallet = canonical_of(row.get("wallet_address").unwrap_or(&Value::Null));
-        let currency = resolve_house_ledger_currency(row.get("asset"))
-            .map_err(|_| ApiError::Other("selectedCurrency.toUpperCase is not a function".into()))?;
+        let currency = resolve_house_ledger_currency(row.get("asset")).map_err(|_| {
+            ApiError::Other("selectedCurrency.toUpperCase is not a function".into())
+        })?;
         let key = format!("{wallet}::{currency}");
         if !seen.insert(key) {
             continue;
@@ -999,7 +1079,10 @@ pub fn build_user_rows(
     // row read, which is whatever order Postgres returned them in.
     let mut referral_map: HashMap<String, Value> = HashMap::new();
     for row in referrals {
-        referral_map.insert(canonical_of(row.get("user_address").unwrap_or(&Value::Null)), row.clone());
+        referral_map.insert(
+            canonical_of(row.get("user_address").unwrap_or(&Value::Null)),
+            row.clone(),
+        );
     }
     let mut profile_map: HashMap<String, String> = HashMap::new();
     for row in profiles {
@@ -1007,7 +1090,10 @@ pub fn build_user_rows(
             Some(Value::String(s)) => s.clone(),
             _ => String::new(),
         };
-        profile_map.insert(canonical_of(row.get("user_address").unwrap_or(&Value::Null)), username);
+        profile_map.insert(
+            canonical_of(row.get("user_address").unwrap_or(&Value::Null)),
+            username,
+        );
     }
 
     let users: Vec<Value> = merged
@@ -1023,13 +1109,19 @@ pub fn build_user_rows(
             let username = profile_map.get(&addr).cloned().unwrap_or_default();
             row.insert(
                 "username".into(),
-                if username.is_empty() { Value::Null } else { Value::String(username) },
+                if username.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(username)
+                },
             );
             row.insert(
                 "activity".into(),
-                activity.get(&addr).cloned().map(|a| a.to_value()).unwrap_or_else(|| {
-                    UserActivity::default().to_value()
-                }),
+                activity
+                    .get(&addr)
+                    .cloned()
+                    .map(|a| a.to_value())
+                    .unwrap_or_else(|| UserActivity::default().to_value()),
             );
             let referral = referral_map.get(&addr).cloned().unwrap_or_else(|| {
                 let mut fallback = Map::new();
@@ -1109,6 +1201,11 @@ fn address_of(row: &Value) -> String {
 
 /// `matchesListFilters` — the uniform in-memory filters over aggregated rows.
 pub fn matches_list_filters(row: &Value, p: &ListParams) -> bool {
+    matches_list_filters_on(row, p, "updated_at")
+}
+
+/// The same filters with the time window over `time_field`.
+pub fn matches_list_filters_on(row: &Value, p: &ListParams, time_field: &str) -> bool {
     if let Some(q) = &p.q {
         let needle = q.to_lowercase();
         let address = row
@@ -1145,7 +1242,7 @@ pub fn matches_list_filters(row: &Value, p: &ListParams) -> bool {
         }
     }
     if p.from.is_some() || p.to.is_some() {
-        let ts = parse_epoch_ms(row.get("updated_at"));
+        let ts = parse_epoch_ms(row.get(time_field));
         if ts.is_finite() {
             if let Some(from) = &p.from {
                 let bound_value = Value::String(from.clone());
@@ -1236,7 +1333,12 @@ pub fn users_page(
         .into_iter()
         .map(|row| project_row(&row, &USER_ROW_KEYS))
         .collect();
-    Ok(UsersPage { users, total, limit: p.limit, offset: p.offset })
+    Ok(UsersPage {
+        users,
+        total,
+        limit: p.limit,
+        offset: p.offset,
+    })
 }
 
 /// The whitelisted projection: only these keys ship, absent columns become
@@ -1320,10 +1422,14 @@ pub fn status_update(variants: &[String], status: &str) -> Prepared {
     } else {
         list.join(", ")
     };
-    let sql = format!(
-        "UPDATE user_balances SET status = {status_ph} WHERE user_address IN ({guard})"
-    );
-    Prepared { sql, count_sql: None, binds, filter_binds: 0 }
+    let sql =
+        format!("UPDATE user_balances SET status = {status_ph} WHERE user_address IN ({guard})");
+    Prepared {
+        sql,
+        count_sql: None,
+        binds,
+        filter_binds: 0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1356,7 +1462,7 @@ pub fn transactions_statement(p: &ListParams) -> Prepared {
         let address_ph = binds.push(TEXT, pattern.clone());
         let hash_ph = binds.push(TEXT, pattern);
         clauses.push(format!(
-            "(user_address ILIKE {address_ph} OR transaction_hash ILIKE {hash_ph})"
+            "(pg_ilike(user_address, {address_ph}) OR pg_ilike(transaction_hash, {hash_ph}))"
         ));
     }
     if let Some(from) = &p.from {
@@ -1379,7 +1485,7 @@ pub fn transactions_statement(p: &ListParams) -> Prepared {
              ORDER BY created_at DESC, id DESC LIMIT {limit_ph} OFFSET {offset_ph}"
         ),
         count_sql: Some(format!(
-            "SELECT COUNT(*)::bigint AS count FROM balance_audit_log {where_sql}"
+            "SELECT COUNT(*) AS count FROM balance_audit_log {where_sql}"
         )),
         binds,
         filter_binds,
@@ -1390,7 +1496,10 @@ pub fn transactions_statement(p: &ListParams) -> Prepared {
 /// the paging trio the TS added.
 pub fn transactions_body(rows: &[Value], total: i64, p: &ListParams) -> Value {
     let mut map = Map::new();
-    map.insert("transactions".into(), Value::Array(project_rows(rows, &TRANSACTION_ROW_KEYS)));
+    map.insert(
+        "transactions".into(),
+        Value::Array(project_rows(rows, &TRANSACTION_ROW_KEYS)),
+    );
     map.insert("total".into(), json_count(total));
     map.insert("limit".into(), json_count(p.limit));
     map.insert("offset".into(), json_count(p.offset));
@@ -1425,7 +1534,7 @@ fn game_history_clauses(p: &ListParams, binds: &mut Binds) -> Vec<String> {
         let asset_ph = binds.push(TEXT, pattern.clone());
         let id_ph = binds.push(TEXT, pattern);
         clauses.push(format!(
-            "(wallet_address ILIKE {wallet_ph} OR asset ILIKE {asset_ph} OR id ILIKE {id_ph})"
+            "(pg_ilike(wallet_address, {wallet_ph}) OR pg_ilike(asset, {asset_ph}) OR pg_ilike(id, {id_ph}))"
         ));
     }
     if let Some(from) = &p.from {
@@ -1459,7 +1568,7 @@ pub fn game_history_page_statement(p: &ListParams) -> Prepared {
              ORDER BY created_at DESC, id DESC LIMIT {limit_ph} OFFSET {offset_ph}"
         ),
         count_sql: Some(format!(
-            "SELECT COUNT(*)::bigint AS count FROM bet_history {where_sql}"
+            "SELECT COUNT(*) AS count FROM bet_history {where_sql}"
         )),
         binds,
         filter_binds,
@@ -1535,7 +1644,10 @@ pub fn game_history_body(
     truncated: Option<bool>,
 ) -> Value {
     let mut map = Map::new();
-    map.insert("bets".into(), Value::Array(project_rows(bets, &GAME_ROW_KEYS)));
+    map.insert(
+        "bets".into(),
+        Value::Array(project_rows(bets, &GAME_ROW_KEYS)),
+    );
     map.insert("total".into(), json_count(total));
     map.insert("limit".into(), json_count(p.limit));
     map.insert("offset".into(), json_count(p.offset));
@@ -1757,7 +1869,7 @@ pub fn compute_modes(bets: &[Value]) -> Vec<ModeStat> {
                 })
                 .collect();
             let mut assets = acc.assets;
-            assets.sort_by(|a, b| b.1.cmp(&a.1));
+            assets.sort_by_key(|asset| std::cmp::Reverse(asset.1));
             let top_assets = assets.into_iter().take(5).collect();
             ModeStat {
                 label: mode_display_label(&mode).to_string(),
@@ -1786,7 +1898,7 @@ pub fn compute_modes(bets: &[Value]) -> Vec<ModeStat> {
         })
         .collect();
     // Busiest mode first; V8's stable sort keeps the first-seen order on ties.
-    stats.sort_by(|a, b| b.total_bets.cmp(&a.total_bets));
+    stats.sort_by_key(|stat| std::cmp::Reverse(stat.total_bets));
     stats
 }
 
@@ -1795,9 +1907,28 @@ pub fn mode_analytics_body(all: &[Value]) -> Value {
     let real: Vec<Value> = all.iter().filter(|b| !is_demo_bet(b)).cloned().collect();
     let demo: Vec<Value> = all.iter().filter(|b| is_demo_bet(b)).cloned().collect();
     let mut map = Map::new();
-    map.insert("real".into(), Value::Array(compute_modes(&real).iter().map(ModeStat::to_value).collect()));
-    map.insert("demo".into(), Value::Array(compute_modes(&demo).iter().map(ModeStat::to_value).collect()));
-    map.insert("combined".into(), Value::Array(compute_modes(all).iter().map(ModeStat::to_value).collect()));
+    map.insert(
+        "real".into(),
+        Value::Array(
+            compute_modes(&real)
+                .iter()
+                .map(ModeStat::to_value)
+                .collect(),
+        ),
+    );
+    map.insert(
+        "demo".into(),
+        Value::Array(
+            compute_modes(&demo)
+                .iter()
+                .map(ModeStat::to_value)
+                .collect(),
+        ),
+    );
+    map.insert(
+        "combined".into(),
+        Value::Array(compute_modes(all).iter().map(ModeStat::to_value).collect()),
+    );
     map.insert("totalBets".into(), json_count(all.len() as i64));
     map.insert("totalRealBets".into(), json_count(real.len() as i64));
     map.insert("totalDemoBets".into(), json_count(demo.len() as i64));
@@ -1868,9 +1999,7 @@ pub async fn load_users(p: &ListParams, now_ms: i64) -> ApiResult<UsersPage> {
     // One unpaginated read: the TS's bet count query has no `.range()`, so the
     // "1000-row default" its comment worries about never applied here.
     let bets = db::fetch(
-        &format!(
-            "SELECT id, wallet_address, amount, payout, won, network, asset FROM bet_history"
-        ),
+        "SELECT id, wallet_address, amount, payout, won, network, asset FROM bet_history",
         &[],
     )
     .await?;
@@ -1939,7 +2068,7 @@ pub async fn load_mode_analytics() -> ApiResult<Value> {
 /// but, like the TS, never inspected: the route answers success regardless.
 pub async fn apply_user_status(variants: &[String], status: &str) -> ApiResult<u64> {
     let prepared = status_update(variants, status);
-    Ok(db::execute(&prepared.sql, &prepared.row_refs()).await?)
+    db::execute(&prepared.sql, &prepared.row_refs()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1962,8 +2091,14 @@ mod tests {
         )
     }
 
-    fn opts<'a>(status: Option<&'a [&'a str]>, extras: &'a [(&'a str, &'a [&'a str])]) -> ListOptions<'a> {
-        ListOptions { status_values: status, extra_enums: extras }
+    fn opts<'a>(
+        status: Option<&'a [&'a str]>,
+        extras: &'a [(&'a str, &'a [&'a str])],
+    ) -> ListOptions<'a> {
+        ListOptions {
+            status_values: status,
+            extra_enums: extras,
+        }
     }
 
     fn parsed(query: &[(&str, &str)], o: &ListOptions) -> ListParams {
@@ -1981,6 +2116,26 @@ mod tests {
     }
 
     // -- URLSearchParams ----------------------------------------------------
+
+    #[test]
+    fn the_time_window_reads_the_field_it_is_given() {
+        let window = ListParams {
+            from: Some("2026-01-01T00:00:00.000Z".to_string()),
+            ..ListParams::default()
+        };
+        let row = json!({
+            "updated_at": "2020-01-01T00:00:00.000Z",
+            "first_deposit_at": "2026-06-01T00:00:00.000Z",
+        });
+        assert!(!matches_list_filters(&row, &window));
+        assert!(matches_list_filters_on(&row, &window, "first_deposit_at"));
+        // Never deposited: a bounded range cannot place the row.
+        assert!(!matches_list_filters_on(
+            &json!({ "first_deposit_at": null }),
+            &window,
+            "first_deposit_at"
+        ));
+    }
 
     #[test]
     fn query_decoding_follows_urlsearchparams() {
@@ -2013,7 +2168,10 @@ mod tests {
         assert_eq!(parsed(&[("limit", "1")], &o).limit, 1);
         // Clamped, not refused, while still a safe integer.
         assert!(parsed(&[("offset", "999999999999")], &o).offset <= LIST_MAX_OFFSET);
-        assert_eq!(list_range(&parsed(&[("limit", "25"), ("offset", "50")], &o)), (50, 74));
+        assert_eq!(
+            list_range(&parsed(&[("limit", "25"), ("offset", "50")], &o)),
+            (50, 74)
+        );
         // Leading zeros are still whole numbers.
         assert_eq!(parsed(&[("limit", "0012")], &o).limit, 12);
     }
@@ -2021,7 +2179,17 @@ mod tests {
     #[test]
     fn non_integer_or_unsafe_paging_input_is_rejected() {
         let o = opts(None, &[]);
-        for bad in ["NaN", "Infinity", "-Infinity", "1e5x", "abc", "5.5", "-10", "%2B5", "0x10"] {
+        for bad in [
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "1e5x",
+            "abc",
+            "5.5",
+            "-10",
+            "%2B5",
+            "0x10",
+        ] {
             assert!(
                 rejected(&[("limit", bad)], &o).contains("limit"),
                 "{bad} should be a limit rejection"
@@ -2044,33 +2212,48 @@ mod tests {
     #[test]
     fn q_is_sanitized_before_it_can_reach_the_or_clause() {
         let o = opts(None, &[]);
-        assert_eq!(parsed(&[("q", "  0xAbC123  ")], &o).q.as_deref(), Some("0xAbC123"));
+        assert_eq!(
+            parsed(&[("q", "  0xAbC123  ")], &o).q.as_deref(),
+            Some("0xAbC123")
+        );
         assert_eq!(parsed(&[("q", "a,b")], &o).q.as_deref(), Some("ab"));
         assert_eq!(parsed(&[("q", "   ")], &o).q, None);
         assert_eq!(sanitize_query_term("a,b\r(c)d\u{0}e"), "ab(c)de");
         // Over 2x the cap is a refusal; inside it, a truncation.
         assert!(rejected(&[("q", &"x".repeat(250))], &o).contains("q is too long"));
         let long = "y".repeat(150);
-        assert_eq!(parsed(&[("q", &long)], &o).q.unwrap().len(), LIST_MAX_QUERY_LENGTH);
+        assert_eq!(
+            parsed(&[("q", &long)], &o).q.unwrap().len(),
+            LIST_MAX_QUERY_LENGTH
+        );
         assert_eq!(like_pattern("0xabc"), "%0xabc%");
     }
 
     #[test]
     fn enums_are_validated_before_sql_and_named_in_the_error() {
         let o = opts(Some(&TRANSACTION_STATUS_VALUES), &[]);
-        assert_eq!(parsed(&[("status", "DEPOSIT")], &o).status.as_deref(), Some("deposit"));
+        assert_eq!(
+            parsed(&[("status", "DEPOSIT")], &o).status.as_deref(),
+            Some("deposit")
+        );
         assert_eq!(
             rejected(&[("status", "refunded")], &o),
             "Invalid status: refunded. Allowed: deposit, withdrawal."
         );
         // A route that declares no enum refuses any status rather than 500ing.
         let none = opts(None, &[]);
-        assert_eq!(rejected(&[("status", "anything")], &none), "Invalid status: anything.");
+        assert_eq!(
+            rejected(&[("status", "anything")], &none),
+            "Invalid status: anything."
+        );
 
         let extras: [&str; 3] = ["all", "real", "demo"];
         let enum_list = [("account", &extras[..])];
         let eo = opts(Some(&GAME_STATUS_VALUES), &enum_list);
-        assert_eq!(parsed(&[("account", "Real")], &eo).extra("account"), Some("real"));
+        assert_eq!(
+            parsed(&[("account", "Real")], &eo).extra("account"),
+            Some("real")
+        );
         assert_eq!(
             rejected(&[("account", "testnet")], &eo),
             "Invalid account: testnet. Allowed: all, real, demo."
@@ -2081,32 +2264,45 @@ mod tests {
     #[test]
     fn currency_must_be_a_short_ticker() {
         let o = opts(None, &[]);
-        assert_eq!(parsed(&[("currency", "usdc")], &o).currency.as_deref(), Some("USDC"));
+        assert_eq!(
+            parsed(&[("currency", "usdc")], &o).currency.as_deref(),
+            Some("USDC")
+        );
         for bad in ["USDC; DROP TABLE", "%a%", &"A".repeat(17), "a-b"] {
             assert!(
                 rejected(&[("currency", bad)], &o).contains("currency"),
                 "{bad} should be rejected"
             );
         }
-        assert_eq!(parsed(&[("currency", "A_1")], &o).currency.as_deref(), Some("A_1"));
+        assert_eq!(
+            parsed(&[("currency", "A_1")], &o).currency.as_deref(),
+            Some("A_1")
+        );
     }
 
     #[test]
     fn date_bounds_are_normalized_to_utc_iso_and_ordered() {
         let o = opts(None, &[]);
-        assert_eq!(parsed(&[("from", "2026-10-01")], &o).from.as_deref(), Some("2026-10-01T00:00:00.000Z"));
+        assert_eq!(
+            parsed(&[("from", "2026-10-01")], &o).from.as_deref(),
+            Some("2026-10-01T00:00:00.000Z")
+        );
         assert_eq!(
             parsed(&[("to", "2026-10-02T12:30:00Z")], &o).to.as_deref(),
             Some("2026-10-02T12:30:00.000Z")
         );
-        assert!(rejected(&[("from", "yesterday")], &o).contains("Invalid from (expected an ISO date)"));
+        assert!(
+            rejected(&[("from", "yesterday")], &o).contains("Invalid from (expected an ISO date)")
+        );
         assert!(rejected(&[("to", "2026-13-45")], &o).contains("Invalid to"));
         assert_eq!(
             rejected(&[("from", "2026-10-05"), ("to", "2026-10-01")], &o),
             "to must not be earlier than from."
         );
         // An equal bound is allowed (the window is inclusive on both ends).
-        assert!(parse_list_params(&pairs(&[("from", "2026-10-01"), ("to", "2026-10-01")]), &o).is_ok());
+        assert!(
+            parse_list_params(&pairs(&[("from", "2026-10-01"), ("to", "2026-10-01")]), &o).is_ok()
+        );
     }
 
     // -- error sanitizer ---------------------------------------------------
@@ -2144,7 +2340,10 @@ mod tests {
                 looks_like_internal_error(leak) || leak.is_empty(),
                 "leaked: {leak}"
             );
-            assert_eq!(sanitize_error_message(leak, "generic fallback"), "generic fallback");
+            assert_eq!(
+                sanitize_error_message(leak, "generic fallback"),
+                "generic fallback"
+            );
         }
     }
 
@@ -2154,24 +2353,34 @@ mod tests {
             sanitize_error_message("Insufficient house balance for acceptance", "fb"),
             "Insufficient house balance for acceptance"
         );
-        assert_eq!(sanitize_error_message("  Request not found  ", "fb"), "Request not found");
+        assert_eq!(
+            sanitize_error_message("  Request not found  ", "fb"),
+            "Request not found"
+        );
         // The guard runs on the trimmed message; a long raw message still fails.
-        assert!(looks_like_internal_error(&"y".repeat(MAX_CLIENT_MESSAGE_LENGTH + 1)));
+        assert!(looks_like_internal_error(
+            &"y".repeat(MAX_CLIENT_MESSAGE_LENGTH + 1)
+        ));
     }
 
     // -- /api/admin/stats body ---------------------------------------------
 
     fn mode_stats(volume: f64, payout: f64, bets: usize, users: usize) -> ModeStats {
-        let mut stats = ModeStats::default();
-        stats.total_bets = bets;
-        stats.total_volume = volume;
-        stats.total_payout = payout;
-        stats.platform_pnl = volume - payout;
-        stats.total_users = users;
-        stats
+        ModeStats {
+            total_bets: bets,
+            total_volume: volume,
+            total_payout: payout,
+            platform_pnl: volume - payout,
+            total_users: users,
+            ..ModeStats::default()
+        }
     }
 
-    fn platform(real: ModeStats, demo: ModeStats, currencies: &[(&str, CurrencyStat)]) -> PlatformStats {
+    fn platform(
+        real: ModeStats,
+        demo: ModeStats,
+        currencies: &[(&str, CurrencyStat)],
+    ) -> PlatformStats {
         let mut currency_stats = BTreeMap::new();
         for (name, stat) in currencies {
             currency_stats.insert(name.to_string(), *stat);
@@ -2190,12 +2399,22 @@ mod tests {
         let body = admin_stats_body(&platform(
             mode_stats(1000.0, 400.0, 10, 4),
             mode_stats(250.0, 100.0, 5, 2),
-            &[("USDC", CurrencyStat { total_balance: 12.5, user_count: 3 })],
+            &[(
+                "USDC",
+                CurrencyStat {
+                    total_balance: 12.5,
+                    user_count: 3,
+                },
+            )],
         ));
         // Integral sums print the way `JSON.stringify` prints them: no `.0`.
         assert_eq!(body["totalVolume"], json!(1250));
         assert_eq!(body["totalBets"], json!(15));
-        assert_eq!(body["totalUsers"], json!(6), "the TS adds the two sets, so a wallet in both counts twice");
+        assert_eq!(
+            body["totalUsers"],
+            json!(6),
+            "the TS adds the two sets, so a wallet in both counts twice"
+        );
         assert_eq!(body["platformPnL"], json!(750));
         assert_eq!(body["revenue"], body["platformPnL"]);
         assert_eq!(body["currencyStats"]["USDC"]["totalBalance"], json!(12.5));
@@ -2207,7 +2426,11 @@ mod tests {
 
     #[test]
     fn a_nan_aggregate_surfaces_as_null_like_json_stringify_did() {
-        let body = admin_stats_body(&platform(mode_stats(f64::NAN, 0.0, 1, 0), mode_stats(0.0, 0.0, 0, 0), &[]));
+        let body = admin_stats_body(&platform(
+            mode_stats(f64::NAN, 0.0, 1, 0),
+            mode_stats(0.0, 0.0, 0, 0),
+            &[],
+        ));
         assert_eq!(body["totalVolume"], Value::Null);
     }
 
@@ -2242,16 +2465,25 @@ mod tests {
 
     #[test]
     fn synthetic_rows_fill_bet_wallets_that_have_no_balance_row() {
-        let balances = vec![balance("0xABC", "USDC", 1.0, "active", "2026-01-02T00:00:00.000Z")];
+        let balances = vec![balance(
+            "0xABC",
+            "USDC",
+            1.0,
+            "active",
+            "2026-01-02T00:00:00.000Z",
+        )];
         let bets = vec![
             bet("b1", "0xabc", 1.0, false, "USDC"),
             bet("b2", "0xdef", 1.0, false, "BOTCOIN"),
             bet("b3", "0xd3f", 1.0, false, ""),
             bet("demo-b4", "0xghost", 1.0, false, "USDC"),
         ];
-        let rows =
-            synthetic_balance_rows(&balances, &bets, "2026-05-05T00:00:00.000Z").unwrap();
-        assert_eq!(rows.len(), 2, "the seen key and the demo bet are both skipped");
+        let rows = synthetic_balance_rows(&balances, &bets, "2026-05-05T00:00:00.000Z").unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the seen key and the demo bet are both skipped"
+        );
         assert_eq!(rows[0]["user_address"], json!("0xdef"));
         // resolveHouseLedgerCurrency: an unrecognised asset is USDC, never a
         // currency the treasury cannot pay out.
@@ -2264,35 +2496,72 @@ mod tests {
         assert!(resolve_house_ledger_currency(Some(&json!("usdc"))).unwrap() == "USDC");
         // A non-string asset is the TypeError the TS would have thrown.
         assert!(resolve_house_ledger_currency(Some(&json!(5))).is_err());
-        assert_eq!(resolve_house_ledger_currency(Some(&Value::Null)).unwrap(), "USDC");
+        assert_eq!(
+            resolve_house_ledger_currency(Some(&Value::Null)).unwrap(),
+            "USDC"
+        );
     }
 
     #[test]
     fn a_non_string_asset_aborts_the_users_read_as_the_ts_typeerror_did() {
-        let balances = vec![balance("0xabc", "USDC", 1.0, "active", "2026-01-02T00:00:00.000Z")];
+        let balances = vec![balance(
+            "0xabc",
+            "USDC",
+            1.0,
+            "active",
+            "2026-01-02T00:00:00.000Z",
+        )];
         let bets = vec![bet("b1", "0xdef", 1.0, false, "")];
         // A real asset string is fine; poison the table with a number instead.
         let mut poisoned = bets;
         poisoned[0]["asset"] = json!(7);
-        let err = users_page(&balances, &poisoned, &[], &[], &ListParams::default(), "2026-05-05T00:00:00.000Z")
-            .err()
-            .expect("the TypeError surfaces as an error");
+        let err = users_page(
+            &balances,
+            &poisoned,
+            &[],
+            &[],
+            &ListParams::default(),
+            "2026-05-05T00:00:00.000Z",
+        )
+        .err()
+        .expect("the TypeError surfaces as an error");
         assert!(err.to_string().contains("toUpperCase"));
     }
 
     #[test]
     fn merged_rows_carry_the_dashboard_keys_and_null_absences() {
-        let balances = vec![balance("0xAbC", "USDC", 3.0, "active", "2026-01-02T00:00:00.000Z")];
+        let balances = vec![balance(
+            "0xAbC",
+            "USDC",
+            3.0,
+            "active",
+            "2026-01-02T00:00:00.000Z",
+        )];
         let bets = vec![bet("b1", "0xabc", 7.0, true, "USDC")];
         let referrals = vec![json!({
             "user_address": "0xABC", "referral_code": "ARC2026", "referral_count": 4,
             "referred_by": "0xother",
         })];
         let profiles = vec![json!({ "user_address": "0xabc", "username": "satoshi" })];
-        let rows = build_user_rows(&balances, &bets, &referrals, &profiles, "2026-05-05T00:00:00.000Z").unwrap();
-        assert_eq!(rows.len(), 1, "the seen balance key suppresses the synthetic row");
+        let rows = build_user_rows(
+            &balances,
+            &bets,
+            &referrals,
+            &profiles,
+            "2026-05-05T00:00:00.000Z",
+        )
+        .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the seen balance key suppresses the synthetic row"
+        );
         let row = &rows[0];
-        assert_eq!(row["user_address"], json!("0xAbC"), "the stored spelling ships, not the canonical one");
+        assert_eq!(
+            row["user_address"],
+            json!("0xAbC"),
+            "the stored spelling ships, not the canonical one"
+        );
         assert_eq!(row["tier"], json!("free"));
         assert_eq!(row["username"], json!("satoshi"));
         assert_eq!(row["activity"]["totalBets"], json!(1));
@@ -2316,7 +2585,10 @@ mod tests {
             balance("0xjunk", "USDC", 1.0, "active", "not a date"),
         ];
         sort_user_rows(&mut rows);
-        let order: Vec<&str> = rows.iter().map(|r| r["user_address"].as_str().unwrap()).collect();
+        let order: Vec<&str> = rows
+            .iter()
+            .map(|r| r["user_address"].as_str().unwrap())
+            .collect();
         assert_eq!(order, vec!["0xmid", "0xaaa", "0xzzz", "0xjunk"]);
     }
 
@@ -2335,22 +2607,47 @@ mod tests {
 
         let by_q = parsed(&[("q", "ALICE")], &o);
         // The row address is matched case-insensitively, the username too.
-        let hits: Vec<&Value> = rows.iter().filter(|r| matches_list_filters(r, &by_q)).collect();
+        let hits: Vec<&Value> = rows
+            .iter()
+            .filter(|r| matches_list_filters(r, &by_q))
+            .collect();
         assert_eq!(hits.len(), 1);
 
         let by_status = parsed(&[("status", "banned")], &o);
-        assert_eq!(rows.iter().filter(|r| matches_list_filters(r, &by_status)).count(), 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches_list_filters(r, &by_status))
+                .count(),
+            1
+        );
 
         let by_currency = parsed(&[("currency", "bot")], &o);
-        assert_eq!(rows.iter().filter(|r| matches_list_filters(r, &by_currency)).count(), 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches_list_filters(r, &by_currency))
+                .count(),
+            1
+        );
 
         let window = parsed(&[("from", "2026-01-03"), ("to", "2026-01-31")], &o);
-        let in_window: Vec<&Value> = rows.iter().filter(|r| matches_list_filters(r, &window)).collect();
-        assert_eq!(in_window.len(), 1, "the unparsable row is dropped by a bounded query");
+        let in_window: Vec<&Value> = rows
+            .iter()
+            .filter(|r| matches_list_filters(r, &window))
+            .collect();
+        assert_eq!(
+            in_window.len(),
+            1,
+            "the unparsable row is dropped by a bounded query"
+        );
         assert_eq!(in_window[0]["user_address"], json!("0xAbC"));
 
         // With no bounds the unparsable row survives.
-        assert_eq!(rows.iter().filter(|r| matches_list_filters(r, &ListParams::default())).count(), 3);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches_list_filters(r, &ListParams::default()))
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -2377,7 +2674,13 @@ mod tests {
 
     #[test]
     fn users_page_reports_the_filtered_total_and_projects_the_whitelist() {
-        let balances = vec![balance("0xabc", "USDC", 1.0, "active", "2026-01-02T00:00:00.000Z")];
+        let balances = vec![balance(
+            "0xabc",
+            "USDC",
+            1.0,
+            "active",
+            "2026-01-02T00:00:00.000Z",
+        )];
         let referral_enum = [("referrers", &["1"][..])];
         let o = opts(Some(&USER_STATUS_VALUES), &referral_enum);
         let page = users_page(
@@ -2408,42 +2711,51 @@ mod tests {
     #[test]
     fn status_rejections_are_ordered_and_exact() {
         let o = json!({});
-        assert_eq!(validate_status_request(&o).unwrap_err(), MISSING_ADDRESS_OR_STATUS);
+        assert_eq!(
+            validate_status_request(&o).unwrap_err(),
+            MISSING_ADDRESS_OR_STATUS
+        );
         assert_eq!(
             validate_status_request(&json!({ "userAddress": 42, "status": "active" })).unwrap_err(),
             MISSING_ADDRESS_OR_STATUS,
             "a number is not a string, so it is a 400 rather than a coercion"
         );
         assert_eq!(
-            validate_status_request(&json!({ "userAddress": "   ", "status": "active" })).unwrap_err(),
+            validate_status_request(&json!({ "userAddress": "   ", "status": "active" }))
+                .unwrap_err(),
             MISSING_ADDRESS_OR_STATUS
         );
         // A degenerate address is still a non-empty variant list, so the update
         // targets it rather than 400ing: `walletAddressSearchVariants` only
         // returns [] for a blank string, and the blank case is caught above.
-        let (variants, _) = validate_status_request(
-            &json!({ "userAddress": "0x", "status": "active" }),
-        )
-        .expect("a short address is not a rejection");
+        let (variants, _) =
+            validate_status_request(&json!({ "userAddress": "0x", "status": "active" }))
+                .expect("a short address is not a rejection");
         assert_eq!(variants, vec!["0x".to_string()]);
         assert_eq!(
             validate_status_request(&json!({ "userAddress": "0xabc" })).unwrap_err(),
             MISSING_ADDRESS_OR_STATUS
         );
         assert_eq!(
-            validate_status_request(&json!({ "userAddress": "0xabc", "status": "refunded" })).unwrap_err(),
+            validate_status_request(&json!({ "userAddress": "0xabc", "status": "refunded" }))
+                .unwrap_err(),
             INVALID_STATUS,
             "the enum is checked before any DB round-trip"
         );
         assert_eq!(
-            validate_status_request(&json!({ "userAddress": &"0".repeat(129), "status": "active" })).unwrap_err(),
+            validate_status_request(
+                &json!({ "userAddress": &"0".repeat(129), "status": "active" })
+            )
+            .unwrap_err(),
             ADDRESS_TOO_LONG
         );
         // A whitespace-only address is caught by the first check, so the empty
         // variant list is unreachable through a valid body; force it directly.
         assert_eq!(address::search_variants("  "), Vec::<String>::new());
-        assert_eq!(validate_status_request(&json!({"userAddress": null, "status": "active"})).unwrap_err(),
-                   MISSING_ADDRESS_OR_STATUS);
+        assert_eq!(
+            validate_status_request(&json!({"userAddress": null, "status": "active"})).unwrap_err(),
+            MISSING_ADDRESS_OR_STATUS
+        );
 
         let (variants, status) = validate_status_request(
             &json!({ "userAddress": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "status": "banned" }),
@@ -2505,7 +2817,7 @@ mod tests {
              balance_after, transaction_hash, bet_id, created_at FROM balance_audit_log \
              WHERE operation_type IN (CAST($1 AS text), CAST($2 AS text)) \
              AND operation_type = CAST($3 AS text) AND currency = CAST($4 AS text) \
-             AND (user_address ILIKE CAST($5 AS text) OR transaction_hash ILIKE CAST($6 AS text)) \
+             AND (pg_ilike(user_address, CAST($5 AS text)) OR pg_ilike(transaction_hash, CAST($6 AS text))) \
              AND created_at >= CAST($7 AS timestamp with time zone) \
              AND created_at <= CAST($8 AS timestamp with time zone) \
              ORDER BY created_at DESC, id DESC LIMIT CAST($9 AS int8) OFFSET CAST($10 AS int8)"
@@ -2513,10 +2825,10 @@ mod tests {
         assert_eq!(
             prepared.count_sql.as_deref(),
             Some(
-                "SELECT COUNT(*)::bigint AS count FROM balance_audit_log \
+                "SELECT COUNT(*) AS count FROM balance_audit_log \
                  WHERE operation_type IN (CAST($1 AS text), CAST($2 AS text)) \
                  AND operation_type = CAST($3 AS text) AND currency = CAST($4 AS text) \
-                 AND (user_address ILIKE CAST($5 AS text) OR transaction_hash ILIKE CAST($6 AS text)) \
+                 AND (pg_ilike(user_address, CAST($5 AS text)) OR pg_ilike(transaction_hash, CAST($6 AS text))) \
                  AND created_at >= CAST($7 AS timestamp with time zone) \
                  AND created_at <= CAST($8 AS timestamp with time zone)"
             )
@@ -2526,8 +2838,16 @@ mod tests {
         assert_eq!(prepared.count_refs().len(), 8);
         assert_eq!(prepared.row_refs().len(), 10);
         let bound = prepared.row_refs();
-        assert_eq!(bound[4].1, &json!("%0xabc%"), "the search term is a bound pattern");
-        assert_eq!(bound[9].1, &json!(50), "OFFSET is the 9th placeholder's value, order matters");
+        assert_eq!(
+            bound[4].1,
+            &json!("%0xabc%"),
+            "the search term is a bound pattern"
+        );
+        assert_eq!(
+            bound[9].1,
+            &json!(50),
+            "OFFSET is the 9th placeholder's value, order matters"
+        );
         assert_eq!(db::highest_placeholder(&prepared.sql), prepared.binds.len());
     }
 
@@ -2546,8 +2866,16 @@ mod tests {
         assert_eq!(body["offset"], json!(20));
         let tx = &body["transactions"][0];
         assert_eq!(tx.as_object().unwrap().len(), TRANSACTION_ROW_KEYS.len());
-        assert_eq!(tx["transaction_hash"], Value::Null, "a null column is a present key");
-        assert_eq!(tx["amount"], json!(5.0), "NUMERIC stays a JSON number, as parseFloat made it");
+        assert_eq!(
+            tx["transaction_hash"],
+            Value::Null,
+            "a null column is a present key"
+        );
+        assert_eq!(
+            tx["amount"],
+            json!(5.0),
+            "NUMERIC stays a JSON number, as parseFloat made it"
+        );
     }
 
     // -- /api/admin/game-history -------------------------------------------
@@ -2557,7 +2885,11 @@ mod tests {
         let o = opts(Some(&GAME_STATUS_VALUES), &[("account", &ACCOUNT_VALUES)]);
         let won = parsed(&[("status", "WON")], &o);
         let prepared = game_history_page_statement(&won);
-        assert!(prepared.sql.contains("WHERE won = CAST($1 AS boolean)"), "{}", prepared.sql);
+        assert!(
+            prepared.sql.contains("WHERE won = CAST($1 AS boolean)"),
+            "{}",
+            prepared.sql
+        );
         assert_eq!(prepared.binds.refs()[0], ("boolean", &Value::Bool(true)));
 
         let lost = parsed(&[("status", "lost"), ("q", "demo")], &o);
@@ -2565,7 +2897,7 @@ mod tests {
         assert!(prepared.sql.contains("won = CAST($1 AS boolean)"));
         assert!(prepared
             .sql
-            .contains("(wallet_address ILIKE CAST($2 AS text) OR asset ILIKE CAST($3 AS text) OR id ILIKE CAST($4 AS text))"));
+            .contains("(pg_ilike(wallet_address, CAST($2 AS text)) OR pg_ilike(asset, CAST($3 AS text)) OR pg_ilike(id, CAST($4 AS text)))"));
         assert_eq!(prepared.count_refs().len(), 4);
         assert_eq!(db::highest_placeholder(&prepared.sql), prepared.binds.len());
     }
@@ -2576,7 +2908,9 @@ mod tests {
         let p = parsed(&[], &o);
         let prepared = game_history_page_statement(&p);
         assert!(!prepared.sql.contains("WHERE"));
-        assert!(prepared.sql.ends_with("LIMIT CAST($1 AS int8) OFFSET CAST($2 AS int8)"));
+        assert!(prepared
+            .sql
+            .ends_with("LIMIT CAST($1 AS int8) OFFSET CAST($2 AS int8)"));
         assert_eq!(db::highest_placeholder(&prepared.sql), prepared.binds.len());
     }
 
@@ -2586,7 +2920,9 @@ mod tests {
         let p = parsed(&[("currency", "usdc")], &o);
         let prepared = game_history_scan_statement(&p, 3_000);
         assert!(prepared.sql.contains("asset = CAST($1 AS text)"));
-        assert!(prepared.sql.ends_with("LIMIT CAST($2 AS int8) OFFSET CAST($3 AS int8)"));
+        assert!(prepared
+            .sql
+            .ends_with("LIMIT CAST($2 AS int8) OFFSET CAST($3 AS int8)"));
         assert_eq!(prepared.count_sql, None);
         assert_eq!(prepared.binds.refs()[1].1, &json!(1_000));
         assert_eq!(prepared.binds.refs()[2].1, &json!(3_000));
@@ -2595,8 +2931,15 @@ mod tests {
     #[test]
     fn the_scan_stops_on_a_short_page_or_at_the_cap_and_says_so() {
         // A full page below the cap keeps walking.
-        assert_eq!(scan_stop_decision(SCAN_PAGE as usize, SCAN_PAGE as usize), None);
-        assert_eq!(scan_stop_decision(2_500, 500), Some(false), "short page: done, nothing lost");
+        assert_eq!(
+            scan_stop_decision(SCAN_PAGE as usize, SCAN_PAGE as usize),
+            None
+        );
+        assert_eq!(
+            scan_stop_decision(2_500, 500),
+            Some(false),
+            "short page: done, nothing lost"
+        );
         assert_eq!(scan_stop_decision(0, 0), Some(false));
         // Exactly at the cap with a full page: more rows may exist unread.
         assert_eq!(scan_stop_decision(SCAN_CAP, SCAN_PAGE as usize), Some(true));
@@ -2627,7 +2970,11 @@ mod tests {
         assert_eq!(real_page[0]["id"], json!("b1"));
         let (demo_total, demo_page) = game_history_account_page(&rows, "demo", 1, 50);
         assert_eq!(demo_total, 2);
-        assert_eq!(demo_page.len(), 1, "offset and limit slice the filtered set");
+        assert_eq!(
+            demo_page.len(),
+            1,
+            "offset and limit slice the filtered set"
+        );
         assert_eq!(demo_page[0]["id"], json!("b3"));
 
         let o = opts(Some(&GAME_STATUS_VALUES), &[("account", &ACCOUNT_VALUES)]);
@@ -2636,16 +2983,36 @@ mod tests {
         assert_eq!(body["scanTruncated"], json!(true));
         assert_eq!(body["total"], json!(2));
         assert_eq!(body["account"], json!("demo"));
-        assert_eq!(body["bets"].as_array().unwrap()[0].as_object().unwrap().len(), GAME_ROW_KEYS.len());
+        assert_eq!(
+            body["bets"].as_array().unwrap()[0]
+                .as_object()
+                .unwrap()
+                .len(),
+            GAME_ROW_KEYS.len()
+        );
 
         let all = game_history_body(&rows, 3, &p, "all", None);
-        assert!(all.get("scanTruncated").is_none(), "the DB-paged branch cannot truncate");
+        assert!(
+            all.get("scanTruncated").is_none(),
+            "the DB-paged branch cannot truncate"
+        );
         assert_eq!(all["account"], json!("all"));
     }
 
     // -- /api/admin/mode-analytics -----------------------------------------
 
-    fn analytics_bet(id: &str, wallet: &str, mode: &str, amount: f64, payout: f64, won: bool, network: &str, asset: &str, multiplier: f64) -> Value {
+    #[allow(clippy::too_many_arguments)]
+    fn analytics_bet(
+        id: &str,
+        wallet: &str,
+        mode: &str,
+        amount: f64,
+        payout: f64,
+        won: bool,
+        network: &str,
+        asset: &str,
+        multiplier: f64,
+    ) -> Value {
         json!({ "id": id, "wallet_address": wallet, "amount": amount, "payout": payout,
                 "won": won, "mode": mode, "network": network, "asset": asset,
                 "multiplier": multiplier })
@@ -2662,14 +3029,22 @@ mod tests {
         assert_eq!(mode_label(Some(&json!(" BOX "))), " box ");
         assert_eq!(mode_label(Some(&json!(""))), "binomo");
         assert_eq!(mode_display_label("box"), "Box Mode");
-        assert_eq!(mode_display_label("roulette"), "roulette", "an unknown mode labels itself");
+        assert_eq!(
+            mode_display_label("roulette"),
+            "roulette",
+            "an unknown mode labels itself"
+        );
     }
 
     #[test]
     fn mode_analytics_aggregates_margin_rate_and_average_multiplier() {
         let rows = vec![
-            analytics_bet("b1", "0xreal", "BINOMO", 100.0, 190.0, true, "arc", "USDC", 1.9),
-            analytics_bet("b2", "0xreal", "binomo", 50.0, 0.0, false, "arc", "usdc", 1.9),
+            analytics_bet(
+                "b1", "0xreal", "BINOMO", 100.0, 190.0, true, "arc", "USDC", 1.9,
+            ),
+            analytics_bet(
+                "b2", "0xreal", "binomo", 50.0, 0.0, false, "arc", "usdc", 1.9,
+            ),
             analytics_bet("b3", "0xreal", "box", 10.0, 100.0, true, "ARC", "EURC", 2.0),
         ];
         let modes = compute_modes(&rows);
@@ -2681,16 +3056,25 @@ mod tests {
         assert_eq!(modes[0].win_rate, 50.0);
         assert_eq!(modes[0].total_wagered, 150.0);
         assert_eq!(modes[0].total_paid_out, 190.0);
-        assert_eq!(modes[0].house_pnl, -40.0, "the house margin is wagered minus paid");
+        assert_eq!(
+            modes[0].house_pnl, -40.0,
+            "the house margin is wagered minus paid"
+        );
         assert_eq!(modes[0].avg_multiplier, 1.9);
-        assert_eq!(modes[0].by_chain.len(), 1, "'arc' and 'ARC' are one chain once uppercased");
+        assert_eq!(
+            modes[0].by_chain.len(),
+            1,
+            "'arc' and 'ARC' are one chain once uppercased"
+        );
         assert_eq!(modes[0].by_chain[0].0, "ARC");
         assert_eq!(modes[0].by_chain[0].1.total_bets, 2);
         assert_eq!(modes[0].by_chain[0].1.house_pnl, -40.0);
         assert_eq!(modes[0].top_assets, vec![("USDC".to_string(), 2)]);
 
         // One bet: a 1/3 win rate rounds to one decimal, an empty set is 0.
-        let single = compute_modes(&[analytics_bet("x", "0xr", "draw", 3.0, 0.0, false, "arc", "usdc", 2.0)]);
+        let single = compute_modes(&[analytics_bet(
+            "x", "0xr", "draw", 3.0, 0.0, false, "arc", "usdc", 2.0,
+        )]);
         assert_eq!(single[0].label, "Draw Mode");
         assert_eq!(single[0].win_rate, 0.0);
         assert_eq!(single[0].avg_multiplier, 2.0);
@@ -2701,7 +3085,7 @@ mod tests {
     fn win_rate_and_average_multiplier_round_like_math_round() {
         assert_eq!(js_round(0.5), 1.0);
         assert_eq!(js_round(-0.5), -0.0, "JS rounds half toward +infinity");
-        assert_eq!(js_round(f64::NAN).is_nan(), true);
+        assert!(js_round(f64::NAN).is_nan());
         let rows = vec![
             analytics_bet("a", "0xr", "binomo", 1.0, 1.0, true, "arc", "usdc", 1.9),
             analytics_bet("b", "0xr", "binomo", 1.0, 1.0, false, "arc", "usdc", 1.9),
@@ -2709,7 +3093,10 @@ mod tests {
         ];
         let modes = compute_modes(&rows);
         assert_eq!(modes[0].win_rate, 33.3);
-        assert_eq!(modes[0].avg_multiplier, 1.93, "(1.9+1.9+2.0)/3 = 1.9333 -> 1.93");
+        assert_eq!(
+            modes[0].avg_multiplier, 1.93,
+            "(1.9+1.9+2.0)/3 = 1.9333 -> 1.93"
+        );
     }
 
     #[test]
@@ -2723,9 +3110,18 @@ mod tests {
     #[test]
     fn top_assets_are_count_desc_then_first_seen_and_capped_at_five() {
         let mut rows = Vec::new();
-        for (asset, count) in [("USDT", 3usize), ("USDC", 5), ("EURC", 1), ("DAI", 2), ("WBTC", 2), ("METH", 2)] {
+        for (asset, count) in [
+            ("USDT", 3usize),
+            ("USDC", 5),
+            ("EURC", 1),
+            ("DAI", 2),
+            ("WBTC", 2),
+            ("METH", 2),
+        ] {
             for _ in 0..count {
-                rows.push(analytics_bet("b", "0xr", "binomo", 1.0, 0.0, false, "arc", asset, 1.9));
+                rows.push(analytics_bet(
+                    "b", "0xr", "binomo", 1.0, 0.0, false, "arc", asset, 1.9,
+                ));
             }
         }
         let modes = compute_modes(&rows);
@@ -2747,9 +3143,15 @@ mod tests {
     #[test]
     fn mode_analytics_splits_real_demo_and_combined() {
         let rows = vec![
-            analytics_bet("b1", "0xreal", "binomo", 100.0, 0.0, false, "arc", "USDC", 1.9),
-            analytics_bet("demo-b2", "0xreal", "box", 500.0, 0.0, false, "arc", "USDC", 1.9),
-            analytics_bet("b3", "0xdemo7", "binomo", 900.0, 0.0, false, "arc", "USDC", 1.9),
+            analytics_bet(
+                "b1", "0xreal", "binomo", 100.0, 0.0, false, "arc", "USDC", 1.9,
+            ),
+            analytics_bet(
+                "demo-b2", "0xreal", "box", 500.0, 0.0, false, "arc", "USDC", 1.9,
+            ),
+            analytics_bet(
+                "b3", "0xdemo7", "binomo", 900.0, 0.0, false, "arc", "USDC", 1.9,
+            ),
         ];
         let body = mode_analytics_body(&rows);
         assert_eq!(body["totalBets"], json!(3));
@@ -2758,16 +3160,30 @@ mod tests {
         // A `demo-` id on a real wallet is play money all the same.
         assert_eq!(body["real"][0]["totalBets"], json!(1));
         assert_eq!(body["demo"].as_array().unwrap().len(), 2);
-        assert_eq!(body["combined"].as_array().unwrap()[0]["mode"], json!("binomo"), "2 of 3 bets");
+        assert_eq!(
+            body["combined"].as_array().unwrap()[0]["mode"],
+            json!("binomo"),
+            "2 of 3 bets"
+        );
         // The binomo chain bucket holds that mode's two bets only (100 + 900); the
         // box bet lives in the next mode entry.
-        assert_eq!(body["combined"][0]["byChain"]["ARC"]["totalWagered"], json!(1000));
-        assert_eq!(body["combined"].as_array().unwrap()[1]["mode"], json!("box"));
+        assert_eq!(
+            body["combined"][0]["byChain"]["ARC"]["totalWagered"],
+            json!(1000)
+        );
+        assert_eq!(
+            body["combined"].as_array().unwrap()[1]["mode"],
+            json!("box")
+        );
         assert_eq!(body["combined"][1]["totalWagered"], json!(500));
         // Real money: just b1, so the demo wallet and the `demo-` id are both out.
         assert_eq!(body["real"][0]["totalWagered"], json!(100));
         assert_eq!(body["demo"].as_array().unwrap()[1]["mode"], json!("binomo"));
-        assert_eq!(body["demo"].as_array().unwrap()[0]["mode"], json!("box"), "first seen wins a 1-1 tie");
+        assert_eq!(
+            body["demo"].as_array().unwrap()[0]["mode"],
+            json!("box"),
+            "first seen wins a 1-1 tie"
+        );
     }
 
     // -- projection --------------------------------------------------------

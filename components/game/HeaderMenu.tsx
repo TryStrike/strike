@@ -30,6 +30,16 @@ export function HeaderMenu() {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    // Escape dismissal while open (same pattern as SiteNav's mobile menu).
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setIsOpen(false);
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [isOpen]);
+
     const menuItems = [
         ...(isTradePage ? [{
             label: 'Quick Tour',
@@ -64,6 +74,8 @@ export function HeaderMenu() {
         <div className="relative" ref={menuRef}>
             <button
                 onClick={() => setIsOpen(!isOpen)}
+                aria-expanded={isOpen}
+                aria-controls="header-menu-dropdown"
                 className="flex items-center gap-4 px-4 py-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-full transition-all active:scale-95 group"
             >
                 <div className="flex flex-col items-start">
@@ -87,6 +99,7 @@ export function HeaderMenu() {
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 10, scale: 0.98 }}
                         transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
+                        id="header-menu-dropdown"
                         className="absolute top-full right-0 z-[110] mt-3 w-64 overflow-hidden rounded-3xl border border-white/5 bg-black/80 shadow-[0_20px_50px_rgba(0,0,0,0.5)] backdrop-blur-3xl"
                     >
                         <div className="p-3 space-y-1">
@@ -119,9 +132,14 @@ export function HeaderMenu() {
                                 }
 
                                 return (
-                                    <div key={idx} onClick={item.onClick}>
+                                    <button
+                                        key={idx}
+                                        type="button"
+                                        onClick={item.onClick}
+                                        className="block w-full text-left"
+                                    >
                                         {content}
-                                    </div>
+                                    </button>
                                 );
                             })}
                         </div>

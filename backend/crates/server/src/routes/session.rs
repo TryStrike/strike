@@ -19,12 +19,14 @@ use crate::sql;
 const SESSION_TIMEOUT_SECONDS: i64 = 90;
 const SESSION_RETENTION_DAYS: i64 = 7;
 const CLEANUP_INTERVAL_MS: i64 = 60_000;
+/// When the client should ping again: well before the session lapses, so one
+/// slow ping never flips a live user to offline.
+const REFRESH_AFTER_SECONDS: i64 = SESSION_TIMEOUT_SECONDS / 2;
 
 static LAST_CLEANUP_MS: AtomicI64 = AtomicI64::new(0);
 
 pub fn routes() -> Router {
-    Router::new()
-        .route("/api/session/ping", post(ping).delete(close))
+    Router::new().route("/api/session/ping", post(ping).delete(close))
 }
 
 fn iso(dt: DateTime<Utc>) -> String {
@@ -44,7 +46,9 @@ async fn purge_ended_sessions() {
     {
         return;
     }
-    let cutoff = iso(Utc.timestamp_millis_opt(now_ms - SESSION_RETENTION_DAYS * 86_400_000).unwrap());
+    let cutoff = iso(Utc
+        .timestamp_millis_opt(now_ms - SESSION_RETENTION_DAYS * 86_400_000)
+        .unwrap());
     let bind = Value::String(cutoff);
     if let Err(err) = sql::execute(
         "DELETE FROM user_sessions WHERE ended_at < CAST($1 AS timestamp with time zone)",
@@ -56,18 +60,23 @@ async fn purge_ended_sessions() {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
 struct PingBody {
     wallet_address: Option<Value>,
     network: Option<Value>,
     session_id: Option<Value>,
 }
 
+/// Bad JSON and `null` are the route's throw. Any other non-object destructures
+/// to nothing, which then fails as a missing wallet.
 fn parse_ping_body(raw: &Bytes) -> ApiResult<PingBody> {
-    serde_json::from_slice(raw).map_err(|err| {
-        tracing::error!("session/ping request failed: {err}");
-        ApiError::internal("Session update failed")
-    })
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(Value::Null) | Err(_) => {
+            tracing::error!("session/ping request failed: unreadable body");
+            Err(ApiError::internal("Session update failed"))
+        }
+        Ok(body) => Ok(serde_json::from_value(body).unwrap_or_default()),
+    }
 }
 
 /// `POST /api/session/ping` — update, resume or create the caller's session.
@@ -92,7 +101,9 @@ async fn ping(raw: Bytes) -> ApiResult<Json<Value>> {
 
     let now_ms = Utc::now().timestamp_millis();
     let now = iso(Utc.timestamp_millis_opt(now_ms).unwrap());
-    let cutoff = iso(Utc.timestamp_millis_opt(now_ms - SESSION_TIMEOUT_SECONDS * 1000).unwrap());
+    let cutoff = iso(Utc
+        .timestamp_millis_opt(now_ms - SESSION_TIMEOUT_SECONDS * 1000)
+        .unwrap());
 
     // A client-supplied session id is only honoured when it is a uuid, still
     // open, still fresh AND owned by this wallet.
@@ -125,10 +136,11 @@ async fn ping(raw: Bytes) -> ApiResult<Json<Value>> {
                         ],
                     )
                     .await?;
-                    return Ok(Json(object(&[
-                        ("session_id", Value::String(session_id.clone())),
-                        ("status", Value::String("updated".into())),
-                    ])));
+                    return Ok(Json(accepted(
+                        Value::String(session_id.clone()),
+                        "updated",
+                        now_ms,
+                    )));
                 }
             }
         }
@@ -159,10 +171,7 @@ async fn ping(raw: Bytes) -> ApiResult<Json<Value>> {
             ],
         )
         .await?;
-        return Ok(Json(object(&[
-            ("session_id", id),
-            ("status", Value::String("updated".into())),
-        ])));
+        return Ok(Json(accepted(id, "updated", now_ms)));
     }
 
     // Close stale open sessions for this wallet, then start a new one.
@@ -194,29 +203,56 @@ async fn ping(raw: Bytes) -> ApiResult<Json<Value>> {
     })?
     .ok_or_else(|| ApiError::internal("Session creation failed"))?;
 
-    Ok(Json(object(&[
-        ("session_id", created.get("id").cloned().unwrap_or(Value::Null)),
-        ("status", Value::String("created".into())),
-    ])))
+    Ok(Json(accepted(
+        created.get("id").cloned().unwrap_or(Value::Null),
+        "created",
+        now_ms,
+    )))
+}
+
+/// An accepted ping. The client schedules its next one from these timing fields.
+fn accepted(session_id: Value, status: &str, now_ms: i64) -> Value {
+    object(&[
+        ("session_id", session_id),
+        ("status", Value::String(status.to_string())),
+        ("ttl_seconds", Value::from(SESSION_TIMEOUT_SECONDS)),
+        ("refresh_after_seconds", Value::from(REFRESH_AFTER_SECONDS)),
+        (
+            "expires_at",
+            Value::String(iso(Utc
+                .timestamp_millis_opt(now_ms + SESSION_TIMEOUT_SECONDS * 1000)
+                .unwrap())),
+        ),
+        (
+            "server_time",
+            Value::String(iso(Utc.timestamp_millis_opt(now_ms).unwrap())),
+        ),
+    ])
 }
 
 /// `DELETE /api/session/ping` — the wallet disconnected.
 async fn close(raw: Bytes) -> ApiResult<Json<Value>> {
-    let parsed: Map<String, Value> = serde_json::from_slice(&raw).map_err(|err| {
-        tracing::error!("session/ping close failed: {err}");
-        ApiError::internal("Session close failed")
-    })?;
-    let body = Value::Object(parsed);
+    let body: Value = serde_json::from_slice(&raw)
+        .ok()
+        .filter(|body: &Value| !body.is_null())
+        .ok_or_else(|| {
+            tracing::error!("session/ping close failed: unreadable body");
+            ApiError::internal("Session close failed")
+        })?;
 
     let session_id = body.get("session_id").and_then(Value::as_str).unwrap_or("");
     let wallet = match body.get("wallet_address").and_then(Value::as_str) {
         Some(w) => w,
         None => {
-            return Err(ApiError::bad_request("session_id and wallet_address required"))
+            return Err(ApiError::bad_request(
+                "session_id and wallet_address required",
+            ))
         }
     };
     if session_id.is_empty() || wallet.trim().is_empty() {
-        return Err(ApiError::bad_request("session_id and wallet_address required"));
+        return Err(ApiError::bad_request(
+            "session_id and wallet_address required",
+        ));
     }
     if !is_address(wallet.trim()) {
         return Err(ApiError::bad_request("Invalid wallet_address"));

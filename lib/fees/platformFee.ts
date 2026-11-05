@@ -43,30 +43,7 @@ function getEnvOptional(key: string): string | null {
  * The fee collector for Arc USDC. NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC
  * overrides the shared collector when needed.
  */
-function getPlatformFeeWalletAddress(normalizedCurrency: string): string | null {
+export function getPlatformFeeWalletAddress(normalizedCurrency: string): string | null {
   return normalizedCurrency === 'USDC' ? getEnvOptional('NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC') : null;
-}
-
-/**
- * Transfers `feeAmount` from the treasury to the platform fee collector.
- * Returns the fee-transfer tx hash when available.
- */
-export async function collectPlatformFeeFromTreasury(
-  normalizedCurrency: string,
-  feeAmount: number,
-): Promise<string | null> {
-  if (!feeAmount || feeAmount <= 0) return null;
-
-  const feeWallet = getPlatformFeeWalletAddress(normalizedCurrency);
-  if (!feeWallet) {
-    // Not configured - skip the transfer rather than blocking the withdrawal.
-    console.warn(
-      `[platformFee] Fee wallet not configured for ${normalizedCurrency}. Skipping fee collection.`
-    );
-    return null;
-  }
-
-  const { transferFromTreasury } = await import('@/lib/arc/backend-client');
-  return transferFromTreasury(feeWallet, feeAmount, 'USDC');
 }
 

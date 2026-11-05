@@ -2,7 +2,9 @@
  * Deploy StrikeTreasury to Arc.
  *
  * Usage:
- *   ARC_TREASURY_SECRET_KEY=... node contracts/arc/deploy.mjs
+ *   ARC_TREASURY_SECRET_KEY=... NEXT_PUBLIC_ARC_CHAIN_ID=5042002 node contracts/arc/deploy.mjs
+ *   # --force overwrites an existing arc-<chainId>.json; without it the
+ *   # script refuses to redeploy over a live treasury.
  *
  * Reads ARC_TREASURY_SECRET_KEY and NEXT_PUBLIC_ARC_* from .env.local/.env and
  * writes contracts/arc/deployments/arc-<chainId>.json.
@@ -25,7 +27,18 @@ for (const file of ['.env.local', '.env']) {
   }
 }
 
-const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID) || 5042;
+// No implicit chain default: silently landing on mainnet (5042) when only a
+// testnet deployment is intended has fund-loss consequences, so the chain id
+// must be stated in the environment.
+const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID ?? process.env.ARC_CHAIN_ID);
+if (!Number.isInteger(chainId) || chainId <= 0) {
+  console.error(
+    'ARC chain id is not configured. Set NEXT_PUBLIC_ARC_CHAIN_ID explicitly ' +
+      '(5042 = Arc mainnet, 5042002 = Arc Testnet) in .env.local or the environment.'
+  );
+  process.exit(1);
+}
+const FORCE = process.argv.includes('--force');
 const net = {
   chainId,
   name: chainId === 5042 ? 'Arc' : 'Arc Testnet',
@@ -66,6 +79,20 @@ async function main() {
     throw new Error('ARC_USDC_ADDRESS is not set to a valid USDC contract address');
   }
 
+  // Overwriting the deployment record orphans the previous treasury contract
+  // and every credit/fund tracked against it. Refuse unless --force — checked
+  // before anything is deployed, not after spending gas.
+  const outFile = join(__dirname, 'deployments', `arc-${net.chainId}.json`);
+  if (existsSync(outFile) && !FORCE) {
+    const previous = JSON.parse(readFileSync(outFile, 'utf8'));
+    throw new Error(
+      `A deployment already exists for chain ${net.chainId}: ${outFile}\n` +
+        `  Treasury ${previous.strikeTreasury} (deployed ${previous.deployedAt})\n` +
+        `Redeploying orphans that contract and its funds. Reuse NEXT_PUBLIC_TREASURY_ADDRESS, ` +
+        `or pass --force if you are sure this is a fresh deployment.`
+    );
+  }
+
   const provider = new ethers.JsonRpcProvider(net.rpc, {
     chainId: net.chainId,
     name: net.name,
@@ -75,9 +102,12 @@ async function main() {
 
   console.log(`Network   ${net.name} (${net.chainId})`);
   console.log(`Deployer  ${wallet.address}`);
-  console.log(`Balance   ${ethers.formatEther(balance)} USDC (native, 18 decimals)`);
+  // formatEther reads the *native* gas balance — on Arc that is USDC at 18
+  // decimals, which is a different unit from the 6-decimal ERC-20 USDC the
+  // treasury moves. Labelling it "USDC" alone invited the wrong comparison.
+  console.log(`Balance   ${ethers.formatEther(balance)} native USDC gas units (18 decimals; not the 6-dp ERC-20 balance)`);
   console.log(`USDC      ${net.usdc}`);
-  if (balance === 0n) throw new Error('Deployer has no USDC to pay for gas');
+  if (balance === 0n) throw new Error('Deployer has no native USDC to pay for gas');
 
   const artifact = compile();
   const factory = new ethers.ContractFactory(

@@ -1,111 +1,433 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useStore } from '@/lib/store';
-import { explorerTxUrl } from '@/lib/arc/config';
-import { CheckCircle as CheckCircle2, Clock as Clock3, ArrowSquareOut as ExternalLink, MagnifyingGlass as Search, XCircle } from '@phosphor-icons/react';
+import { useWalletClient, useAccount } from 'wagmi';
+import { useWallets, type ConnectedWallet } from '@privy-io/react-auth';
+import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
+import {
+  CheckCircle as CheckCircle2,
+  Clock as Clock3,
+  ArrowSquareOut as ExternalLink,
+  MagnifyingGlass as Search,
+  XCircle,
+  Copy,
+  Check,
+  WarningCircle,
+  CaretRight as ChevronRight,
+  ArrowsClockwise,
+} from '@phosphor-icons/react';
+import {
+  describeWithdrawal,
+  explorerLinkForHash,
+  hasOpenWithdrawals,
+  isChainTxHash,
+  type WithdrawalTone,
+  type WithdrawalViewModel,
+} from '@/lib/withdrawals/status';
+import {
+  WITHDRAWAL_READ_AUTH_HEADER,
+  READ_AUTH_REFRESH_AFTER_MS,
+  buildWithdrawalReadAuthMessage,
+} from '@/lib/withdrawals/readAuth';
+import { formatRemaining, windowMinutes } from '@/lib/withdrawals/expiry';
+import { formatUsdc, formatWhen, shortHash } from '@/lib/withdrawals/format';
+
+/**
+ * Player withdrawal status timeline.
+ *
+ * Read-only by construction: every request this page makes is a GET. There is
+ * no path here that re-submits a stored intent, so refreshing or retrying can
+ * never create (or duplicate) a withdrawal request — a new request is only
+ * ever made from /trade with a fresh signature and a fresh `signedAt`.
+ *
+ * The list is server-paged (limit/offset against the ledger, ordered newest
+ * first) and scoped by a wallet-signed read proof, so the API can only ever
+ * return this wallet's rows. Statuses are shown exactly as the ledger records
+ * them; the only derived state is the documented 10-minute signing window
+ * (lib/withdrawals/expiry.ts), which explains WHY an untouched pending row
+ * will never move — it never claims anything was paid.
+ */
 
 type WithdrawalRow = {
   id: number;
-  user_address: string;
   currency: string;
-  amount: number;
-  fee_amount: number;
-  net_amount: number;
-  status: 'pending' | 'accepted' | 'rejected';
+  amount: number | string;
+  fee_amount: number | string;
+  net_amount: number | string;
+  /** Schema allows pending/accepted/rejected/paid_needs_reconciliation;
+   * unknown values fall back to a sane view (lib/withdrawals/status.ts). */
+  status: string;
   requested_at: string;
   decided_at?: string | null;
   tx_hash?: string | null;
   fee_tx_hash?: string | null;
+  signed_at?: number | string | null;
 };
 
-function getExplorerUrl(hash: string | null | undefined) {
-  if (!hash || hash === 'INTERNAL' || hash === 'PENDING') return null;
-  return explorerTxUrl(hash);
-}
+type Paging = { limit: number; offset: number; total: number; hasMore: boolean };
 
-function shortHash(hash: string) {
-  if (hash.length < 16) return hash;
-  return `${hash.slice(0, 10)}...${hash.slice(-6)}`;
-}
+const PAGE_SIZE = 20;
+const POLL_INTERVAL_MS = 20_000;
 
-function formatWhen(iso: string) {
-  const d = new Date(iso);
-  const ms = d.getTime();
-  if (!Number.isFinite(ms)) return iso;
-  return d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
-
-function StatusPill({ status }: { status: WithdrawalRow['status'] }) {
-  const base = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] uppercase font-black tracking-widest border';
-  if (status === 'pending') {
-    return (
-      <span className={`${base} bg-amber-500/10 text-amber-300 border-amber-500/20`}>
-        <Clock3 className="w-3 h-3" /> pending
-      </span>
-    );
+class ReadAuthNeededError extends Error {
+  readonly reason: 'rejected' | 'invalid' | 'no_signer';
+  constructor(reason: 'rejected' | 'invalid' | 'no_signer') {
+    super(`read_auth_${reason}`);
+    this.name = 'ReadAuthNeededError';
+    this.reason = reason;
   }
-  if (status === 'accepted') {
-    return (
-      <span className={`${base} bg-emerald-500/10 text-emerald-300 border-emerald-500/20`}>
-        <CheckCircle2 className="w-3 h-3" /> accepted
-      </span>
-    );
-  }
+}
+
+function TonePill({ view }: { view: WithdrawalViewModel }) {
+  const Attention =
+    view.tone === 'danger' || view.intentExpired ? XCircle
+    : view.tone === 'success' ? CheckCircle2
+    : view.tone === 'attention' || view.tone === 'unknown' ? WarningCircle
+    : Clock3;
+  const TONE_PILL: Record<WithdrawalTone, string> = {
+    waiting: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
+    info: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
+    success: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
+    danger: 'bg-rose-500/10 text-rose-300 border-rose-500/20',
+    attention: 'bg-orange-500/10 text-orange-300 border-orange-500/20',
+    unknown: 'bg-white/5 text-white/50 border-white/15',
+  };
   return (
-    <span className={`${base} bg-rose-500/10 text-rose-300 border-rose-500/20`}>
-      <XCircle className="w-3 h-3" /> rejected
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] uppercase font-black tracking-widest border ${TONE_PILL[view.tone]}`}>
+      <Attention className="w-3 h-3" /> {view.label}
     </span>
   );
 }
 
-export default function WithdrawalsPage() {
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return (
+    <button
+      type="button"
+      aria-label={`Copy ${label}`}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch {
+          /* clipboard unavailable (http, permissions): value is still visible */
+        }
+        setCopied(true);
+        timer.current = setTimeout(() => setCopied(false), 1500);
+      }}
+      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-mono text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+    >
+      {copied ? <Check className="w-3 h-3 text-emerald-300" weight="bold" /> : <Copy className="w-3 h-3" />}
+      {copied ? 'copied' : shortHash(value)}
+    </button>
+  );
+}
+
+const STEP_DOT: Record<string, string> = {
+  done: 'bg-emerald-400 border-emerald-300',
+  active: 'bg-amber-400 border-amber-300 animate-pulse',
+  upcoming: 'bg-white/10 border-white/20',
+  failed: 'bg-rose-500 border-rose-300',
+  attention: 'bg-orange-400 border-orange-300',
+};
+
+function Timeline({ view, requestId }: { view: WithdrawalViewModel; requestId: number }) {
+  return (
+    <div className="space-y-4">
+      <ol className="relative space-y-4 pl-6">
+        <span className="absolute left-[7px] top-2 bottom-2 w-px bg-white/10" aria-hidden />
+        {view.steps.map((step) => (
+          <li key={step.key} className="relative">
+            <span
+              aria-hidden
+              className={`absolute -left-6 top-1 h-[15px] w-[15px] rounded-full border ${STEP_DOT[step.state] ?? STEP_DOT.upcoming}`}
+            />
+            <p className={`text-sm font-bold uppercase tracking-wider ${step.state === 'upcoming' ? 'text-white/25' : step.state === 'failed' ? 'text-rose-300' : step.state === 'attention' ? 'text-orange-300' : step.state === 'active' ? 'text-amber-200' : 'text-emerald-200'}`}>
+              {step.label}
+            </p>
+            {step.detail && <p className="text-xs text-white/40 mt-0.5">{step.detail}</p>}
+          </li>
+        ))}
+      </ol>
+
+      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+        <p className="text-[10px] uppercase tracking-widest text-white/30 font-black">What happens now</p>
+        <p className="text-sm text-white/75 mt-1 leading-relaxed">{view.playerMessage}</p>
+        {view.intentExpired && (
+          <Link
+            href="/trade"
+            className="mt-3 inline-flex px-4 py-2 rounded-lg bg-white text-black text-[10px] font-black uppercase tracking-widest hover:bg-gray-200"
+          >
+            Request a new withdrawal
+          </Link>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-[10px] uppercase tracking-widest text-white/30 font-black">Request</span>
+        <CopyButton value={String(requestId)} label="request id" />
+      </div>
+    </div>
+  );
+}
+
+function HashLinks({ view }: { view: WithdrawalViewModel }) {
+  const netLink = explorerLinkForHash(view.netTxHash);
+  const feeLink = explorerLinkForHash(view.feeTxHash);
+  if (!view.netTxHash && !view.feeTxHash) {
+    return (
+      <p className="text-[11px] text-white/30 font-mono">
+        {view.kind === 'pending'
+          ? view.intentExpired
+            ? 'No transaction — the signature window elapsed before anyone could approve, so nothing was ever payable.'
+            : 'No transaction yet — the treasury pays out only after manual approval.'
+          : view.kind === 'rejected'
+            ? 'No transaction — the request was not paid.'
+            : 'No transaction hash recorded for this request.'}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {view.netTxHash && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] uppercase tracking-widest text-white/30 font-black w-16 shrink-0">Payout tx</span>
+          <CopyButton value={view.netTxHash} label="payout transaction hash" />
+          {netLink && (
+            <a
+              href={netLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[10px] font-black uppercase tracking-widest text-blue-300 hover:text-blue-200 inline-flex items-center gap-1"
+            >
+              Explorer <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+        </div>
+      )}
+      {view.feeTxHash && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] uppercase tracking-widest text-white/30 font-black w-16 shrink-0">Fee tx</span>
+          <CopyButton value={view.feeTxHash} label="fee transaction hash" />
+          {feeLink && (
+            <a
+              href={feeLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[10px] font-black uppercase tracking-widest text-white/50 hover:text-white inline-flex items-center gap-1"
+            >
+              Explorer <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type FilterKey = 'all' | 'open' | 'paid' | 'rejected' | 'review' | 'expired';
+
+function bucketOf(v: WithdrawalViewModel): FilterKey {
+  if (v.intentExpired) return 'expired';
+  if (!v.terminal) return 'open';
+  if (v.kind === 'rejected') return 'rejected';
+  if (v.kind === 'paid_needs_reconciliation') return 'review';
+  if (v.kind === 'accepted' && v.tone === 'success') return 'paid';
+  return 'review';
+}
+
+function WithdrawalsPageInner({ privyWallets }: { privyWallets: ConnectedWallet[] }) {
   const address = useStore((s) => s.address);
   const isConnected = useStore((s) => s.isConnected);
+
+  const { data: walletClient } = useWalletClient();
+  const { connector } = useAccount();
+
   const [rows, setRows] = useState<WithdrawalRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<'all' | WithdrawalRow['status']>('all');
+  const [paging, setPaging] = useState<Paging | null>(null);
+  const [firstLoad, setFirstLoad] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [authIssue, setAuthIssue] = useState<'rejected' | 'invalid' | 'no_signer' | null>(null);
+  const [signingInProgress, setSigningInProgress] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<FilterKey>('all');
   const [query, setQuery] = useState('');
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const fetchRows = async () => {
-    if (!address) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/withdrawals?address=${encodeURIComponent(address)}`);
-      if (!res.ok) throw new Error('Failed to load withdrawals');
-      const data = await res.json();
-      setRows(data.withdrawals || []);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Cached read proof: signing prompts the wallet, so it is signed once per
+  // ~9 minutes and reused across refresh/polling. Cleared on any 401.
+  const proofCache = useRef<{ value: string; issuedAt: number; forAddress: string } | null>(null);
+  const inFlight = useRef(false);
   useEffect(() => {
-    fetchRows();
-    const int = setInterval(fetchRows, 30_000);
-    return () => clearInterval(int);
+    // Address change ⇒ the old proof is for a different wallet; drop it.
+    proofCache.current = null;
   }, [address]);
 
+  const signReadAuth = useCallback(async (force = false): Promise<string> => {
+    if (!address) throw new ReadAuthNeededError('no_signer');
+    const cached = proofCache.current;
+    if (!force && cached && cached.forAddress === address && Date.now() - cached.issuedAt < READ_AUTH_REFRESH_AFTER_MS) {
+      return cached.value;
+    }
+
+    const issuedAt = Date.now();
+    const nonce =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID().replace(/-/g, '')
+        : Math.random().toString(16).slice(2, 34).padEnd(32, '0');
+    const message = buildWithdrawalReadAuthMessage(address, issuedAt, nonce);
+
+    let signature: string;
+    setSigningInProgress(true);
+    try {
+      if (walletClient) {
+        signature = await walletClient.signMessage({
+          account: address as `0x${string}`,
+          message,
+        });
+      } else if (connector) {
+        const provider = await connector.getProvider();
+        const { ethers } = await import('ethers');
+        const signer = await new ethers.BrowserProvider(provider as never).getSigner();
+        signature = await signer.signMessage(message);
+      } else {
+        const privyWallet =
+          privyWallets.find((w) => w.type === 'ethereum' && w.address?.toLowerCase() === address.toLowerCase()) ??
+          privyWallets.find((w) => w.type === 'ethereum');
+        if (!privyWallet?.sign) throw new ReadAuthNeededError('no_signer');
+        signature = await privyWallet.sign(message);
+      }
+    } catch (e) {
+      if (e instanceof ReadAuthNeededError) throw e;
+      // User rejected the signature request — surface a deliberate retry path.
+      throw new ReadAuthNeededError('rejected');
+    } finally {
+      setSigningInProgress(false);
+    }
+
+    const value = JSON.stringify({ address, issuedAt, nonce, signature });
+    proofCache.current = { value, issuedAt, forAddress: address };
+    return value;
+  }, [address, walletClient, connector, privyWallets]);
+
+  const load = useCallback(
+    async (mode: 'refresh' | 'more') => {
+      if (!address || inFlight.current) return;
+      inFlight.current = true;
+      setRefreshing(true);
+      const offset = mode === 'more' ? rows.length : 0;
+      const limit = mode === 'more' ? PAGE_SIZE : Math.max(PAGE_SIZE, rows.length);
+
+      const request = async (forceResign: boolean): Promise<{ res: Response; body: any }> => {
+        const proof = await signReadAuth(forceResign);
+        const res = await fetch(`/api/withdrawals?limit=${limit}&offset=${offset}`, {
+          method: 'GET',
+          headers: { [WITHDRAWAL_READ_AUTH_HEADER]: proof },
+          cache: 'no-store',
+        });
+        const body = await res.json().catch(() => null);
+        return { res, body };
+      };
+
+      try {
+        let { res, body } = await request(false);
+
+        // A lapsed/malformed cached proof: re-sign once silently and replay
+        // the same read-only GET. An invalid signature is not retryable by
+        // re-reading — it needs the deliberate Authorize flow below.
+        if (res.status === 401 && body?.code && body.code !== 'read_auth_invalid_signature') {
+          ({ res, body } = await request(true));
+        }
+
+        if (res.status === 401) {
+          proofCache.current = null;
+          setAuthIssue(body?.code === 'read_auth_invalid_signature' ? 'invalid' : 'rejected');
+          setLoadError(null);
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const incoming: WithdrawalRow[] = Array.isArray(body?.withdrawals) ? body.withdrawals : [];
+        const pg: Paging = {
+          limit: Number(body?.paging?.limit) || PAGE_SIZE,
+          offset: Number(body?.paging?.offset) || 0,
+          total: Number(body?.paging?.total) || incoming.length,
+          hasMore: Boolean(body?.paging?.hasMore),
+        };
+        setPaging(pg);
+        setRows((prev) => {
+          if (mode !== 'more') return incoming;
+          const seen = new Set(prev.map((r) => r.id));
+          return [...prev, ...incoming.filter((r) => !seen.has(r.id))];
+        });
+        setLoadError(null);
+        setAuthIssue(null);
+      } catch (e) {
+        if (e instanceof ReadAuthNeededError) {
+          proofCache.current = null;
+          setAuthIssue(e.reason);
+        } else {
+          setLoadError('Could not refresh your withdrawal list. Try the Refresh button — reloading this list never creates a new request.');
+        }
+      } finally {
+        inFlight.current = false;
+        setRefreshing(false);
+        setFirstLoad(false);
+      }
+    },
+    [address, rows.length, signReadAuth]
+  );
+
+  const loadMore = useCallback(() => {
+    void load('more');
+  }, [load]);
+
+  useEffect(() => {
+    if (isConnected && address) void load('refresh');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address, isConnected]);
+
+  // Poll only while at least one request can still move. Terminal rows
+  // (paid, rejected, needs-reconciliation, expired signatures) stop the timer;
+  // the Refresh button stays available regardless.
+  const pollingActive = hasOpenWithdrawals(rows);
+  useEffect(() => {
+    if (!address || !pollingActive) return;
+    const int = setInterval(() => void load('refresh'), POLL_INTERVAL_MS);
+    return () => clearInterval(int);
+  }, [address, pollingActive, load]);
+
+  // Deep link from the receipt drawer: /withdrawals?request=<id> expands that row.
+  useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get('request');
+    const id = Number(raw);
+    if (Number.isFinite(id)) setExpandedId(id);
+  }, []);
+  useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get('request');
+    const id = Number(raw);
+    if (Number.isFinite(id) && rows.some((r) => r.id === id)) setExpandedId(id);
+  }, [rows]);
+
   const counts = useMemo(() => {
-    const pending = rows.filter((r) => r.status === 'pending').length;
-    const accepted = rows.filter((r) => r.status === 'accepted').length;
-    const rejected = rows.filter((r) => r.status === 'rejected').length;
-    return { pending, accepted, rejected };
+    const acc: Record<FilterKey, number> = { all: rows.length, open: 0, paid: 0, rejected: 0, review: 0, expired: 0 };
+    for (const r of rows) acc[bucketOf(describeWithdrawal(r))] += 1;
+    return acc;
   }, [rows]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return rows
-      .filter((r) => (statusFilter === 'all' ? true : r.status === statusFilter))
+      .filter((r) => (statusFilter === 'all' ? true : bucketOf(describeWithdrawal(r)) === statusFilter))
       .filter((r) => {
         if (!q) return true;
         const tx = String(r.tx_hash || '').toLowerCase();
         const feeTx = String(r.fee_tx_hash || '').toLowerCase();
         const cur = String(r.currency || '').toLowerCase();
-        return tx.includes(q) || feeTx.includes(q) || cur.includes(q);
+        return tx.includes(q) || feeTx.includes(q) || cur.includes(q) || String(r.id).includes(q);
       })
       .sort((a, b) => new Date(b.requested_at).getTime() - new Date(a.requested_at).getTime());
   }, [rows, statusFilter, query]);
@@ -124,20 +446,35 @@ export default function WithdrawalsPage() {
     );
   }
 
+  const filterTabs: Array<{ key: FilterKey; label: string; activeClass: string }> = [
+    { key: 'all', label: 'All', activeClass: 'bg-white text-black' },
+    { key: 'open', label: 'In progress', activeClass: 'bg-amber-400 text-black' },
+    { key: 'paid', label: 'Paid', activeClass: 'bg-emerald-400 text-black' },
+    { key: 'rejected', label: 'Rejected', activeClass: 'bg-rose-400 text-black' },
+    { key: 'review', label: 'Needs review', activeClass: 'bg-orange-400 text-black' },
+    { key: 'expired', label: 'Expired', activeClass: 'bg-rose-400 text-black' },
+  ];
+
+  const acceptWindowCopy = `${windowMinutes()}-minute signing window`;
+
   return (
     <main className="min-h-screen bg-[#02040a] text-white px-6 py-12">
       <div className="max-w-6xl mx-auto space-y-8">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
           <div>
             <h1 className="text-4xl font-black tracking-tight uppercase">Withdrawal Status</h1>
-            <p className="text-white/35 text-sm mt-2">Track pending, accepted, and rejected requests.</p>
+            <p className="text-white/35 text-sm mt-2">
+              Every request follows one path: signed intent → manual review → treasury payout on Arc.
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={fetchRows}
-              className="px-4 py-2 text-xs font-black uppercase tracking-widest rounded-lg border border-white/15 bg-white/5 hover:bg-white/10"
+              onClick={() => void load('refresh')}
+              disabled={refreshing}
+              className="px-4 py-2 text-xs font-black uppercase tracking-widest rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-50 inline-flex items-center gap-2"
             >
-              {loading ? 'Refreshing...' : 'Refresh'}
+              <ArrowsClockwise className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              {refreshing ? 'Refreshing…' : 'Refresh'}
             </button>
             <Link
               href="/trade"
@@ -148,75 +485,89 @@ export default function WithdrawalsPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
-          <button
-            onClick={() => setStatusFilter('pending')}
-            className={`rounded-xl border p-4 text-left transition-colors ${
-              statusFilter === 'pending' ? 'border-amber-500/40 bg-amber-500/15' : 'border-amber-500/25 bg-amber-500/10 hover:bg-amber-500/15'
-            }`}
-          >
-            <p className="text-xs uppercase text-amber-200/80">Pending</p>
-            <p className="text-2xl font-black">{counts.pending}</p>
-          </button>
-          <button
-            onClick={() => setStatusFilter('accepted')}
-            className={`rounded-xl border p-4 text-left transition-colors ${
-              statusFilter === 'accepted'
-                ? 'border-emerald-500/40 bg-emerald-500/15'
-                : 'border-emerald-500/25 bg-emerald-500/10 hover:bg-emerald-500/15'
-            }`}
-          >
-            <p className="text-xs uppercase text-emerald-200/80">Accepted</p>
-            <p className="text-2xl font-black">{counts.accepted}</p>
-          </button>
-          <button
-            onClick={() => setStatusFilter('rejected')}
-            className={`rounded-xl border p-4 text-left transition-colors ${
-              statusFilter === 'rejected'
-                ? 'border-rose-500/40 bg-rose-500/15'
-                : 'border-rose-500/25 bg-rose-500/10 hover:bg-rose-500/15'
-            }`}
-          >
-            <p className="text-xs uppercase text-rose-200/80">Rejected</p>
-            <p className="text-2xl font-black">{counts.rejected}</p>
-          </button>
+        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 text-xs text-white/50 leading-relaxed">
+          <p>
+            <span className="text-white/70 font-bold uppercase tracking-widest text-[10px]">How long things stay payable. </span>
+            Your signature is only acceptable for a {acceptWindowCopy}: an operator must approve the request within{' '}
+            {windowMinutes()} minutes of you signing, or the intent expires and nothing moves — your balance is
+            untouched and you can request again from the trade screen. Review itself is manual with no fixed queue
+            timer; a payout is shown here only once the ledger actually records it. Amounts below are exact USDC
+            (6 decimals) after your platform tier fee at request time.
+          </p>
+        </div>
+
+        {authIssue && (
+          <div role="alert" className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex-1">
+              <p className="font-bold uppercase text-[11px] tracking-widest text-sky-300">Read authorization needed</p>
+              <p className="mt-1">
+                {authIssue === 'no_signer'
+                  ? 'No signer is available for the connected wallet. Reconnect via MetaMask/WalletConnect or log in with Privy, then authorize.'
+                  : authIssue === 'invalid'
+                    ? 'The read authorization was rejected by the server. Please authorize again with your wallet.'
+                    : 'You declined (or the list authorization lapsed). Viewing your withdrawal statuses requires a one-time wallet signature — it only authorizes reading YOUR OWN request history and cannot move funds.'}
+              </p>
+            </div>
+            <button
+              onClick={async () => {
+                setAuthIssue(null);
+                proofCache.current = null;
+                await load('refresh');
+              }}
+              disabled={signingInProgress}
+              className="px-4 py-2 rounded-lg bg-sky-400 text-black text-[10px] font-black uppercase tracking-widest hover:bg-sky-300 disabled:opacity-50"
+            >
+              {signingInProgress ? 'Waiting for signature…' : 'Authorize'}
+            </button>
+          </div>
+        )}
+        {loadError && (
+          <p role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {loadError}
+          </p>
+        )}
+        {pollingActive && !authIssue && (
+          <p className="text-xs text-white/35 flex items-center gap-2">
+            <Clock3 className="w-3.5 h-3.5 text-amber-300" />
+            Live — you have requests still in progress. This list refreshes while they can change.
+          </p>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {(
+            [
+              { key: 'open' as const, label: 'In progress', cls: 'border-amber-500/25 bg-amber-500/10 text-amber-200/80' },
+              { key: 'paid' as const, label: 'Paid', cls: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200/80' },
+              { key: 'rejected' as const, label: 'Rejected', cls: 'border-rose-500/25 bg-rose-500/10 text-rose-200/80' },
+              { key: 'review' as const, label: 'Needs review', cls: 'border-orange-500/25 bg-orange-500/10 text-orange-200/80' },
+              { key: 'expired' as const, label: 'Expired', cls: 'border-rose-500/25 bg-rose-500/5 text-rose-200/70' },
+            ]
+          ).map((c) => (
+            <button
+              key={c.key}
+              onClick={() => setStatusFilter(statusFilter === c.key ? 'all' : c.key)}
+              className={`rounded-xl border p-4 text-left transition-colors ${c.cls} hover:brightness-110`}
+            >
+              <p className="text-xs uppercase">{c.label}</p>
+              <p className="text-2xl font-black text-white">{counts[c.key]}</p>
+            </button>
+          ))}
         </div>
 
         <div className="rounded-2xl border border-white/10 bg-black/40 overflow-hidden">
           <div className="p-4 border-b border-white/10 bg-white/[0.02] flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
-            <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1 w-full md:w-auto">
-              <button
-                onClick={() => setStatusFilter('all')}
-                className={`flex-1 md:flex-none px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                  statusFilter === 'all' ? 'bg-white text-black' : 'text-white/60 hover:text-white'
-                }`}
-              >
-                All ({rows.length})
-              </button>
-              <button
-                onClick={() => setStatusFilter('pending')}
-                className={`flex-1 md:flex-none px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                  statusFilter === 'pending' ? 'bg-amber-400 text-black' : 'text-white/60 hover:text-white'
-                }`}
-              >
-                Pending
-              </button>
-              <button
-                onClick={() => setStatusFilter('accepted')}
-                className={`flex-1 md:flex-none px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                  statusFilter === 'accepted' ? 'bg-emerald-400 text-black' : 'text-white/60 hover:text-white'
-                }`}
-              >
-                Accepted
-              </button>
-              <button
-                onClick={() => setStatusFilter('rejected')}
-                className={`flex-1 md:flex-none px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                  statusFilter === 'rejected' ? 'bg-rose-400 text-black' : 'text-white/60 hover:text-white'
-                }`}
-              >
-                Rejected
-              </button>
+            <div className="inline-flex rounded-xl border border-white/10 bg-black/40 p-1 w-full md:w-auto flex-wrap">
+              {filterTabs.map((t) => (
+                <button
+                  key={t.key}
+                  onClick={() => setStatusFilter(t.key)}
+                  className={`flex-1 md:flex-none px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
+                    statusFilter === t.key ? t.activeClass : 'text-white/60 hover:text-white'
+                  }`}
+                >
+                  {t.label} ({counts[t.key]})
+                </button>
+              ))}
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3 w-full md:flex-1">
@@ -225,18 +576,33 @@ export default function WithdrawalsPage() {
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search tx hash / fee tx…"
+                  placeholder="Search request id / tx hash / asset…"
                   className="w-full bg-black/40 border border-white/10 rounded-xl pl-10 pr-3 py-2.5 text-sm text-white placeholder:text-white/25 outline-none focus:border-white/20"
                 />
               </div>
             </div>
           </div>
 
-          {/* Mobile cards */}
-          <div className="md:hidden p-4 space-y-3">
-            {loading && rows.length === 0 ? (
+          <div className="p-4 space-y-3">
+            {firstLoad && !authIssue ? (
               <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
-                <p className="text-white/30 text-sm">Loading withdrawals…</p>
+                <p className="text-white/30 text-sm animate-pulse">
+                  {signingInProgress ? 'Waiting for your wallet signature…' : 'Loading withdrawals…'}
+                </p>
+              </div>
+            ) : authIssue && rows.length === 0 ? (
+              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6 text-center">
+                <p className="text-white/70 font-bold">History locked until you authorize</p>
+                <p className="text-white/35 text-sm mt-1">
+                  Use the Authorize button above — one wallet signature unlocks read access to your own requests.
+                </p>
+              </div>
+            ) : rows.length === 0 && !loadError ? (
+              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6 text-center">
+                <p className="text-white/70 font-bold">No withdrawal requests yet</p>
+                <p className="text-white/35 text-sm mt-1">
+                  Requests you submit from the trade screen appear here with their live status.
+                </p>
               </div>
             ) : filtered.length === 0 ? (
               <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6 text-center">
@@ -254,149 +620,114 @@ export default function WithdrawalsPage() {
               </div>
             ) : (
               filtered.map((r) => {
-                const txLink = getExplorerUrl(r.tx_hash || null);
-                const feeLink = getExplorerUrl(r.fee_tx_hash || null);
+                const view = describeWithdrawal(r);
+                const expanded = expandedId === r.id;
                 return (
-                  <div key={r.id} className="rounded-xl border border-white/10 bg-black/30 p-4 space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <p className="text-[10px] uppercase tracking-widest text-white/30">Requested</p>
-                        <p className="text-sm font-mono text-white/80">{formatWhen(r.requested_at)}</p>
-                      </div>
-                      <StatusPill status={r.status} />
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                        <p className="text-[10px] uppercase tracking-widest text-white/25">Amount</p>
-                        <p className="text-sm font-mono">{Number(r.amount).toFixed(4)}</p>
-                      </div>
-                      <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                        <p className="text-[10px] uppercase tracking-widest text-white/25">Fee</p>
-                        <p className="text-sm font-mono text-red-300">{Number(r.fee_amount).toFixed(4)}</p>
-                      </div>
-                      <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                        <p className="text-[10px] uppercase tracking-widest text-white/25">Net</p>
-                        <p className="text-sm font-mono text-emerald-300">{Number(r.net_amount).toFixed(4)}</p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-black uppercase tracking-widest text-white/60">{String(r.currency).toUpperCase()}</p>
-                      <div className="flex items-center gap-3">
-                        {feeLink && (
-                          <a href={feeLink} target="_blank" rel="noopener noreferrer" className="text-[10px] font-black uppercase tracking-widest text-white/60 hover:text-white inline-flex items-center gap-1">
-                            fee <ExternalLink className="w-3 h-3" />
-                          </a>
-                        )}
-                        {txLink ? (
-                          <a href={txLink} target="_blank" rel="noopener noreferrer" className="text-[10px] font-black uppercase tracking-widest text-blue-300 hover:text-blue-200 inline-flex items-center gap-1">
-                            tx <ExternalLink className="w-3 h-3" />
-                          </a>
-                        ) : (
-                          <span className="text-[10px] font-black uppercase tracking-widest text-white/25">
-                            {r.status === 'pending' ? 'Awaiting approval' : '—'}
+                  <div key={r.id} className="rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedId(expanded ? null : r.id)}
+                      aria-expanded={expanded}
+                      className="w-full p-4 flex items-center gap-3 text-left hover:bg-white/[0.03] transition-colors"
+                    >
+                      <ChevronRight className={`w-4 h-4 shrink-0 text-white/30 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <span className="text-sm font-mono text-white/85">
+                            {formatUsdc(r.amount)} {String(r.currency).toUpperCase()}
                           </span>
+                          <span className="text-[11px] text-white/35 font-mono">#{r.id}</span>
+                        </div>
+                        <p className="text-[11px] text-white/35 font-mono mt-0.5">
+                          Requested {formatWhen(r.requested_at)}
+                          {r.decided_at ? ` · decided ${formatWhen(r.decided_at)}` : ''}
+                        </p>
+                        {view.kind === 'pending' && !view.intentExpired && view.intentRemainingMs != null && (
+                          <p className="text-[11px] text-amber-200/60 font-mono mt-0.5">
+                            Signature payable for another {formatRemaining(view.intentRemainingMs)}
+                          </p>
                         )}
                       </div>
-                    </div>
+                      <span className="hidden sm:block text-[11px] font-mono text-emerald-300/80">
+                        net {formatUsdc(r.net_amount)}
+                      </span>
+                      {isChainTxHash(r.tx_hash) && (
+                        <span className="hidden md:block text-[11px] font-mono text-blue-300/70">
+                          {shortHash(String(r.tx_hash))}
+                        </span>
+                      )}
+                      <TonePill view={view} />
+                    </button>
+
+                    {expanded && (
+                      <div className="px-4 pb-5 pt-1 md:grid md:grid-cols-2 md:gap-6 border-t border-white/5">
+                        <Timeline view={view} requestId={r.id} />
+                        <div className="space-y-4 mt-4 md:mt-0">
+                          <div className="grid grid-cols-3 gap-2">
+                            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
+                              <p className="text-[10px] uppercase tracking-widest text-white/25">Amount</p>
+                              <p className="text-sm font-mono">{formatUsdc(r.amount)}</p>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
+                              <p className="text-[10px] uppercase tracking-widest text-white/25">Fee</p>
+                              <p className="text-sm font-mono text-red-300">{formatUsdc(r.fee_amount)}</p>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2">
+                              <p className="text-[10px] uppercase tracking-widest text-white/25">You receive</p>
+                              <p className="text-sm font-mono text-emerald-300">{formatUsdc(r.net_amount)}</p>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-white/30 leading-relaxed">
+                            Fee and net are the platform-tier figures frozen into the ledger when you requested —
+                            this is the exact USDC (6 decimals) the treasury pays out.
+                          </p>
+                          <HashLinks view={view} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })
             )}
-          </div>
 
-          {/* Desktop table */}
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="text-[10px] uppercase tracking-widest text-white/30 border-b border-white/10">
-                  <th className="px-6 py-4">Time</th>
-                  <th className="px-6 py-4">Status</th>
-                  <th className="px-6 py-4">Amount</th>
-                  <th className="px-6 py-4">Fee</th>
-                  <th className="px-6 py-4">Net</th>
-                  <th className="px-6 py-4">Chain</th>
-                  <th className="px-6 py-4 text-right">Tx</th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading && rows.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-6 py-16 text-center text-white/30 text-sm">
-                      Loading withdrawals…
-                    </td>
-                  </tr>
-                ) : filtered.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-6 py-16 text-center">
-                      <p className="text-white/70 font-bold">No matching withdrawals</p>
-                      <p className="text-white/35 text-sm mt-1">Try clearing filters or search.</p>
-                      <button
-                        onClick={() => {
-                          setStatusFilter('all');
-                          setQuery('');
-                        }}
-                        className="mt-4 inline-flex px-4 py-2 rounded-lg bg-white text-black text-xs font-black uppercase tracking-widest"
-                      >
-                        Clear filters
-                      </button>
-                    </td>
-                  </tr>
-                ) : (
-                  filtered.map((r) => {
-                    const link = getExplorerUrl(r.tx_hash || null);
-                    const feeLink = getExplorerUrl(r.fee_tx_hash || null);
-                    return (
-                      <tr key={r.id} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                        <td className="px-6 py-4">
-                          <div className="space-y-1">
-                            <p className="text-xs font-mono">{formatWhen(r.requested_at)}</p>
-                            {r.decided_at ? (
-                              <p className="text-[10px] text-white/30 font-mono">Decided {formatWhen(r.decided_at)}</p>
-                            ) : (
-                              <p className="text-[10px] text-white/20 font-mono">—</p>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <StatusPill status={r.status} />
-                        </td>
-                        <td className="px-6 py-4 text-sm font-mono">{Number(r.amount).toFixed(4)}</td>
-                        <td className="px-6 py-4 text-sm font-mono text-red-300">{Number(r.fee_amount).toFixed(4)}</td>
-                        <td className="px-6 py-4 text-sm font-mono text-emerald-300">{Number(r.net_amount).toFixed(4)}</td>
-                        <td className="px-6 py-4 text-xs uppercase font-bold text-white/80">{String(r.currency).toUpperCase()}</td>
-                        <td className="px-6 py-4 text-right">
-                          <div className="inline-flex items-center gap-3 justify-end">
-                            {feeLink && (
-                              <a
-                                href={feeLink}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-white/50 hover:text-white text-[10px] font-black uppercase tracking-widest inline-flex items-center gap-1"
-                              >
-                                Fee <ExternalLink className="w-3 h-3" />
-                              </a>
-                            )}
-                            {link ? (
-                              <a href={link} target="_blank" rel="noopener noreferrer" className="text-blue-300 hover:text-blue-200 text-xs font-mono inline-flex items-center gap-1">
-                                {shortHash(r.tx_hash || '')} <ExternalLink className="w-3 h-3" />
-                              </a>
-                            ) : (
-                              <span className="text-white/30 text-xs font-mono">{r.status === 'pending' ? 'PENDING' : '—'}</span>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+            {!firstLoad && paging?.hasMore && (
+              <button
+                onClick={loadMore}
+                disabled={refreshing}
+                className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-white/70 hover:bg-white/10 disabled:opacity-50"
+              >
+                {refreshing ? 'Loading…' : `Load ${PAGE_SIZE} more (${Math.max(0, (paging.total ?? 0) - rows.length)} older requests)`}
+              </button>
+            )}
+            {!firstLoad && !paging?.hasMore && rows.length > 0 && (
+              <p className="text-center text-[10px] uppercase tracking-widest text-white/25 py-2">
+                End of list — {paging?.total ?? rows.length} requests total
+              </p>
+            )}
           </div>
         </div>
+
+        <p className="text-[11px] text-white/25 leading-relaxed max-w-3xl">
+          Withdrawals are signed intents: you sign off-chain, an operator reviews the request within{' '}
+          {windowMinutes()} minutes, and the STRIKE treasury contract pays USDC on Arc. Review is manual — the code
+          has no fixed payout timer, so we never promise one. A transaction hash and explorer link appear only after
+          the ledger records a real chain hash. Refreshing this page only re-reads the ledger; it never re-submits
+          your signature or creates a duplicate request.
+        </p>
       </div>
     </main>
   );
 }
 
+function WithdrawalsPageWithPrivy() {
+  const { wallets } = useWallets();
+  return <WithdrawalsPageInner privyWallets={wallets} />;
+}
+
+export default function WithdrawalsPage() {
+  const privyEnabled = usePrivyEnabled();
+  if (!privyEnabled) {
+    return <WithdrawalsPageInner privyWallets={[]} />;
+  }
+  return <WithdrawalsPageWithPrivy />;
+}

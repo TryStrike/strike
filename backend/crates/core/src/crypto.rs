@@ -12,8 +12,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::config::config;
 
@@ -69,15 +69,15 @@ fn now_millis() -> i64 {
 }
 
 fn hmac_b64url(secret: &str, input: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(input.as_bytes());
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
 fn hmac_hex(secret: &str, input: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(input.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -111,8 +111,14 @@ pub fn mint_balance_session_with(secret: Option<&str>) -> Option<String> {
     let secret = secret.filter(|s| !s.is_empty())?;
     let exp = now_seconds() + SESSION_TTL_SECONDS;
     let n = hex::encode(rand::random::<[u8; 16]>());
-    let payload = URL_SAFE_NO_PAD
-        .encode(serde_json::to_vec(&SessionPayload { v: SESSION_VERSION, exp, n }).ok()?);
+    let payload = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&SessionPayload {
+            v: SESSION_VERSION,
+            exp,
+            n,
+        })
+        .ok()?,
+    );
     let sig = hmac_b64url(secret, &payload);
     Some(format!("{payload}.{sig}"))
 }
@@ -123,8 +129,12 @@ pub fn verify_balance_session(raw: Option<&str>) -> bool {
 }
 
 pub fn verify_balance_session_with(secret: Option<&str>, raw: Option<&str>) -> bool {
-    let Some(secret) = secret.filter(|s| !s.is_empty()) else { return false };
-    let Some(value) = raw.map(str::trim).filter(|v| !v.is_empty()) else { return false };
+    let Some(secret) = secret.filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let Some(value) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
 
     let mut parts = value.split('.');
     let (Some(payload), Some(sig), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -137,8 +147,12 @@ pub fn verify_balance_session_with(secret: Option<&str>, raw: Option<&str>) -> b
         return false;
     }
 
-    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload) else { return false };
-    let Ok(decoded) = serde_json::from_slice::<SessionPayload>(&bytes) else { return false };
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload) else {
+        return false;
+    };
+    let Ok(decoded) = serde_json::from_slice::<SessionPayload>(&bytes) else {
+        return false;
+    };
     decoded.v == SESSION_VERSION && decoded.exp >= now_seconds()
 }
 
@@ -178,7 +192,12 @@ pub fn create_settlement_token_with(
         .ok_or_else(|| "BALANCE_SETTLEMENT_SECRET is not configured.".to_string())?;
 
     let now = now_seconds();
-    let ttl = if ttl_seconds > 0 { ttl_seconds } else { DEFAULT_SETTLEMENT_TTL_SECONDS }.max(MIN_SETTLEMENT_TTL_SECONDS);
+    let ttl = if ttl_seconds > 0 {
+        ttl_seconds
+    } else {
+        DEFAULT_SETTLEMENT_TTL_SECONDS
+    }
+    .max(MIN_SETTLEMENT_TTL_SECONDS);
     let payload = SettlementPayload {
         bet_id: bet_id.to_string(),
         user_address: user_address.to_string(),
@@ -187,9 +206,7 @@ pub fn create_settlement_token_with(
         iat: now,
         exp: now + ttl,
     };
-    let encoded = URL_SAFE_NO_PAD.encode(
-        serde_json::to_vec(&payload).map_err(|e| e.to_string())?,
-    );
+    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).map_err(|e| e.to_string())?);
     let sig = hmac_b64url(secret, &encoded);
     Ok(format!("{encoded}.{sig}"))
 }
@@ -264,10 +281,16 @@ pub fn verify_admin_token(token: Option<&str>) -> bool {
 }
 
 pub fn verify_admin_token_with(key: Option<&str>, ttl_seconds: i64, token: Option<&str>) -> bool {
-    let Some(key) = key.filter(|k| !k.is_empty()) else { return false };
-    let Some(value) = token.map(str::trim).filter(|v| !v.is_empty()) else { return false };
+    let Some(key) = key.filter(|k| !k.is_empty()) else {
+        return false;
+    };
+    let Some(value) = token.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
 
-    let Ok(bytes) = URL_SAFE_NO_PAD.decode(value) else { return false };
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(value) else {
+        return false;
+    };
     let Ok(AdminPayloadOwned { iat, sig }) = serde_json::from_slice::<AdminPayloadOwned>(&bytes)
     else {
         return false;
@@ -352,9 +375,8 @@ mod tests {
 
     #[test]
     fn settlement_token_verifies_and_reports_payload() {
-        let token =
-            create_settlement_token_with(Some(SECRET), "bet-1", "0xABC", "USDC", 12.5, 300)
-                .unwrap();
+        let token = create_settlement_token_with(Some(SECRET), "bet-1", "0xABC", "USDC", 12.5, 300)
+            .unwrap();
         let verified = verify_settlement_token_with(Some(SECRET), Some(&token)).expect("verify");
         assert_eq!(verified.bet_id, "bet-1");
         assert_eq!(verified.currency, "USDC");
@@ -398,9 +420,21 @@ mod tests {
     #[test]
     fn admin_token_round_trip_and_expiry_shape() {
         let token = issue_admin_token_with(Some(SECRET)).unwrap();
-        assert!(verify_admin_token_with(Some(SECRET), ADMIN_TTL, Some(&token)));
-        assert!(!verify_admin_token_with(Some("other"), ADMIN_TTL, Some(&token)));
-        assert!(!verify_admin_token_with(Some(SECRET), ADMIN_TTL, Some("not-base64!!")));
+        assert!(verify_admin_token_with(
+            Some(SECRET),
+            ADMIN_TTL,
+            Some(&token)
+        ));
+        assert!(!verify_admin_token_with(
+            Some("other"),
+            ADMIN_TTL,
+            Some(&token)
+        ));
+        assert!(!verify_admin_token_with(
+            Some(SECRET),
+            ADMIN_TTL,
+            Some("not-base64!!")
+        ));
         // The window is inclusive: a token issued this second passes at TTL 0
         // and fails one second before it.
         assert!(verify_admin_token_with(Some(SECRET), 0, Some(&token)));
@@ -414,19 +448,29 @@ mod tests {
         assert!(!dashboard_password_matches("hunter2", ""));
         // A different-length candidate still compares in the same shape: both
         // sides are fixed-length digests, never the passwords themselves.
-        assert!(!dashboard_password_matches("a-very-long-dashboard-passphrase", "short"));
+        assert!(!dashboard_password_matches(
+            "a-very-long-dashboard-passphrase",
+            "short"
+        ));
     }
 
     #[test]
-    fn intent_windows_match_ts_bounds() {        // A fixed clock: with `now_millis()` recomputed inside the function, the
+    fn intent_windows_match_ts_bounds() {
+        // A fixed clock: with `now_millis()` recomputed inside the function, the
         // exact-boundary asserts below would fail once every few runs.
         let now = 1_780_000_000_000;
         assert!(is_authorization_fresh_at(now, now - MAX_INTENT_AGE_MS));
         assert!(!is_authorization_fresh_at(now, now - MAX_INTENT_AGE_MS - 1));
         assert!(is_authorization_fresh_at(now, now + MAX_CLOCK_SKEW_MS));
         assert!(!is_authorization_fresh_at(now, now + MAX_CLOCK_SKEW_MS + 1));
-        assert!(is_within_accept_window_at(now, now - MAX_ACCEPT_INTENT_AGE_MS));
-        assert!(!is_within_accept_window_at(now, now - MAX_ACCEPT_INTENT_AGE_MS - 1));
+        assert!(is_within_accept_window_at(
+            now,
+            now - MAX_ACCEPT_INTENT_AGE_MS
+        ));
+        assert!(!is_within_accept_window_at(
+            now,
+            now - MAX_ACCEPT_INTENT_AGE_MS - 1
+        ));
         // The wall-clock wrappers agree with the injected clock today.
         assert!(is_authorization_fresh(now_millis()));
         assert!(is_within_accept_window(now_millis()));
@@ -453,8 +497,9 @@ mod tests {
     #[test]
     fn verifies_typescript_minted_fixtures() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../parity/vectors.json");
-        let raw = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("{path} is not readable ({e}); run `node backend/parity/emit.mjs`"));
+        let raw = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!("{path} is not readable ({e}); run `node backend/parity/emit.mjs`")
+        });
         let vectors: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
         let internal = vectors["secrets"]["internal"].as_str().unwrap();
@@ -462,14 +507,22 @@ mod tests {
         let dashboard = vectors["secrets"]["dashboard"].as_str().unwrap();
 
         let ts = &vectors["typescript"];
-        let fixture_ttl = vectors["adminTtlSeconds"].as_i64().expect("adminTtlSeconds");
-        assert!(verify_balance_session_with(Some(internal), ts["session"].as_str()), "TS session cookie rejected");
-        let payload =
-            verify_settlement_token_with(Some(settlement), ts["settlement"].as_str()).expect("TS settlement token");
+        let fixture_ttl = vectors["adminTtlSeconds"]
+            .as_i64()
+            .expect("adminTtlSeconds");
+        assert!(
+            verify_balance_session_with(Some(internal), ts["session"].as_str()),
+            "TS session cookie rejected"
+        );
+        let payload = verify_settlement_token_with(Some(settlement), ts["settlement"].as_str())
+            .expect("TS settlement token");
         assert_eq!(payload.bet_id, "bet-parity-1");
         assert_eq!(payload.currency, "USDC");
         assert_eq!(payload.max_payout, 7.25);
-        assert!(verify_admin_token_with(Some(dashboard), fixture_ttl, ts["admin"].as_str()), "TS admin token rejected");
+        assert!(
+            verify_admin_token_with(Some(dashboard), fixture_ttl, ts["admin"].as_str()),
+            "TS admin token rejected"
+        );
 
         let ours = mint_balance_session_with(Some(internal)).unwrap();
         let (payload, _) = ours.rsplit_once('.').unwrap();
@@ -484,7 +537,14 @@ mod tests {
         let (payload, _) = token.rsplit_once('.').unwrap();
         let decoded: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
-        for key in ["betId", "userAddress", "currency", "maxPayout", "iat", "exp"] {
+        for key in [
+            "betId",
+            "userAddress",
+            "currency",
+            "maxPayout",
+            "iat",
+            "exp",
+        ] {
             assert!(decoded.get(key).is_some(), "payload missing {key}");
         }
     }

@@ -17,6 +17,7 @@ export function shareWinUrl(payout: number, market: string) {
 /** Confetti + counting payout whenever a new round is won. Sits over the chart. */
 export function WinBurst() {
   const selectedAsset = useStore((s) => s.selectedAsset);
+  const gameMode = useStore((s) => s.gameMode);
   const reduceMotion = useReducedMotion();
   const [win, setWin] = useState<{ id: string; payout: number } | null>(null);
   const [shown, setShown] = useState(0);
@@ -77,8 +78,12 @@ export function WinBurst() {
               );
             })}
           <motion.div
+            role="status"
             initial={{ scale: 0.9, y: 8 }}
-            animate={{ scale: 1, y: 0 }}
+            // Box mode: lift the card into the chart's top third so it doesn't
+            // cover grid cells the player may want to tap (transform moves the
+            // hit area too; the confetti layer stays centered).
+            animate={{ scale: 1, y: gameMode === 'box' ? -110 : 0 }}
             className="pointer-events-auto flex flex-col items-center rounded-[28px] bg-white/80 px-8 py-6 font-tight shadow-[0_30px_80px_-30px_rgba(33,81,245,0.45)] ring-1 ring-ink/[0.06] backdrop-blur-xl"
           >
             <span className="text-sm text-subtle">You called it</span>

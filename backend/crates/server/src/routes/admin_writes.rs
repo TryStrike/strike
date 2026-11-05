@@ -1,6 +1,7 @@
 //! Admin MUTATION routes — the POST/DELETE half of `app/api/admin/*`.
 //!
 //! Ports, with the guards in the original order:
+//!   * `GET    /api/admin/access-codes`               (paged list)
 //!   * `POST   /api/admin/access-codes`               (generate codes)
 //!   * `POST   /api/admin/banned-wallets`             (add a ban)
 //!   * `DELETE /api/admin/banned-wallets`             (remove a ban)
@@ -32,28 +33,32 @@ use std::collections::HashMap;
 use axum::body::Bytes;
 use axum::extract::Path;
 use axum::extract::Query;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Map, Value};
 
+use strike_core::address::{canonical, search_variants};
+use strike_core::admin_reads_a::{parse_list_params, url_query_pairs, ListOptions};
+use strike_core::admin_reads_extra_b::{load_access_codes, ACCESS_CODE_STATUS_VALUES};
 use strike_core::admin_writes::{
     aggregate_withdrawal_stats, ban_reason, combined_tx_hash, danger_zone_json,
-    frequency_review_candidates, frequency_user_json, js_number_string, parse_request_id, plan_payout,
-    respond_supabase_error, sanitize_error_text, scans_json, sort_frequency_users,
-    suspicious_user_json, verify_withdrawal_intent, win_streak_hits, wipe_audit_rows,
+    frequency_review_candidates, frequency_user_json, js_number_string, parse_request_id,
+    plan_payout, reconciliation_note, respond_supabase_error, sanitize_error_text, scans_json,
+    sort_frequency_users, stale_intent_message, suspicious_user_json, verify_withdrawal_intent,
+    wallet_address_too_long, win_streak_hits, wipe_audit_rows, within_accept_window,
     AUDIT_SCAN_CAP, BET_SCAN_CAP, PENDING_SCAN_CAP, SCAN_PAGE,
 };
 use strike_core::admin_writes_extra::{access_code_count, generate_access_codes};
-use strike_core::address::{canonical, search_variants};
-use strike_core::bets::{
-    is_truthy, iso_ms, now_ms, number_coerce, to_number, value_to_string,
-};
+use strike_core::bets::{is_truthy, iso_ms, now_ms, number_coerce, to_number, value_to_string};
 use strike_core::config::{config, USDC_DECIMALS};
 use strike_core::db;
 use strike_core::error::{ApiError, ApiResult};
-use strike_core::eth::{parse_units, Treasury};
+use strike_core::eth::{self, parse_units, PayError, Transfer, Treasury};
+use strike_core::ledger::{exact_amount, floor_to_token};
+use strike_core::withdrawals::{self, Claim};
+use rust_decimal::Decimal;
 
 use crate::bans::is_globally_banned;
 use crate::http;
@@ -78,9 +83,15 @@ const SERVICE_ROLE_MISSING: &str = "SUPABASE_SERVICE_KEY is not set on this serv
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/api/admin/access-codes", post(access_codes_generate))
+        .route(
+            "/api/admin/access-codes",
+            get(access_codes_list).post(access_codes_generate),
+        )
         .route("/api/admin/danger-zone", get(danger_zone))
-        .route("/api/admin/banned-wallets", post(ban_add).delete(ban_remove))
+        .route(
+            "/api/admin/banned-wallets",
+            post(ban_add).delete(ban_remove),
+        )
         .route("/api/admin/unban-wallet", post(unban_wallet))
         .route("/api/admin/users/status", post(user_status))
         .route(
@@ -139,8 +150,30 @@ fn text_binds(values: &[Value]) -> Vec<(&str, &Value)> {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/admin/access-codes
+// GET + POST /api/admin/access-codes
 // ---------------------------------------------------------------------------
+
+async fn access_codes_list(headers: HeaderMap, uri: Uri) -> Response {
+    if let Err(deny) = http::require_admin(&headers) {
+        return deny.into_response();
+    }
+    let pairs = url_query_pairs(uri.query().unwrap_or(""));
+    let opts = ListOptions {
+        status_values: Some(&ACCESS_CODE_STATUS_VALUES),
+        extra_enums: &[],
+    };
+    let parsed = match parse_list_params(&pairs, &opts) {
+        Ok(parsed) => parsed,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    match load_access_codes(&parsed).await {
+        Ok(body) => axum::Json(body).into_response(),
+        Err(err) => {
+            tracing::error!("[admin/access-codes] {err}");
+            hinted_catch_500(&err.to_string(), "Failed to load access codes")
+        }
+    }
+}
 
 async fn access_codes_generate(headers: HeaderMap, raw: Bytes) -> Response {
     if let Err(deny) = http::require_admin(&headers) {
@@ -151,7 +184,7 @@ async fn access_codes_generate(headers: HeaderMap, raw: Bytes) -> Response {
         // Statement failures land on the same hinted 500 the TS catch emits.
         Err(err) => {
             tracing::error!("[admin/access-codes] {err}");
-            hinted_catch_500(&err.to_string(), "Internal server error")
+            hinted_catch_500(&err.to_string(), "Failed to generate access codes")
         }
     }
 }
@@ -167,7 +200,9 @@ async fn generate_codes_run(raw: &Bytes) -> ApiResult<Response> {
 
     let owned: Vec<Value> = codes.iter().map(|c| Value::String(c.clone())).collect();
     let binds = text_binds(&owned);
-    let values: Vec<String> = (1..=codes.len()).map(|i| format!("(CAST(${i} AS text))")).collect();
+    let values: Vec<String> = (1..=codes.len())
+        .map(|i| format!("(CAST(${i} AS text))"))
+        .collect();
     let rows = sql::fetch(
         &format!(
             "INSERT INTO access_codes (code) VALUES {} RETURNING {ACCESS_CODE_COLUMNS}",
@@ -186,7 +221,7 @@ async fn generate_codes_run(raw: &Bytes) -> ApiResult<Response> {
 
 /// `requireServiceRoleInProduction()`: runs after the admin deny, in TS order.
 fn service_role_gate() -> Option<Response> {
-    if config().production && config().database_url.is_none() {
+    if config().production && config().sqlite_path.is_none() {
         return Some(error(StatusCode::SERVICE_UNAVAILABLE, SERVICE_ROLE_MISSING));
     }
     None
@@ -200,7 +235,7 @@ async fn ban_add(headers: HeaderMap, raw: Bytes) -> Response {
         return block;
     }
     match serde_json::from_slice::<Value>(&raw) {
-        Err(err) => hinted_catch_500(&err.to_string(), "Failed to add ban"),
+        Err(_) => error(StatusCode::BAD_REQUEST, "Invalid JSON body."),
         Ok(body) => match ban_add_run(body).await {
             Ok(response) => response,
             Err(text) => supabase_statement_error(&text, "Failed to add ban"),
@@ -211,12 +246,14 @@ async fn ban_add(headers: HeaderMap, raw: Bytes) -> Response {
 async fn ban_add_run(body: Value) -> Result<Response, String> {
     // `typeof body.walletAddress === 'string' ? trim : ''` — a non-string is
     // silently the empty string, which then 400s as "required".
-    let wallet_address = http::body_str(&body, "walletAddress").unwrap_or_default().to_string();
+    let wallet_address = http::body_str(&body, "walletAddress")
+        .unwrap_or_default()
+        .to_string();
     if wallet_address.is_empty() {
-        return Ok(error(
-            StatusCode::BAD_REQUEST,
-            "walletAddress is required",
-        ));
+        return Ok(error(StatusCode::BAD_REQUEST, "walletAddress is required"));
+    }
+    if wallet_address_too_long(&wallet_address) {
+        return Ok(error(StatusCode::BAD_REQUEST, "walletAddress is too long"));
     }
     let reason = ban_reason(body.get("reason"));
     let key = Value::String(canonical(&wallet_address));
@@ -268,6 +305,9 @@ async fn ban_remove(headers: HeaderMap, Query(query): Query<HashMap<String, Stri
             "walletAddress query param is required",
         );
     }
+    if wallet_address_too_long(&wallet_address) {
+        return error(StatusCode::BAD_REQUEST, "walletAddress is too long");
+    }
     let key = Value::String(canonical(&wallet_address));
     match sql::execute(
         "DELETE FROM banned_wallets WHERE wallet_address = CAST($1 AS text)",
@@ -297,22 +337,28 @@ async fn unban_wallet(headers: HeaderMap, raw: Bytes) -> Response {
 }
 
 async fn unban_run(raw: &Bytes) -> ApiResult<Response> {
-    // Destructured in the TS (`const { walletAddress } = await request.json()`),
-    // so malformed JSON throws into the catch: `e.message ?? 'Unexpected error'`.
-    let body: Value = serde_json::from_slice(raw)?;
-
-    // `if (!walletAddress || typeof walletAddress !== 'string')` — unlike the
-    // stringified routes, a number does NOT pass here.
-    let Some(address) = body.get("walletAddress").and_then(Value::as_str) else {
-        return Ok(error(StatusCode::BAD_REQUEST, "walletAddress is required"));
+    let Ok(body) = serde_json::from_slice::<Value>(raw) else {
+        return Ok(error(StatusCode::BAD_REQUEST, "Invalid JSON body."));
     };
-    if address.is_empty() {
+
+    // A number does NOT pass here, and neither does a blank string.
+    let trimmed = body
+        .get("walletAddress")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if trimmed.is_empty() {
         return Ok(error(StatusCode::BAD_REQUEST, "walletAddress is required"));
     }
+    if wallet_address_too_long(trimmed) {
+        return Ok(error(StatusCode::BAD_REQUEST, "walletAddress is too long"));
+    }
 
-    let trimmed = address.trim();
     let key = canonical(trimmed);
     let variants = search_variants(trimmed);
+    if variants.is_empty() {
+        return Ok(error(StatusCode::BAD_REQUEST, "Invalid wallet address"));
+    }
 
     // 1. Remove from banned_wallets. This is the only failure the route
     // reports verbatim: `Failed to remove ban: ${banErr.message}`, 500.
@@ -424,32 +470,41 @@ async fn user_status(headers: HeaderMap, raw: Bytes) -> Response {
 }
 
 async fn user_status_run(raw: &Bytes) -> ApiResult<Response> {
-    let body: Value = serde_json::from_slice(raw)?;
+    let Ok(body) = serde_json::from_slice::<Value>(raw) else {
+        return Ok(error(StatusCode::BAD_REQUEST, "Invalid JSON body."));
+    };
 
-    // `if (!userAddress || !status)` — JS truthiness on the raw fields, so
-    // `""` and `0` are "missing", not "invalid".
-    if !is_truthy(body.get("userAddress")) || !is_truthy(body.get("status")) {
+    let address = body
+        .get("userAddress")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if address.trim().is_empty() {
         return Ok(error(
             StatusCode::BAD_REQUEST,
             "Missing userAddress or status",
         ));
     }
-    // `!['active','frozen','banned'].includes(status)` — a non-string never
-    // equals a member, so it 400s as "Invalid status".
-    let Some(status) = body.get("status").and_then(Value::as_str) else {
-        return Ok(error(StatusCode::BAD_REQUEST, "Invalid status"));
-    };
+    if wallet_address_too_long(address.trim()) {
+        return Ok(error(StatusCode::BAD_REQUEST, "userAddress is too long"));
+    }
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if status.is_empty() {
+        return Ok(error(
+            StatusCode::BAD_REQUEST,
+            "Missing userAddress or status",
+        ));
+    }
     if !USER_STATUSES.contains(&status) {
         return Ok(error(StatusCode::BAD_REQUEST, "Invalid status"));
     }
-    // `walletAddressSearchVariants(userAddress)` calls `raw.trim()`, which
-    // throws a TypeError for a non-string; the route's catch turns that into
-    // a 500, which is what this crash-shape mapping preserves.
-    let Some(address) = body.get("userAddress").and_then(Value::as_str) else {
-        return Err(ApiError::Other("userAddress.trim is not a function".to_string()));
-    };
 
     let variants = search_variants(address);
+    if variants.is_empty() {
+        return Ok(error(StatusCode::BAD_REQUEST, "Invalid wallet address"));
+    }
     let owned: Vec<Value> = variants.iter().map(|v| Value::String(v.clone())).collect();
     let bind_refs = text_binds(&owned);
     let status_bind = Value::String(status.to_string());
@@ -459,8 +514,6 @@ async fn user_status_run(raw: &Bytes) -> ApiResult<Response> {
     );
     let mut all: Vec<(&str, &Value)> = vec![("text", &status_bind)];
     all.extend(bind_refs);
-    // An empty variant list renders `IN (NULL)` — zero rows, still a success,
-    // exactly like the TS `.in(col, [])` against PostgREST.
     sql::execute(&statement, &all)
         .await
         .map_err(|err| ApiError::Other(err.to_string()))?;
@@ -481,11 +534,25 @@ async fn accept_withdrawal(headers: HeaderMap, Path(id): Path<String>) -> Respon
     let Some(id) = parse_request_id(Some(&id)) else {
         return error(StatusCode::BAD_REQUEST, "Invalid request id");
     };
-    match accept_run(id).await {
-        Ok(response) => response,
+    // Its own task: a client hanging up, or a proxy timing out, must not stop a
+    // payout before its hash is recorded. The hold makes shutdown wait for it.
+    let hold = eth::hold_payout();
+    let run = tokio::spawn(async move {
+        let _hold = hold;
+        accept_run(id).await
+    });
+    match run.await {
+        Ok(Ok(response)) => response,
         // The outer catch: `err.message || 'Failed to accept withdrawal
         // request'`, always 500 — including anything the chain layer threw.
-        Err(err) => catch_500(&err, "Failed to accept withdrawal request"),
+        Ok(Err(err)) => catch_500(&err, "Failed to accept withdrawal request"),
+        Err(panic) => {
+            tracing::error!("[withdrawal/accept] id={id} task failed: {panic}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to accept withdrawal request",
+            )
+        }
     }
 }
 
@@ -508,13 +575,18 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
     if row_field(&req, "status").as_str() != Some("pending") {
         return Ok(error(
             StatusCode::BAD_REQUEST,
-            format!("Cannot accept request in status: {}", value_to_string(row_field(&req, "status"))),
+            format!(
+                "Cannot accept request in status: {}",
+                value_to_string(row_field(&req, "status"))
+            ),
         ));
     }
 
     // `String(req.user_address).trim()` etc. — the TS stringifies before every
     // use, so a null column becomes the literal "null" rather than a crash.
-    let user_address = value_to_string(row_field(&req, "user_address")).trim().to_string();
+    let user_address = value_to_string(row_field(&req, "user_address"))
+        .trim()
+        .to_string();
     let currency = value_to_string(row_field(&req, "currency"));
     let amount = number_coerce(row_field(&req, "amount")).unwrap_or(f64::NAN);
     let normalized_currency = currency.to_uppercase();
@@ -537,10 +609,23 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
         ));
     }
     let signed_at = number_coerce(row_field(&req, "signed_at")).unwrap_or(f64::NAN);
+    // A signature in the queue is a standing instruction to move money, so an
+    // old captured intent must stop being payable.
+    if !signed_at.is_finite() || !within_accept_window(now_ms(), signed_at as i64) {
+        return Ok(error(StatusCode::BAD_REQUEST, stale_intent_message()));
+    }
     let signature = value_to_string(row_field(&req, "signature"));
-    if !verify_withdrawal_intent(&user_address, amount, &normalized_currency, signed_at, &signature)
-    {
-        return Ok(error(StatusCode::UNAUTHORIZED, "Invalid withdrawal signature"));
+    if !verify_withdrawal_intent(
+        &user_address,
+        amount,
+        &normalized_currency,
+        signed_at,
+        &signature,
+    ) {
+        return Ok(error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid withdrawal signature",
+        ));
     }
 
     // Balance rows. The TS folds the query error and the empty result into the
@@ -599,123 +684,175 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
     // ledger keys on the exact row that was funded.
     let db_address = row_field(user_row, "user_address").clone();
 
-    // Chain payouts: fee first (skipped when zero/unconfigured), then the net
-    // to the player. A stored `fee_amount` of 0 (Number(null) === 0 is finite!)
-    // overrides the computed fee, exactly like the TS `Number.isFinite` gate.
-    let fee_from_request = number_coerce(row_field(&req, "fee_amount")).filter(|f| f.is_finite());
-    let (fee_amount, net_amount) = plan_payout(&currency, amount, fee_from_request)
-        .map_err(ApiError::Other)?;
-    let (combined, fee_tx_hash) = execute_treasury_withdrawal(&user_address, fee_amount, net_amount)
-        .await?;
-
-    // Deduct the house balance + write the withdrawal audit, in one function.
-    let amount_bind = Value::String(js_number_string(amount));
-    let hash_bind = Value::String(combined.clone());
-    let upd = match db::call_rpc(
-        "update_balance_for_withdrawal",
-        &[
-            ("p_user_address", &db_address),
-            ("p_withdrawal_amount", &amount_bind),
-            ("p_currency", &Value::String(currency.clone())),
-            ("p_transaction_hash", &hash_bind),
-        ],
-    )
-    .await
-    {
-        Ok(value) => value,
+    // Everything that can refuse without money moving runs first: past the debit
+    // a failure can only be parked. A stored `fee_amount` of 0 (Number(null) === 0
+    // is finite!) overrides the computed fee, like the TS `Number.isFinite` gate.
+    let fee_from_request = number_coerce(row_field(&req, "fee_amount")).and_then(exact_amount);
+    let Some(gross) = exact_amount(amount) else {
+        return Ok(error(StatusCode::BAD_REQUEST, "Invalid withdrawal amount"));
+    };
+    let (fee_amount, net_amount) = match plan_payout(&currency, gross, fee_from_request) {
+        Ok(plan) => plan,
+        Err(message) => return Ok(error(StatusCode::BAD_REQUEST, message)),
+    };
+    let treasury = match Treasury::from_config() {
+        Ok(treasury) => treasury,
         Err(err) => {
-            // The TS treats this one statement's failure specially: `{ error:
-            // updError.message || 'Balance update failed' }`, 500, instead of
-            // the route's generic catch fallback.
-            let text = err.to_string();
-            let safe = sanitize_error_text(&text, "");
-            return Ok(if safe.is_empty() {
-                error(StatusCode::INTERNAL_SERVER_ERROR, "Balance update failed")
-            } else {
-                error(StatusCode::INTERNAL_SERVER_ERROR, safe)
-            });
+            tracing::error!("[withdrawal/accept] treasury unavailable: {err}");
+            return Ok(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Treasury is not configured.",
+            ));
         }
     };
-    // `updData?.new_balance` only reads an object row; a scalar/array result
-    // behaves like `undefined` in the TS and the key simply disappears.
-    let upd_map = match upd {
-        Value::Object(map) => Some(map),
-        _ => None,
+    let fee_wallet = config()
+        .platform_fee_wallet
+        .as_deref()
+        .filter(|w| !w.trim().is_empty());
+    let fee_base = match (fee_amount > Decimal::ZERO, fee_wallet) {
+        (true, Some(_)) => base_units(fee_amount),
+        _ => Ok(0),
+    };
+    let (fee_base, net_base) = match (fee_base, base_units(net_amount)) {
+        (Ok(fee), Ok(net)) => (fee, net),
+        (Err(err), _) | (_, Err(err)) => {
+            return Ok(error(StatusCode::BAD_REQUEST, err.to_string()))
+        }
+    };
+    // The fee goes first, as the TS sent it.
+    let mut transfers = Vec::with_capacity(2);
+    if let Some(wallet) = fee_wallet.filter(|_| fee_base > 0) {
+        transfers.push(Transfer {
+            to: wallet.to_string(),
+            amount: fee_base,
+        });
+    } else if fee_amount > Decimal::ZERO {
+        tracing::warn!(
+            "[platformFee] Fee wallet not configured for USDC. Skipping fee collection."
+        );
+    }
+    let has_fee = transfers.len() == 1;
+    transfers.push(Transfer {
+        to: user_address.clone(),
+        amount: net_base,
+    });
+
+    // One turn of the treasury queue: reads, then claim and debit in one commit,
+    // then the broadcasts. Exactly one concurrent accept gets `Debited`, and only
+    // with the balance to cover it.
+    let database = db::db().await?;
+    let currency_for_claim = currency.clone();
+    let claim = move || async move {
+        match withdrawals::claim_and_debit(
+            database,
+            id,
+            db_address,
+            js_number_string(amount),
+            currency_for_claim,
+        )
+        .await
+        {
+            Ok(Claim::Debited { new_balance }) => Ok(new_balance),
+            Ok(Claim::NotPending) => Err(error(
+                StatusCode::CONFLICT,
+                "Request is no longer pending — it was already claimed by another accept call.",
+            )),
+            Ok(Claim::Refused(reason)) if reason == "Insufficient balance" => Err(error(
+                StatusCode::BAD_REQUEST,
+                "Insufficient house balance for acceptance",
+            )),
+            Ok(Claim::Refused(reason)) => Err(error(StatusCode::FORBIDDEN, reason)),
+            Err(err) => {
+                tracing::error!("[withdrawal/accept] claim failed: {err}");
+                Err(error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to claim withdrawal request",
+                ))
+            }
+        }
     };
 
-    // Mark the request accepted. `decided_at: new Date().toISOString()`.
-    let accepted = Value::String("accepted".to_string());
-    let decided_at = Value::String(iso_ms(now_ms()));
-    let decided_by = Value::String("admin".to_string());
-    let tx_hash = Value::String(combined.clone());
-    let fee_tx = fee_tx_hash.clone().map(Value::String).unwrap_or(Value::Null);
-    let id_bind = Value::from(id);
-    sql::execute(
-        "UPDATE withdrawal_requests SET status = CAST($1 AS text), \
-             decided_at = CAST($2 AS timestamp with time zone), decided_by = CAST($3 AS text), \
-             tx_hash = CAST($4 AS text), fee_tx_hash = CAST($5 AS text) \
-         WHERE id = CAST($6 AS int8)",
-        &[
-            ("text", &accepted),
-            ("timestamp with time zone", &decided_at),
-            ("text", &decided_by),
-            ("text", &tx_hash),
-            ("text", &fee_tx),
-            ("int8", &id_bind),
-        ],
-    )
-    .await?;
+    // Past the debit the only exits are "recorded as paid" and "parked": a failure
+    // never re-credits and is never retried, because the transfer's outcome may
+    // be unknown.
+    let (new_balance, sent) = match treasury.pay(transfers, claim).await {
+        Ok(paid) => paid,
+        Err(PayError::Preflight(err)) => {
+            tracing::error!("[withdrawal/accept] id={id} treasury read failed: {err}");
+            return Ok(error(
+                StatusCode::BAD_GATEWAY,
+                "Treasury check failed — nothing was debited, the request is still pending.",
+            ));
+        }
+        Err(PayError::Refused(response)) => return Ok(response),
+        Err(PayError::Send { sent, error: err }) => {
+            let hashes: Vec<&str> = sent.iter().map(|s| s.hash.as_str()).collect();
+            mark_needs_reconciliation(id, &format!("chain_payout_error:sent={hashes:?}: {err}"))
+                .await;
+            return Ok(payout_parked());
+        }
+    };
 
-    // `{ success: true, newBalance: updData?.new_balance }` — an undefined
-    // `newBalance` key is dropped by JSON.stringify, so only include it when
-    // the function actually returned an object carrying it.
+    let hashes: Vec<&str> = sent.iter().map(|s| s.hash.as_str()).collect();
+    let mut failure = None;
+    for transfer in &sent {
+        // Every one, so each releases its share of the treasury balance.
+        if let Err(err) = treasury.confirm(transfer).await {
+            failure.get_or_insert(err);
+        }
+    }
+    if let Some(err) = failure {
+        mark_needs_reconciliation(id, &format!("chain_payout_error:sent={hashes:?}: {err}")).await;
+        return Ok(payout_parked());
+    }
+    let fee_tx_hash = has_fee.then(|| hashes[0].to_string());
+    let combined = combined_tx_hash(fee_tx_hash.as_deref(), hashes[hashes.len() - 1]);
+
+    let finalize_failure =
+        match withdrawals::finalize(db::db().await?, id, combined, fee_tx_hash).await {
+            Ok(true) => None,
+            Ok(false) => Some("row no longer accepted".to_string()),
+            Err(err) => Some(err.to_string()),
+        };
+    if let Some(reason) = finalize_failure {
+        mark_needs_reconciliation(id, &format!("tx_hash_writeback_failed:{reason}")).await;
+        return Ok(error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Payout succeeded but the request could not be finalized — check the ledger.",
+        ));
+    }
+
     let mut body = Map::new();
     body.insert("success".to_string(), Value::Bool(true));
-    if let Some(new_balance) = upd_map.as_ref().and_then(|map| map.get("new_balance")) {
-        body.insert("newBalance".to_string(), new_balance.clone());
-    }
+    body.insert("newBalance".to_string(), new_balance);
     Ok(axum::Json(Value::Object(body)).into_response())
 }
 
-/// `executeTreasuryWithdrawal`'s chain half, in the TS order: the fee transfer
-/// first (`collectPlatformFeeFromTreasury`: `!feeAmount || feeAmount <= 0`
-/// skips — NaN included — and an unconfigured fee wallet warns and skips),
-/// then the net payout. Every failure surfaces as a throw for the outer 500
-/// catch, so statuses here deliberately collapse to the message.
-async fn execute_treasury_withdrawal(
-    to: &str,
-    fee_amount: f64,
-    net_amount: f64,
-) -> ApiResult<(String, Option<String>)> {
-    let mut fee_tx_hash: Option<String> = None;
-    let mut treasury: Option<Treasury> = None;
-
-    if fee_amount > 0.0 {
-        // The fee collector exists only for USDC (already gated by
-        // `plan_payout`) and only when configured.
-        if let Some(fee_wallet) = config()
-            .platform_fee_wallet
-            .as_deref()
-            .filter(|w| !w.trim().is_empty())
-        {
-            let t = Treasury::from_config()?;
-            let fee_base = parse_units(&js_number_string(fee_amount), USDC_DECIMALS)?;
-            fee_tx_hash = Some(t.withdraw_token_to(fee_wallet, fee_base).await?);
-            treasury = Some(t);
-        } else {
-            tracing::warn!(
-                "[platformFee] Fee wallet not configured for USDC. Skipping fee collection."
-            );
-        }
-    }
-
-    let t = match treasury {
-        Some(t) => t,
-        None => Treasury::from_config()?,
+/// `markNeedsReconciliation`: once a row is claimed, a failure is no longer a
+/// plain 500. Funds may have left the treasury, so park it where no second
+/// admin can pay it again, and shout in the logs.
+async fn mark_needs_reconciliation(id: i64, reason: &str) {
+    let note = reconciliation_note(reason);
+    tracing::error!("[withdrawal/accept] id={id} {note}");
+    let parked = match db::db().await {
+        Ok(database) => withdrawals::park(database, id, note).await,
+        Err(err) => Err(err),
     };
-    let net_base = parse_units(&js_number_string(net_amount), USDC_DECIMALS)?;
-    let withdraw_tx_hash = t.withdraw_token_to(to, net_base).await?;
-    Ok((combined_tx_hash(fee_tx_hash.as_deref(), &withdraw_tx_hash), fee_tx_hash))
+    // Left `accepted` with no tx hash, which is equally unpayable.
+    if !matches!(parked, Ok(true)) {
+        tracing::error!("[withdrawal/accept] id={id} could not be parked: {parked:?}");
+    }
+}
+
+fn base_units(amount: Decimal) -> ApiResult<u128> {
+    parse_units(&floor_to_token(amount).to_string(), USDC_DECIMALS)
+}
+
+fn payout_parked() -> Response {
+    error(
+        StatusCode::BAD_GATEWAY,
+        "Treasury payout failed — request parked for reconciliation.",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -752,26 +889,32 @@ async fn reject_run(id: i64) -> ApiResult<Response> {
     if row_field(&req, "status").as_str() != Some("pending") {
         return Ok(error(
             StatusCode::BAD_REQUEST,
-            format!("Cannot reject request in status: {}", value_to_string(row_field(&req, "status"))),
+            format!(
+                "Cannot reject request in status: {}",
+                value_to_string(row_field(&req, "status"))
+            ),
         ));
     }
 
-    let rejected = Value::String("rejected".to_string());
+    // Conditional: a reject racing a concurrent accept must never overwrite
+    // the paid state and destroy the payout audit trail.
     let decided_at = Value::String(iso_ms(now_ms()));
-    let decided_by = Value::String("admin".to_string());
-    let id_bind = Value::from(id);
-    sql::execute(
-        "UPDATE withdrawal_requests SET status = CAST($1 AS text), \
-             decided_at = CAST($2 AS timestamp with time zone), decided_by = CAST($3 AS text) \
-         WHERE id = CAST($4 AS int8)",
+    let updated = sql::fetch(
+        "UPDATE withdrawal_requests SET status = 'rejected', \
+             decided_at = CAST($1 AS timestamp with time zone), decided_by = 'admin' \
+         WHERE id = CAST($2 AS int8) AND status = 'pending' RETURNING id",
         &[
-            ("text", &rejected),
             ("timestamp with time zone", &decided_at),
-            ("text", &decided_by),
             ("int8", &id_bind),
         ],
     )
     .await?;
+    if updated.is_empty() {
+        return Ok(error(
+            StatusCode::CONFLICT,
+            "Request is no longer pending — it was accepted or rejected by another action.",
+        ));
+    }
 
     Ok(axum::Json(json!({ "success": true })).into_response())
 }
@@ -831,9 +974,15 @@ fn number_or_zero(value: Option<&Value>) -> f64 {
 
 async fn danger_zone_run() -> ApiResult<Response> {
     // 1. Win-streak detection over the (non-demo) bet scan.
-    let (bet_rows, bets_truncated) =
-        scan_pages("id, wallet_address, won, created_at", "bet_history", "", &[], "created_at", BET_SCAN_CAP)
-            .await?;
+    let (bet_rows, bets_truncated) = scan_pages(
+        "id, wallet_address, won, created_at",
+        "bet_history",
+        "",
+        &[],
+        "created_at",
+        BET_SCAN_CAP,
+    )
+    .await?;
     let mut suspicious: Vec<Value> = Vec::new();
     for (address, max_streak, latest) in win_streak_hits(&bet_rows) {
         let key = Value::String(address);
@@ -877,12 +1026,16 @@ async fn danger_zone_run() -> ApiResult<Response> {
     )
     .await?;
 
-    let candidates =
-        frequency_review_candidates(aggregate_withdrawal_stats(&audit_rows, &pending_rows), &config().withdrawal_frequency_exempt);
+    let candidates = frequency_review_candidates(
+        aggregate_withdrawal_stats(&audit_rows, &pending_rows),
+        &config().withdrawal_frequency_exempt,
+    );
     let mut users: Vec<Value> = Vec::new();
     for stats in &candidates {
-        let variants: Vec<Value> =
-            search_variants(&stats.user_address).into_iter().map(Value::String).collect();
+        let variants: Vec<Value> = search_variants(&stats.user_address)
+            .into_iter()
+            .map(Value::String)
+            .collect();
         let variant_refs: Vec<(&str, &Value)> = variants.iter().map(|v| ("text", v)).collect();
         // The TS ignores failures on both enrichment reads (data becomes null
         // and `?? []` turns that into an empty list).
@@ -908,8 +1061,14 @@ async fn danger_zone_run() -> ApiResult<Response> {
         )
         .await
         .unwrap_or_default();
-        let total_deposited = deposits.iter().map(|r| number_or_zero(r.get("amount"))).sum();
-        let total_available = balances.iter().map(|r| number_or_zero(r.get("balance"))).sum();
+        let total_deposited = deposits
+            .iter()
+            .map(|r| number_or_zero(r.get("amount")))
+            .sum();
+        let total_available = balances
+            .iter()
+            .map(|r| number_or_zero(r.get("balance")))
+            .sum();
         users.push(frequency_user_json(stats, total_deposited, total_available));
     }
 

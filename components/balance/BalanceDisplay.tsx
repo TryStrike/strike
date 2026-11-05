@@ -4,12 +4,13 @@ import React, { useEffect, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { ArrowClockwise } from '@phosphor-icons/react';
 import { Button } from '@/components/ui/kit';
-import { DepositModal } from './DepositModal';
-import { WithdrawModal } from './WithdrawModal';
+import { DepositModal, type DepositProof } from './DepositModal';
+import { WithdrawModal, type WithdrawRequestDetails } from './WithdrawModal';
 import { ReceiptDrawer, type ReceiptData } from './ReceiptDrawer';
 import { useToast } from '@/lib/hooks/useToast';
 import { ARC_ASSETS } from '@/lib/arc/config';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
+import { calculateFeeAmount } from '@/lib/fees/platformFee';
 
 /**
  * BalanceDisplay Component
@@ -46,7 +47,6 @@ export const BalanceDisplay: React.FC = () => {
   const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState(false);
   const [isReceiptOpen, setIsReceiptOpen] = useState(false);
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);
-  const feePercent = userTier === 'vip' ? 0.08 : userTier === 'standard' ? 0.09 : 0.10;
 
   // House credits: sync when this panel mounts or wallet / ledger currency changes.
   // WalletSync only refreshed on-chain balance; fetchBalance loads the house balance.
@@ -113,40 +113,56 @@ export const BalanceDisplay: React.FC = () => {
 
   /**
    * Handle successful deposit
-   * Refreshes balance and shows success message
+   * The modal only calls this after the ledger has credited the deposit, so
+   * the receipt shows the server's own numbers (fee, net, credited-at) whenever
+   * it returned them; the client-side fee helper is only a fallback.
    */
-  const handleDepositSuccess = async (amount: number, txHash: string) => {
-    const fee = amount * feePercent;
+  const handleDepositSuccess = (amount: number, txHash: string, proof?: DepositProof) => {
+    const fee = typeof proof?.fee === 'number' ? proof.fee : calculateFeeAmount(amount, userTier);
+    const net =
+      typeof proof?.netCredited === 'number' ? proof.netCredited : amount - fee;
+    const creditedAtMs = proof?.creditedAt ? Date.parse(proof.creditedAt) : NaN;
     setReceipt({
       kind: 'deposit',
       amount,
       fee,
-      net: amount - fee,
+      net,
       chain: network || 'ARC',
       currency: currentSymbol,
-      txHash,
-      createdAt: Date.now(),
+      txHash: proof?.txHash ?? txHash,
+      createdAt: Number.isFinite(creditedAtMs) ? creditedAtMs : Date.now(),
       status: 'confirmed',
     });
     setIsReceiptOpen(true);
   };
 
   /**
-   * Handle successful withdrawal
-   * Refreshes balance and shows success message
+   * Handle successful withdrawal request
+   *
+   * A withdrawal is only complete when the ledger says it is — the modal
+   * reports 'confirmed' receipts solely for a paid-out status, everything else
+   * is a queued request (no hash, pending).
    */
-  const handleWithdrawSuccess = async (amount: number, txHash: string) => {
-    const fee = amount * feePercent;
+  const handleWithdrawSuccess = (
+    amount: number,
+    txHash: string,
+    requestId?: number,
+    details?: WithdrawRequestDetails
+  ) => {
+    const fee = typeof details?.feeAmount === 'number' ? details.feeAmount : calculateFeeAmount(amount, userTier);
+    const net = typeof details?.netAmount === 'number' ? details.netAmount : amount - fee;
+    const requestedAtMs = details?.requestedAt ? Date.parse(details.requestedAt) : NaN;
     setReceipt({
       kind: 'withdrawal',
       amount,
       fee,
-      net: amount - fee,
+      net,
       chain: network || 'ARC',
       currency: currentSymbol,
       txHash,
-      createdAt: Date.now(),
+      createdAt: Number.isFinite(requestedAtMs) ? requestedAtMs : Date.now(),
       status: txHash === 'PENDING' ? 'pending' : 'confirmed',
+      requestId,
     });
     setIsReceiptOpen(true);
   };

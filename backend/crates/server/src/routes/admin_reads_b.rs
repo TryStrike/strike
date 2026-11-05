@@ -16,16 +16,16 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use strike_core::admin_reads_a::{self, ListOptions};
 use strike_core::admin_reads_extra_b as extra;
-use strike_core::error::ApiError;
+use strike_core::config::config;
+use strike_core::db;
+use strike_core::error::{ApiError, ApiResult};
+use strike_core::withdrawals;
 
 use crate::http::{json_status, require_admin};
-
-/// The `access_codes` status enum the export panel declares to the list parser.
-const CODE_STATUS_VALUES: [&str; 2] = ["ready", "consumed"];
 
 pub fn routes() -> Router {
     Router::new()
@@ -36,6 +36,7 @@ pub fn routes() -> Router {
         .route("/api/admin/banned-wallets", get(banned_wallets))
         .route("/api/admin/withdrawal-requests/pending", get(pending))
         .route("/api/admin/export", get(export))
+        .route("/api/admin/ops-health", get(ops_health))
 }
 
 /// `new URL(request.url).searchParams` — the raw query decoded into the ordered
@@ -48,7 +49,10 @@ fn query_pairs(uri: &Uri) -> Vec<(String, String)> {
 /// cause, answer with the sanitized (route-specific) message at 500.
 fn admin_fail(err: ApiError, fallback: &str, label: &str) -> ApiError {
     tracing::error!("[admin/{label}] {fallback}: {err}");
-    ApiError::internal(admin_reads_a::sanitize_error_message(&err.to_string(), fallback))
+    ApiError::internal(admin_reads_a::sanitize_error_message(
+        &err.to_string(),
+        fallback,
+    ))
 }
 
 /// `adminBadRequest(message)` — `{ error }` at 400. The message is client-safe by
@@ -206,16 +210,18 @@ async fn export(headers: HeaderMap, uri: Uri) -> Response {
         extra::ExportDataset::Transactions => {
             (Some(&admin_reads_a::TRANSACTION_STATUS_VALUES[..]), false)
         }
-        extra::ExportDataset::GameHistory => {
-            (Some(&admin_reads_a::GAME_STATUS_VALUES[..]), true)
-        }
-        extra::ExportDataset::AccessCodes => (Some(&CODE_STATUS_VALUES[..]), false),
+        extra::ExportDataset::GameHistory => (Some(&admin_reads_a::GAME_STATUS_VALUES[..]), true),
+        extra::ExportDataset::AccessCodes => (Some(&extra::ACCESS_CODE_STATUS_VALUES[..]), false),
     };
     let account_enums: [(&str, &[&str]); 1] = [("account", &admin_reads_a::ACCOUNT_VALUES[..])];
     let no_enums: [(&str, &[&str]); 0] = [];
     let opts = ListOptions {
         status_values,
-        extra_enums: if with_account { &account_enums[..] } else { &no_enums[..] },
+        extra_enums: if with_account {
+            &account_enums[..]
+        } else {
+            &no_enums[..]
+        },
     };
     let parsed = match admin_reads_a::parse_list_params(&params, &opts) {
         Ok(parsed) => parsed,
@@ -254,4 +260,36 @@ fn csv_response(body: String, file_name: &str) -> Response {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Not a TS route. What an operator needs at a glance: withdrawals debited with
+/// no transfer on record, and how well the writer is batching.
+async fn ops_health(headers: HeaderMap) -> Response {
+    if let Err(deny) = require_admin(&headers) {
+        return deny.into_response();
+    }
+    let report = async {
+        let database = db::db().await?;
+        let stuck = withdrawals::stuck(database, withdrawals::stuck_cutoff_us()).await?;
+        ApiResult::Ok((stuck, database.writer_stats()))
+    };
+    match report.await {
+        Ok((stuck, (commits, jobs))) => axum::Json(json!({
+            "stuckWithdrawals": {
+                "count": stuck.len(),
+                "ids": stuck,
+                "timeoutSeconds": config().withdrawal_stuck_secs,
+            },
+            "writer": {
+                "commits": commits,
+                "jobs": jobs,
+                "averageBatch": jobs as f64 / commits.max(1) as f64,
+            },
+        }))
+        .into_response(),
+        Err(err) => {
+            tracing::error!("[admin/ops-health] {err}");
+            ApiError::internal("Failed to load ops health").into_response()
+        }
+    }
 }

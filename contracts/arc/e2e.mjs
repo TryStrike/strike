@@ -25,16 +25,31 @@ for (const file of ['.env.local', '.env']) {
   }
 }
 
-const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID) || 5042;
+// No implicit chain default: silently reading (or worse, funding) the wrong
+// chain's deployment is a fund-safety issue, so the chain id must be stated.
+const chainId = Number(process.env.NEXT_PUBLIC_ARC_CHAIN_ID ?? process.env.ARC_CHAIN_ID);
+if (!Number.isInteger(chainId) || chainId <= 0) {
+  console.error(
+    'ARC chain id is not configured. Set NEXT_PUBLIC_ARC_CHAIN_ID explicitly ' +
+      '(5042 = Arc mainnet, 5042002 = Arc Testnet) in .env.local or the environment.'
+  );
+  process.exit(1);
+}
 const net = {
   chainId,
   name: chainId === 5042 ? 'Arc' : 'Arc Testnet',
   rpc: process.env.ARC_RPC_URL || process.env.NEXT_PUBLIC_ARC_RPC_ENDPOINT || 'https://rpc.mainnet.arc.io',
 };
 
-const deployment = JSON.parse(
-  readFileSync(join(__dirname, `deployments/arc-${net.chainId}.json`), 'utf8')
-);
+const deploymentPath = join(__dirname, `deployments/arc-${net.chainId}.json`);
+if (!existsSync(deploymentPath)) {
+  console.error(
+    `No deployment record for ${net.name} (${net.chainId}) at ${deploymentPath}.\n` +
+      `Deploy first (node contracts/arc/deploy.mjs) or set NEXT_PUBLIC_ARC_CHAIN_ID to a deployed chain.`
+  );
+  process.exit(1);
+}
+const deployment = JSON.parse(readFileSync(deploymentPath, 'utf8'));
 const abi = JSON.parse(readFileSync(join(__dirname, 'deployments/StrikeTreasury.abi.json'), 'utf8'));
 
 const ERC20_ABI = [

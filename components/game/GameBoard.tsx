@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '@/lib/store';
 import { useShallow } from 'zustand/react/shallow';
 import { LiveChart } from './LiveChart';
@@ -13,6 +13,7 @@ import { ArrowDown, ArrowUp, Check, X } from '@phosphor-icons/react';
 import { Button, Field, Label, Segmented, glassSelected } from '@/components/ui/kit';
 import { IndicatorsToggle, MiniHistory } from '@/components/history/MiniHistory';
 import { WinBurst } from './WinBurst';
+import { SettlementProof, matchSettledRound, type SettlementProofInput } from './SettlementProof';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { ArrowUpRight } from '@phosphor-icons/react';
 import posthog from 'posthog-js';
@@ -230,6 +231,9 @@ export const GameBoard: React.FC = () => {
 
   const handleStrikeBet = async (direction: 'UP' | 'DOWN') => {
     if (!address || !isWalletConnected || gameMode !== 'binomo') return;
+    // Read the live flag (not the render snapshot): a second click/keydown that
+    // lands before rerenders must not start a duplicate placement.
+    if (useStore.getState().isPlacingBet) return;
 
     try {
       const multiplier = getMultiplier(selectedDuration);
@@ -286,6 +290,39 @@ export const GameBoard: React.FC = () => {
   let streak = 0;
   while (streak < sessionBets.length && sessionBets[streak].won) streak++;
 
+  // Price-feed stall banner. Polled from getState() (lastTickAt changes every
+  // second and must not rerender the board); the boolean only flips at the edge.
+  const lastResult = useStore((s) => s.lastResult);
+  const [feedDelayed, setFeedDelayed] = useState(false);
+  useEffect(() => {
+    const check = () => {
+      const t = useStore.getState().lastTickAt;
+      setFeedDelayed(t > 0 && Date.now() - t > 8000);
+    };
+    check();
+    const id = setInterval(check, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Screen-reader round status: settles and insufficient-balance errors only —
+  // never per-tick prices.
+  const [srMessage, setSrMessage] = useState('');
+  useEffect(() => {
+    if (!lastResult) return;
+    const cur = lastResult.currency || 'USDC';
+    const outcome = lastResult.won
+      ? lastResult.payout === lastResult.amount
+        ? `Round draw. Stake ${lastResult.amount.toFixed(2)} ${cur} refunded.`
+        : `Round won. Payout ${lastResult.payout.toFixed(2)} ${cur}.`
+      : `Round lost. Stake ${lastResult.amount.toFixed(2)} ${cur} forfeited.`;
+    setSrMessage(outcome);
+  }, [lastResult]);
+  useEffect(() => {
+    if (error && isBalanceError) {
+      setSrMessage(`Insufficient balance. ${error}`);
+    }
+  }, [error, isBalanceError]);
+
   // Keyboard trading: ↑ / ↓ place Higher / Lower, 1–5 pick an amount preset.
   const betRef = React.useRef(handleStrikeBet);
   useEffect(() => {
@@ -293,8 +330,13 @@ export const GameBoard: React.FC = () => {
   });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Ignore OS key auto-repeat — holding ↑ must not fire a burst of bets.
+      if (e.repeat) return;
       const el = e.target as HTMLElement | null;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      if (
+        el &&
+        (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
+      ) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const preset = ['0.1', '0.5', '1', '5', '10'][Number(e.key) - 1];
       if (preset) {
@@ -311,20 +353,112 @@ export const GameBoard: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [gameMode, isWalletConnected, isPlacingBet]);
 
+  // ── Settlement proof wiring ────────────────────────────────────────────────
+  // A settled round is described by its history row (strike / end price / money)
+  // plus the result the engine just published (asset + currency). Anything the
+  // row cannot know — the click-time round end, the idempotency key, ledger
+  // operations and real chain hashes — is filled in read-only by
+  // GET /api/bets/[id] when the panel opens.
+  const lastSettledBet = useMemo(() => matchSettledRound(bets, lastResult), [bets, lastResult]);
+  const resultProof = useMemo<SettlementProofInput | null>(() => {
+    if (!lastResult) return null;
+    // A settled round ALWAYS offers a proof: the history row is preferred for
+    // strike/direction detail, but lastResult now carries the server bet id
+    // too, so even a round whose row was lost (history reload, filtered
+    // storage) still opens GET /api/bets/<id> and reads the row back.
+    const betId = lastSettledBet?.id ?? lastResult.betId ?? null;
+    if (!betId) return null;
+    const row = lastSettledBet;
+    // The engine stamps the asset on the session row it writes at resolve
+    // time; BetRecord's public type does not carry it, so read it defensively.
+    const rowAsset = (row as unknown as { asset?: string | null } | null)?.asset ?? null;
+    return {
+      betId,
+      // lastResult carries the asset the round ran on, so the panel looks the
+      // feed history up under the right key even after the user switches.
+      asset: lastResult.asset ?? rowAsset ?? null,
+      mode: row?.target?.id ?? null,
+      direction: row?.target?.direction ?? null,
+      multiplier: row?.target?.multiplier ?? null,
+      stake: row ? parseFloat(row.amount) : lastResult.amount,
+      payout: row ? parseFloat(row.payout) : lastResult.payout,
+      won: row ? row.won : lastResult.won,
+      // end_price on the history row is what the client held at resolution.
+      recordedEndPrice: row?.endPrice || null,
+      strikePrice: row?.startPrice || null,
+      resolvedAt: lastResult.timestamp,
+      network: lastResult.currency ?? null,
+    };
+  }, [lastSettledBet, lastResult]);
+
+  // Proof entry points for the resolved-bet list (newest rounds first). Their
+  // asset/endTime are not on the row, so the panel reads them from the proof
+  // endpoint and falls back to the recorded value with a caveat if it cannot.
+  const listProofs = useMemo(
+    () =>
+      bets.slice(0, 5).map((bet) => ({
+        betId: bet.id,
+        mode: bet.target?.id ?? null,
+        direction: bet.target?.direction ?? null,
+        multiplier: bet.target?.multiplier ?? null,
+        stake: parseFloat(bet.amount),
+        payout: parseFloat(bet.payout),
+        won: bet.won,
+        recordedEndPrice: bet.endPrice || null,
+        strikePrice: bet.startPrice || null,
+        resolvedAt: bet.timestamp,
+      })),
+    [bets],
+  );
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col lg:flex-row">
       {/* Chart */}
       <div className="relative min-h-[420px] flex-1 lg:min-h-0">
         <LiveChart betAmount={betAmount} />
         <WinBurst />
+        {/* Persistent status region: text only appears on a stall, so the
+            announcement fires (mounting a fresh live region is unreliable). */}
+        <div className="absolute left-1/2 top-2 z-[45] -translate-x-1/2">
+          <div
+            role="status"
+            aria-live="polite"
+            className={
+              feedDelayed
+                ? 'whitespace-nowrap rounded-full bg-ink/85 px-3.5 py-1 text-[11px] font-medium text-white shadow-lg backdrop-blur-sm'
+                : 'sr-only'
+            }
+          >
+            {feedDelayed ? 'Price feed delayed — showing last known' : ''}
+          </div>
+        </div>
         <div className="absolute right-4 top-4 z-30">
           <IndicatorsToggle />
         </div>
       </div>
 
+      {/* Screen-reader announcements: round results + balance errors only. */}
+      <div aria-live="polite" className="sr-only">
+        {srMessage}
+      </div>
+
       {/* Trade sidebar */}
-      <aside className="w-full shrink-0 overflow-y-auto border-t border-line bg-gradient-to-b from-white to-surface/60 lg:w-[380px] lg:border-l lg:border-t-0">
+      <aside
+        className="w-full shrink-0 overflow-y-auto border-t border-line bg-gradient-to-b from-white to-surface/60 lg:w-[380px] lg:border-l lg:border-t-0"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
         <div className="flex flex-col gap-7 p-6">
+          {/* Result moment: the round that just closed, with its settlement
+              breakdown one keystroke (Enter/Space) away. */}
+          {resultProof && (
+            <SettlementProof
+              bet={resultProof}
+              wallet={address}
+              variant="bar"
+              label={lastSettledBet?.target?.label ?? 'Last round settled'}
+            />
+          )}
+
           {sessionBets.length > 0 && (
             <div className="grid grid-cols-3 gap-2 rounded-3xl bg-ink/[0.03] px-4 py-3 text-center">
               <div>
@@ -490,6 +624,30 @@ export const GameBoard: React.FC = () => {
           </div>
 
           <MiniHistory />
+
+          {/* Resolved-bet list: open the proof for any round in this session.
+              The chip itself prints the resolve clock, so no formatting here. */}
+          {listProofs.length > 0 && (
+            <div data-testid="settlement-proof-list">
+              <Label>Settlement proofs</Label>
+              <ul className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                {listProofs.map((proofBet) => (
+                  <li key={proofBet.betId}>
+                    <SettlementProof
+                      bet={proofBet}
+                      wallet={address}
+                      variant="chip"
+                      label={proofBet.direction ?? 'Round'}
+                    />
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-faint">
+                Proof reads your own rounds only: the server returns a row solely when the bet id and your connected
+                wallet match.
+              </p>
+            </div>
+          )}
 
           <a
             href={explorerAddressUrl(getArcConfig().treasuryAddress)}

@@ -1,17 +1,44 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button, Segmented } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount } from 'wagmi';
+import { useWallets, type ConnectedWallet } from '@privy-io/react-auth';
+import { usePrivyEnabled } from '@/lib/wallet/privy-enabled';
+import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 import { ARC_ASSETS, type ArcAsset } from '@/lib/arc/config';
+import { calculateFeeAmount, getFeePercentLabel } from '@/lib/fees/platformFee';
+
+/**
+ * Server-side facts of the queued withdrawal, returned by POST
+ * /api/balance/withdraw. The receipt may show these; anything the client
+ * guessed itself is a preview, not a record.
+ */
+export interface WithdrawRequestDetails {
+  /** Ledger status of the request; anything other than paid/completed means the money has not moved. */
+  status?: string;
+  feeAmount?: number;
+  netAmount?: number;
+  requestedAt?: string;
+  /** True when this POST replayed a request the signature had already created. */
+  duplicate?: boolean;
+  /** Raw server response extras the caller may need for messaging. */
+  frequencyReview?: boolean;
+  requestId?: number;
+}
 
 interface WithdrawModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess?: (amount: number, txHash: string) => void;
+  onSuccess?: (
+    amount: number,
+    txHash: string,
+    requestId?: number,
+    details?: WithdrawRequestDetails
+  ) => void;
   onError?: (error: string) => void;
 }
 
@@ -21,16 +48,32 @@ interface WithdrawModalProps {
  * Moves credits out of the house balance and back to the player's wallet on
  * Arc. The withdrawal is authorised by a signed message so the backend
  * can prove the request came from the wallet that owns the balance.
+ *
+ * Privy embedded wallets have no wagmi connector, so the signing falls back
+ * to Privy's own wallet API. The Privy hooks must only run when a Privy app
+ * id is configured (see providers.tsx), hence the wrapper split below.
  */
-export const WithdrawModal: React.FC<WithdrawModalProps> = ({
-  isOpen,
-  onClose,
-  onSuccess,
-  onError,
-}) => {
+export const WithdrawModal: React.FC<WithdrawModalProps> = (props) => {
+  const privyEnabled = usePrivyEnabled();
+  if (!privyEnabled) {
+    return <WithdrawModalInner {...props} privyWallets={[]} />;
+  }
+  return <WithdrawModalWithPrivy {...props} />;
+};
+
+function WithdrawModalWithPrivy(props: WithdrawModalProps) {
+  const { wallets } = useWallets();
+  return <WithdrawModalInner {...props} privyWallets={wallets} />;
+}
+
+const WithdrawModalInner: React.FC<
+  WithdrawModalProps & { privyWallets: ConnectedWallet[] }
+> = ({ isOpen, onClose, onSuccess, onError, privyWallets }) => {
   const [amount, setAmount] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Click can land twice in one paint; a second signed intent is a second queue entry. */
+  const inFlight = useRef(false);
 
   const address = useStore(state => state.address);
   const withdrawFunds = useStore(state => state.withdrawFunds);
@@ -46,8 +89,8 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
 
   const asset: ArcAsset = 'USDC';
 
-  const feePercent = userTier === 'vip' ? 0.08 : userTier === 'standard' ? 0.09 : 0.1;
-  const feeLabel = `${Math.round(feePercent * 100)}%`;
+  // Same helper the server uses, so the preview cannot drift from what is charged.
+  const feeLabel = getFeePercentLabel(userTier);
 
   const validateAmount = (value: string): string | null => {
     if (!value.trim()) return 'Enter an amount';
@@ -103,10 +146,29 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
       return signer.signMessage(message);
     }
 
-    throw new Error('Unable to sign the withdrawal authorization with this wallet');
+    // Privy embedded wallets (the default onboarding path) are not wagmi
+    // connectors, so walletClient and connector are both empty above. Sign
+    // through the embedded wallet itself, matching the address the store
+    // holds so the backend signature check passes.
+    const privyWallet =
+      privyWallets.find(
+        (w) =>
+          w.type === 'ethereum' &&
+          w.address?.toLowerCase() === address?.toLowerCase()
+      ) ??
+      privyWallets.find((w) => w.type === 'ethereum');
+
+    if (privyWallet?.sign) {
+      return privyWallet.sign(message);
+    }
+
+    throw new Error(
+      'Unable to sign the withdrawal authorization. Connect a wallet (MetaMask/WalletConnect) or log in with Privy and try again.'
+    );
   };
 
   const handleWithdraw = async () => {
+    if (inFlight.current) return;
     const validationError = validateAmount(amount);
     if (validationError) {
       setError(validationError);
@@ -118,12 +180,17 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
       return;
     }
 
+    inFlight.current = true;
     try {
       setIsLoading(true);
       setError(null);
 
       const withdrawAmount = parseFloat(amount);
       toast.info('Processing withdrawal...');
+
+      // The balance routes are gated by the HttpOnly session cookie; mint it
+      // before signing so a missing cookie cannot strand a fresh signature.
+      await ensureBalanceSession();
 
       const signedAt = Date.now();
       const signature = await signAuthorization(withdrawAmount, signedAt);
@@ -132,23 +199,41 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
 
       refreshWalletBalance();
 
+      const details = (result ?? {}) as WithdrawRequestDetails & { txHash?: string };
+      const status = typeof details.status === 'string' ? details.status : undefined;
       const txHash =
-        result && (result as any).txHash ? String((result as any).txHash) : 'PENDING';
-      const status = result && (result as any).status;
-      const frequencyReview = result && (result as any).frequencyReview;
+        details.txHash && /^0x[0-9a-fA-F]{64}$/.test(String(details.txHash))
+          ? String(details.txHash)
+          : 'PENDING';
+      const frequencyReview = details.frequencyReview;
+      // withdrawal_requests.id from the API — used to deep-link the receipt
+      // into the status timeline at /withdrawals?request=<id>.
+      const rawRequestId = details.requestId;
+      const requestId =
+        typeof rawRequestId === 'number' && Number.isFinite(rawRequestId) ? rawRequestId : undefined;
 
-      if (status === 'pending') {
+      // Only the ledger declaring the payout done lets us claim the money moved.
+      // Anything else — pending, a status this build does not know, a legacy
+      // response without one — is a queued request, never a completed withdrawal.
+      const paid = status === 'paid' || status === 'completed' || status === 'accepted_paid';
+      if (paid) {
         toast.success(
-          frequencyReview
-            ? 'Your withdrawal request has been submitted for manual review due to high withdrawal frequency. An admin will process it shortly.'
-            : 'Withdrawal request submitted. Awaiting manual approval.'
+          `Withdrawal of ${withdrawAmount.toFixed(4)} ${asset} paid out on Arc. Balance updated.`
         );
       } else {
         toast.success(
-          `Successfully withdrew ${withdrawAmount.toFixed(4)} ${asset}! Balance updated.`
+          frequencyReview
+            ? 'Your withdrawal request has been submitted for manual review due to high withdrawal frequency. An admin will process it shortly.'
+            : 'Withdrawal request submitted. Awaiting manual approval. Track it under Withdrawals.'
         );
       }
-      onSuccess?.(withdrawAmount, txHash);
+      onSuccess?.(withdrawAmount, paid ? txHash : 'PENDING', requestId, {
+        status,
+        feeAmount: typeof details.feeAmount === 'number' ? details.feeAmount : undefined,
+        netAmount: typeof details.netAmount === 'number' ? details.netAmount : undefined,
+        requestedAt: typeof details.requestedAt === 'string' ? details.requestedAt : undefined,
+        duplicate: details.duplicate === true,
+      });
       setAmount('');
       onClose();
     } catch (err: any) {
@@ -159,11 +244,13 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
       onError?.(errorMessage);
     } finally {
       setIsLoading(false);
+      inFlight.current = false;
     }
   };
 
   const parsedAmount = parseFloat(amount);
   const hasAmount = Number.isFinite(parsedAmount) && parsedAmount > 0;
+  const netPreview = hasAmount ? parsedAmount - calculateFeeAmount(parsedAmount, userTier) : 0;
 
   return (
     <Modal
@@ -226,7 +313,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
         <div className="flex justify-between">
           <dt className="text-subtle">You receive</dt>
           <dd className="font-semibold">
-            {hasAmount && !error ? (parsedAmount * (1 - feePercent)).toFixed(4) : '0.0000'} {asset}
+            {hasAmount && !error ? netPreview.toFixed(4) : '0.0000'} {asset}
           </dd>
         </div>
       </dl>

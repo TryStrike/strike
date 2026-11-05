@@ -11,6 +11,7 @@ import { TargetCell, PricePoint } from "@/types/game";
 import { AssetType } from "@/lib/utils/priceFeed";
 import { playWinSound, playLoseSound } from "@/lib/utils/sounds";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
+import { useToastStore } from "@/lib/hooks/useToast";
 
 // Game Modes
 export type GameMode = 'binomo' | 'box' | 'draw';
@@ -26,6 +27,9 @@ export interface ActiveBet {
   timestamp: number;
   status: 'active' | 'settled';
   network?: string; // Track which network (currency) this bet uses
+  /** Account type (demo/real) frozen at placement time — settlement must use
+   *  this, never the live store value, in case the user toggles mid-round. */
+  accountType?: 'real' | 'demo';
   /** Wallet address captured at placement time — used for settlement even if
    *  the user disconnects their wallet before the round resolves. */
   userAddress?: string;
@@ -47,6 +51,9 @@ export interface GameState {
   selectedAsset: AssetType;
   currentPrice: number;
   priceHistory: PricePoint[];
+  /** Wall-clock of the last FRESH (non-stale) feed tick. UI shows a
+   *  "price feed delayed" notice when Date.now() - lastTickAt exceeds a threshold. */
+  lastTickAt: number;
   assetPrices: Record<string, number>; // Global price tracking
   assetHistories: Record<string, PricePoint[]>; // History for each asset
   rawAssetPrices: Record<string, number>; // Store original prices for delta amplification
@@ -61,6 +68,10 @@ export interface GameState {
     asset: AssetType; // Track which asset this result belongs to
     cellId?: string; // For box mode visual feedback
     currency?: string; // The currency usage (e.g. USDC)
+    /** Server bet id of the settled round. Lets the UI offer the settlement
+     *  proof (GET /api/bets/<id>) even when no history row matches. Absent on
+     *  results produced before this field existed. */
+    betId?: string;
   } | null;
   error: string | null;
   timeframeSeconds: number;
@@ -106,6 +117,22 @@ export interface GameState {
 // Maximum price history points (reduced for performance)
 const MAX_PRICE_HISTORY = 200;
 
+/**
+ * Settlement source of truth: the last history point whose timestamp is at or
+ * before the bet's endTime. Falls back to `fallback` only if the history has
+ * no usable point (should not happen — placement requires history).
+ */
+const priceAtOrBefore = (
+  history: PricePoint[],
+  endTime: number,
+  fallback: number
+): number => {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].timestamp <= endTime) return history[i].price;
+  }
+  return fallback;
+};
+
 
 // Default target cells configuration
 const DEFAULT_TARGET_CELLS: TargetCell[] = [
@@ -119,15 +146,96 @@ const DEFAULT_TARGET_CELLS: TargetCell[] = [
   { id: '8', label: '-$20 in 30s', multiplier: 3.0, priceChange: -20, direction: 'DOWN' },
 ];
 
+/** Grace after the round end before the wall-clock watchdog settles a round,
+ *  so the normal tick path (which settles on the arriving tick) stays the
+ *  primary path and the watchdog is only the fallback for a stalled feed. */
+const ROUND_CLOCK_GRACE_MS = 400;
+/** If no usable price exists yet when the watchdog fires (feed stalled
+ *  exactly across the round end), retry at 1s intervals for this many tries
+ *  before deferring to the next incoming tick. Never invents a price. */
+const ROUND_CLOCK_MAX_REARMS = 60;
+
 /**
  * Create game slice for Zustand store
  * Handles betting, round management, and price updates
  */
-export const createGameSlice: StateCreator<any> = (set, get) => ({
+export const createGameSlice: StateCreator<any> = (set, get) => {
+  // ── Round clock watchdog ───────────────────────────────────────────────────
+  // Rounds must settle from their deterministic endTime even when the price
+  // feed stalls or the tab is throttled. Timers fire LATE under throttling,
+  // never early: settleByWallClock re-checks Date.now() >= endTime and applies
+  // the exact tick rule (priceAtOrBefore) the tick path uses.
+  const roundTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const clearRoundTimer = (betId: string) => {
+    const t = roundTimers.get(betId);
+    if (t) {
+      clearTimeout(t);
+      roundTimers.delete(betId);
+    }
+  };
+
+  const settleByWallClock = (betId: string, rearmsLeft = ROUND_CLOCK_MAX_REARMS) => {
+    roundTimers.delete(betId);
+    const state = get();
+    const bet: ActiveBet | undefined = state.activeBets.find((b: ActiveBet) => b.id === betId);
+    // The tick path already settled it (or the user cleared it): terminal.
+    if (!bet || bet.status !== 'active' || !bet.endTime) return;
+    // Never settle before the deterministic round end.
+    if (Date.now() < bet.endTime) return;
+    // Snapshot the narrowed end: the closure below would otherwise widen it
+    // back to `number | undefined`.
+    const endTime = bet.endTime;
+
+    const key = (bet.asset || 'BNB') as string;
+    const history: PricePoint[] = state.assetHistories?.[key] || [];
+    const knownPrice = state.assetPrices?.[key];
+    const usable =
+      history.some((p) => p.timestamp <= endTime) ||
+      (typeof knownPrice === 'number' && knownPrice > 0);
+    if (!usable) {
+      // No price the engine could legitimately settle against yet — retry,
+      // then defer to the next real tick (updateAllPrices settles on arrival).
+      if (rearmsLeft > 0) {
+        roundTimers.set(betId, setTimeout(() => settleByWallClock(betId, rearmsLeft - 1), 1000));
+      }
+      return;
+    }
+
+    const settledPrice = priceAtOrBefore(history, endTime, knownPrice ?? 0);
+    if (settledPrice <= 0) return;
+
+    if (bet.mode === 'binomo' && bet.strikePrice !== undefined) {
+      if (settledPrice === bet.strikePrice) {
+        // Tie: Draw — stake refunded, mirrors the tick path exactly.
+        get().resolveBet(bet.id, true, bet.amount);
+      } else {
+        const won = bet.direction === 'UP' ? settledPrice > bet.strikePrice : settledPrice < bet.strikePrice;
+        get().resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
+      }
+    } else if (
+      (bet.mode === 'box' || bet.mode === 'draw') &&
+      bet.priceTop !== undefined &&
+      bet.priceBottom !== undefined
+    ) {
+      const won = settledPrice <= bet.priceTop && settledPrice >= bet.priceBottom;
+      get().resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
+    }
+  };
+
+  const armRoundClock = (bet: ActiveBet) => {
+    if (!Number.isFinite(bet.endTime)) return;
+    clearRoundTimer(bet.id);
+    const delay = Math.max(0, (bet.endTime as number) - Date.now()) + ROUND_CLOCK_GRACE_MS;
+    roundTimers.set(bet.id, setTimeout(() => settleByWallClock(bet.id), delay));
+  };
+
+  return {
   // Initial state
   gameMode: 'binomo', // Default to classic mode
   selectedAsset: 'BNB',
   currentPrice: 0,
+  lastTickAt: 0,
   priceHistory: [],
   assetPrices: {},
   assetHistories: {},
@@ -270,13 +378,25 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
     cellId?: string,
     metadata?: { priceTop?: number; priceBottom?: number; startTime?: number; endTime?: number }
   ) => {
-    const { targetCells, currentPrice, addActiveBet, gameMode, timeframeSeconds, selectedAsset } = get();
+    // Synchronous re-entry guard BEFORE any await: blocks double-fire from
+    // rapid clicks / keyboard auto-repeat while a placement request is in flight.
+    if (get().isPlacingBet) return;
+
+    set({ isPlacingBet: true, error: null });
+
+    const { targetCells, currentPrice, addActiveBet, gameMode, timeframeSeconds, selectedAsset, assetHistories } = get();
 
     try {
       // Parse amount for validation
-      const betAmount = parseFloat(amount);
-      if (isNaN(betAmount) || betAmount <= 0) {
+      const betAmount = Number(amount);
+      if (!Number.isFinite(betAmount) || betAmount <= 0) {
         throw new Error("Invalid bet amount");
+      }
+
+      // Refuse to open a round when the feed isn't live: a strike of 0 (or a
+      // missing history) would make every UP bet a guaranteed win.
+      if (currentPrice <= 0 || !assetHistories?.[selectedAsset]?.length) {
+        throw new Error("Price feed is not ready yet — try again in a moment");
       }
 
 
@@ -311,6 +431,16 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
         multiplier = target.multiplier;
       }
 
+      // Freeze the round clock and account type at CLICK time — not after the
+      // fetch resolves — so strike/endTime honestly reflect when the bet began.
+      const clickTime = Date.now();
+      const betEndTime =
+        gameMode === 'binomo'
+          ? clickTime + durationSeconds * 1000
+          : metadata?.endTime ?? clickTime + durationSeconds * 1000;
+      // One id per bet intent; the server dedupes retried POSTs with it.
+      const betRequestId = crypto.randomUUID();
+
       // DEMO MODE: Skip API call for demo mode
       const { accountType, demoBalance, updateBalance: storeUpdateBalance } = get();
       const isDemoMode = accountType === 'demo';
@@ -319,8 +449,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
         if (demoBalance < betAmount) {
           throw new Error("Insufficient demo balance");
         }
-
-        set({ isPlacingBet: true, error: null });
 
         // Simulate bet placement without API
         const fakeBetId = `demo-${Date.now()}`;
@@ -338,13 +466,14 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
           amount: betAmount,
           multiplier: multiplier,
           direction: direction,
-          timestamp: Date.now(),
+          timestamp: clickTime,
           status: 'active',
           network: currency,
+          accountType, // Frozen at placement — settlement uses this, not the live store value
           userAddress,
           ...(gameMode === 'binomo' ? {
             strikePrice: currentPrice,
-            endTime: Date.now() + (durationSeconds * 1000)
+            endTime: betEndTime
           } : {
             cellId: cellId || targetId,
             priceTop: metadata?.priceTop,
@@ -370,8 +499,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
         };
       }
 
-      set({ isPlacingBet: true, error: null });
-
       const selectedCurrency = (get() as any).selectedCurrency;
       const currency = resolveHouseLedgerCurrency({
         selectedCurrency,
@@ -387,8 +514,17 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
           userAddress: userAddress,
           betAmount,
           currency: currency,
-          roundId: Date.now(),
+          roundId: clickTime,
           targetPrice: currentPrice,
+          // Checked against the server's feed; the frozen strike comes back below.
+          strikePrice: currentPrice,
+          mode: gameMode,
+          // Classic rounds run from the server's clock, so it ignores this there.
+          endTime: betEndTime,
+          priceTop: metadata?.priceTop,
+          priceBottom: metadata?.priceBottom,
+          // Client-generated idempotency key for this bet intent.
+          betRequestId,
           isOver: direction === 'UP',
           multiplier: multiplier,
           asset: selectedAsset,
@@ -409,9 +545,17 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
       const data = await response.json();
 
       if (data.duplicate) {
-        await (get() as any).fetchBalance?.(userAddress);
-        set({ isPlacingBet: false, error: null });
-        throw new Error(data.message || 'Bet already processed');
+        // The server saw this betRequestId before. When the first attempt got
+        // far enough to commit, the route REPLAYS the original bet id +
+        // settlement token with a 200: the stake was deducted exactly once, so
+        // the only terminal-correct client move is to adopt that round (it can
+        // still be won back). A duplicate without an adoptable response stays
+        // an error — the board must never show a round the server did not mint.
+        if (data.betId == null || data.settlementToken == null) {
+          await (get() as any).fetchBalance?.(userAddress);
+          set({ isPlacingBet: false, error: null });
+          throw new Error(data.message || 'Bet already processed');
+        }
       }
 
       if (data.betId == null || data.settlementToken == null) {
@@ -421,7 +565,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
       }
 
       const remRaw = data.remainingBalance;
-      const rem = typeof remRaw === 'number' ? remRaw : Number(remRaw);
+      // Number(null) is 0 — a missing field must never zero out the balance.
+      const rem = remRaw === null || remRaw === undefined ? NaN : Number(remRaw);
       if (Number.isFinite(rem)) {
         (get() as any).setBalance?.(rem);
       }
@@ -432,22 +577,23 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
         mode: gameMode,
         asset: selectedAsset, // Set current asset
         amount: betAmount,
-        multiplier: multiplier,
+        multiplier: data.multiplier ?? multiplier,
         direction: direction,
-        timestamp: Date.now(),
+        timestamp: clickTime,
         status: 'active',
         network: currency, // Save the currency identifier used (e.g. XLM, NEAR, PC)
+        accountType, // Frozen at placement — settlement uses this, not the live store value
         userAddress: userAddress, // Capture address at placement time for settlement
         settlementToken: data.settlementToken,
         ...(gameMode === 'binomo' ? {
-          strikePrice: currentPrice,
-          endTime: Date.now() + (durationSeconds * 1000)
+          strikePrice: data.strikePrice ?? currentPrice,
+          endTime: data.endTime ?? betEndTime
         } : {
           cellId: cellId || targetId,
           priceTop: metadata?.priceTop,
           priceBottom: metadata?.priceBottom,
           startTime: metadata?.startTime,
-          endTime: metadata?.endTime
+          endTime: data.endTime ?? metadata?.endTime
         })
       };
 
@@ -477,6 +623,35 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
   },
 
   /**
+   * Seed a single price point for an asset (used at app boot before the live
+   * feed starts, so the chart has at least a starting price and one point).
+   */
+  updatePrice: (price: number, asset?: AssetType) => {
+    if (!Number.isFinite(price) || price <= 0) return;
+    const { selectedAsset, assetPrices, assetHistories, rawAssetPrices } = get();
+    const key = asset ?? selectedAsset;
+    const now = Date.now();
+
+    const history = [...(assetHistories[key] || [])];
+    history.push({ timestamp: now, price });
+
+    const update: Partial<GameState> = {
+      assetPrices: { ...assetPrices, [key]: price },
+      assetHistories: { ...assetHistories, [key]: history.slice(-MAX_PRICE_HISTORY) },
+      // Treat the seed as the raw baseline so the live feed applies deltas from here.
+      rawAssetPrices: { ...rawAssetPrices, [key]: price },
+      lastTickAt: now,
+    };
+
+    if (key === selectedAsset) {
+      update.currentPrice = price;
+      update.priceHistory = update.assetHistories![key];
+    }
+
+    set(update as GameState);
+  },
+
+  /**
    * Update all prices at once (Atomic)
    */
   updateAllPrices: (prices: Record<string, number>) => {
@@ -494,39 +669,72 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
     let currentAssetUpdated = false;
     let nextCurrentPrice = 0;
     let nextCurrentHistory: PricePoint[] = [];
+    // True when at least one asset carried a genuinely new raw price in this
+    // snapshot. Cached-fallback (stale) ticks repeat the previous raw values,
+    // hit the `unchanged` guard below, are never appended to history, and must
+    // not refresh lastTickAt — that is what lets the UI detect a stalled feed.
+    let anyFreshTick = false;
 
     Object.entries(prices).forEach(([asset, price]) => {
       const assetKey = asset as AssetType;
-      
-      const lastRawPrice = updatedRawPrices[assetKey] || price;
-      const rawDelta = price - lastRawPrice;
-      const previousVirtualPrice = updatedAssetPrices[assetKey] || price;
-      // Keep chart/settlement on true oracle-driven prices (no synthetic amplification/jitter).
-      const finalPrice = previousVirtualPrice + rawDelta;
 
-      updatedAssetPrices[assetKey] = finalPrice;
-      updatedRawPrices[assetKey] = price;
+      const lastRawPrice = updatedRawPrices[assetKey];
+      const previousVirtualPrice = updatedAssetPrices[assetKey];
+      // Cheap no-change guard: when the feed repeats the last raw price, skip
+      // rebuilding this asset's history array entirely (was O(all assets) per tick).
+      const unchanged =
+        lastRawPrice !== undefined &&
+        previousVirtualPrice !== undefined &&
+        price === lastRawPrice;
 
-      const history = [...(updatedAssetHistories[assetKey] || [])];
-      history.push({ timestamp: now, price: finalPrice });
-      updatedAssetHistories[assetKey] = history.slice(-MAX_PRICE_HISTORY);
+      let finalPrice: number;
+
+      if (unchanged) {
+        finalPrice = previousVirtualPrice as number;
+      } else {
+        const rawDelta = price - (lastRawPrice ?? price);
+        // Keep chart/settlement on true oracle-driven prices (no synthetic amplification/jitter).
+        finalPrice = (previousVirtualPrice ?? price) + rawDelta;
+
+        updatedAssetPrices[assetKey] = finalPrice;
+        updatedRawPrices[assetKey] = price;
+        anyFreshTick = true;
+
+        const history = [...(updatedAssetHistories[assetKey] || [])];
+        history.push({ timestamp: now, price: finalPrice });
+        updatedAssetHistories[assetKey] = history.slice(-MAX_PRICE_HISTORY);
+      }
 
       if (assetKey === selectedAsset) {
         currentAssetUpdated = true;
         nextCurrentPrice = finalPrice;
-        nextCurrentHistory = updatedAssetHistories[assetKey];
+        nextCurrentHistory = updatedAssetHistories[assetKey] || [];
       }
 
-      // RESOLUTION LOGIC: Check bets for this asset
+      // RESOLUTION LOGIC: Check bets for this asset.
+      // Settlement source of truth is the last history point at/ before the
+      // bet's endTime — not whatever price happens to arrive after it.
       if (activeBets && activeBets.length > 0) {
+        const settleHistory = updatedAssetHistories[assetKey] || [];
         activeBets.forEach((bet: ActiveBet) => {
           if ((bet.asset || 'BNB') !== assetKey || bet.status !== 'active') return;
 
           if (bet.mode === 'binomo' && bet.endTime && bet.strikePrice !== undefined && now >= bet.endTime) {
-            const won = bet.direction === 'UP' ? finalPrice > bet.strikePrice : finalPrice < bet.strikePrice;
-            resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
-          } else if (bet.mode === 'box' && bet.endTime && bet.priceTop !== undefined && bet.priceBottom !== undefined && now >= bet.endTime) {
-            const won = finalPrice <= bet.priceTop && finalPrice >= bet.priceBottom;
+            const settledPrice = priceAtOrBefore(settleHistory, bet.endTime, finalPrice);
+            if (settledPrice === bet.strikePrice) {
+              // Tie: resolve as Draw — stake refunded, no win, no loss.
+              resolveBet(bet.id, true, bet.amount);
+            } else {
+              const won = bet.direction === 'UP' ? settledPrice > bet.strikePrice : settledPrice < bet.strikePrice;
+              resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
+            }
+          } else if ((bet.mode === 'box' || bet.mode === 'draw') && bet.endTime && bet.priceTop !== undefined && bet.priceBottom !== undefined && now >= bet.endTime) {
+            // Draw mode is included here on purpose: the chart resolves draw
+            // boxes only while the user is IN draw mode, so a round placed in
+            // draw and left behind by a mode switch would otherwise never
+            // settle. This path runs off the store, not the UI.
+            const settledPrice = priceAtOrBefore(settleHistory, bet.endTime, finalPrice);
+            const won = settledPrice <= bet.priceTop && settledPrice >= bet.priceBottom;
             resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
           }
         });
@@ -546,6 +754,9 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
       updateObj.priceHistory = nextCurrentHistory;
     }
 
+    // Only a fresh (non-stale) snapshot refreshes the feed heartbeat clock.
+    if (anyFreshTick) updateObj.lastTickAt = now;
+
     set(updateObj);
   },
 
@@ -557,19 +768,31 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
   addActiveBet: (bet: ActiveBet) => {
     const { activeBets } = get();
     set({ activeBets: [...activeBets, bet] });
+    // Deterministic round clock: guarantee the round settles at endTime even
+    // if no further feed tick arrives (stalled feed / throttled tab).
+    armRoundClock(bet);
   },
 
   /**
-   * Resolve a bet (win or lose) and update house balance
+   * End a round on screen. For a real bet `won` and `payout` are only the
+   * optimistic display: the server decides, and `reconcileRound` replaces them
+   * with its answer. Demo bets have no server, so these are their result.
    * @param betId - The bet ID to resolve
-   * @param won - Whether the bet was won
-   * @param payout - The payout amount if won
+   * @param won - Whether the bet looks won
+   * @param payout - The payout it looks like it earned
    */
   resolveBet: (betId: string, won: boolean, payout: number) => {
-    const { activeBets, currentPrice, address, network, accountType, updateBalance, fetchBalance } = get();
+    const { activeBets, currentPrice, address, network, accountType, fetchBalance } = get();
     const resolvedBet = activeBets.find((b: ActiveBet) => b.id === betId);
 
+    // Cancel the wall-clock watchdog first: whichever path (tick or clock)
+    // resolves the round wins once, the other becomes a no-op.
+    clearRoundTimer(betId);
+
     if (resolvedBet) {
+      // Use the account type frozen at placement; never the live store value
+      // (the user may have toggled demo/real mid-round).
+      const betAccountType = resolvedBet.accountType ?? accountType;
       const now = Date.now();
 
       // Play sound effects
@@ -588,7 +811,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
           timestamp: now,
           asset: resolvedBet.asset,
           cellId: resolvedBet.cellId,
-          currency: resolvedBet.network || network || 'USDC'
+          currency: resolvedBet.network || network || 'USDC',
+          betId: resolvedBet.id
         }
       });
 
@@ -597,31 +821,16 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
       const settlementAddress = resolvedBet.userAddress || address;
       const settlementCurrency = resolvedBet.network || network || 'USDC';
 
-      // Handle Balance Update
-      if (won) {
-        if (accountType === 'real' && settlementAddress) {
-          fetch('/api/balance/win', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userAddress: settlementAddress,
-              winAmount: payout,
-              currency: settlementCurrency,
-              betId: resolvedBet.id,
-              settlementToken: resolvedBet.settlementToken,
-            })
-          }).then(() => {
-            if (fetchBalance && settlementAddress) fetchBalance(settlementAddress);
-          }).catch(console.error);
-        } else if (accountType === 'demo') {
-          updateBalance(payout, 'add');
-        }
+      // ── Handle Balance Update ──────────────────────────────────────────────
+      if (won && betAccountType === 'demo') {
+        // Credit the frozen demo account directly (updateBalance branches on
+        // the live accountType, which may have been toggled mid-round).
+        set((state: any) => ({ demoBalance: state.demoBalance + payout }));
       }
 
       // Also add to persistent local history store
       const anyGet = get() as any;
-      if (anyGet.addBet) {
-        anyGet.addBet({
+      const historyRecord = {
           id: resolvedBet.id,
           timestamp: now,
           amount: resolvedBet.amount.toString(),
@@ -630,6 +839,12 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
           startPrice: resolvedBet.strikePrice || 0,
           endPrice: currentPrice,
           actualChange: currentPrice - (resolvedBet.strikePrice || 0),
+          // Extra session-only fields the settlement proof reads (the server
+          // row is the durable copy; this call goes through an untyped handle
+          // into the history slice, so the additions are safe at runtime):
+          asset: resolvedBet.asset,
+          endTime: resolvedBet.endTime ?? null,
+          strikePrice: resolvedBet.strikePrice ?? null,
           target: {
             id:
               resolvedBet.mode === 'binomo'
@@ -647,33 +862,70 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
             priceChange: 0,
             direction: resolvedBet.direction
           }
-        });
+      };
+      anyGet.addBet?.(historyRecord);
+
+      // ── Ask the server what happened ───────────────────────────────────────
+      // It settles every round itself, so this only fetches the answer: a failure
+      // here costs the display, never the money. It answers 409 round_open until
+      // its own clock reaches the end, and a local clock can be ahead of that.
+      const reconcileRound = async () => {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          try {
+            const res = await fetch('/api/balance/win', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                userAddress: settlementAddress,
+                winAmount: payout,
+                currency: settlementCurrency,
+                betId: resolvedBet.id,
+                settlementToken: resolvedBet.settlementToken,
+              }),
+            });
+            if (res.ok) return await res.json();
+          } catch {
+            /* network failure: same retry */
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        return null;
+      };
+
+      if (betAccountType === 'real' && settlementAddress) {
+        void (async () => {
+          const result = await reconcileRound();
+          if (fetchBalance) fetchBalance(settlementAddress);
+          if (!result) {
+            console.error('No server result yet for bet', resolvedBet.id);
+            if (won) {
+              useToastStore.getState().addToast(
+                'Your result is taking longer than usual. Your balance will update once this round settles.',
+                'error'
+              );
+            }
+            return;
+          }
+          const serverPayout = Number(result.payout) || 0;
+          const serverWon = result.won === true;
+          const shown = get().lastResult;
+          if (shown?.betId === resolvedBet.id) {
+            set({ lastResult: { ...shown, won: serverWon, payout: serverPayout } });
+          }
+          anyGet.addBet?.({
+            ...historyRecord,
+            won: serverWon,
+            payout: serverPayout.toString(),
+            endPrice: result.endPrice ?? historyRecord.endPrice,
+          });
+        })();
       }
 
       // ── Save to Supabase bet_history ──────────────────────────────────────
-      // Real mode: persist all non-demo ids. Demo mode: persist demo-* ids only (admin splits real vs demo).
+      // Demo bets only: a real bet's row is written by the server when it settles.
       const isDemoBet = String(resolvedBet.id).toLowerCase().startsWith('demo-');
       if (settlementAddress) {
-        if (accountType === 'real' && !isDemoBet) {
-          fetch('/api/bets/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              id: resolvedBet.id,
-              walletAddress: settlementAddress,
-              asset: resolvedBet.asset || 'BNB',
-              direction: resolvedBet.direction,
-              amount: resolvedBet.amount,
-              multiplier: resolvedBet.multiplier,
-              strikePrice: resolvedBet.strikePrice || 0,
-              endPrice: currentPrice,
-              payout: payout,
-              won: won,
-              mode: resolvedBet.mode,
-              network: settlementCurrency,
-            }),
-          }).catch(err => console.error('Failed to save bet to Supabase:', err));
-        } else if (accountType === 'demo' && isDemoBet) {
+        if (betAccountType === 'demo' && isDemoBet) {
           fetch('/api/bets/save', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -749,7 +1001,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => ({
   startGlobalPriceFeed: (updateAllPrices: (prices: Record<string, number>) => void) => {
     return startGlobalPriceFeed(updateAllPrices);
   }
-});
+  };
+};
 
 
 

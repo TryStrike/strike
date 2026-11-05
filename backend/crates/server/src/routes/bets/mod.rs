@@ -50,13 +50,19 @@ pub(crate) struct Binds {
 
 impl Binds {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Adds `value` under the catalog type `ty`, returning `CAST($n AS ty)`.
     pub fn push(&mut self, ty: String, value: Value) -> String {
         self.entries.push((ty, value));
-        format!("CAST(${} AS {})", self.entries.len(), self.entries.last().unwrap().0)
+        format!(
+            "CAST(${} AS {})",
+            self.entries.len(),
+            self.entries.last().unwrap().0
+        )
     }
 
     /// A hard-coded primitive type bind (paging offsets, booleans): the type
@@ -78,11 +84,14 @@ impl Binds {
     /// Bind refs restricted to the first `n` entries, for a statement that
     /// shares the prefix of the parameter list (count vs. rows query).
     pub fn refs_upto(&self, n: usize) -> Vec<(&str, &Value)> {
-        self.entries[..n].iter().map(|(t, v)| (t.as_str(), v)).collect()
+        self.entries[..n]
+            .iter()
+            .map(|(t, v)| (t.as_str(), v))
+            .collect()
     }
 }
 
-/// The Postgres type of a column, read from the loaded catalog and re-validated
+/// The logical type of a column, read from the catalog and re-validated
 /// so it is safe to write inside a CAST. Never from a client.
 pub(crate) async fn column_type(table: &str, column: &str) -> ApiResult<String> {
     let schema = strike_core::schema::get().await?;
@@ -90,7 +99,9 @@ pub(crate) async fn column_type(table: &str, column: &str) -> ApiResult<String> 
         .column_type(table, column)
         .ok_or_else(|| ApiError::internal(format!("unknown column {table}.{column}")))?;
     if !is_safe_type_expression(ty) {
-        return Err(ApiError::internal(format!("Unusable type for {table}.{column}")));
+        return Err(ApiError::internal(format!(
+            "Unusable type for {table}.{column}"
+        )));
     }
     Ok(ty.to_string())
 }

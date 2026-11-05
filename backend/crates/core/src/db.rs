@@ -1,152 +1,624 @@
-//! Postgres transport: one pooled sqlx connection set replaces the
-//! `node-postgres` pool in `lib/db/server.ts`.
+//! SQLite transport.
+//!
+//! One writer thread owns the only write connection; handlers send it a closure
+//! and await the reply, so writes queue instead of failing with `SQLITE_BUSY`,
+//! and async tasks never block on disk. Because a write job is a sync closure, it
+//! cannot await anything: the type system keeps every RPC and treasury transfer
+//! outside the write lock. Reads run on a small pool of read-only connections
+//! through `spawn_blocking`.
+//!
+//! Durability: `synchronous=FULL` in WAL mode, `fullfsync=ON` where the OS has
+//! it (`SQLITE_FULLFSYNC=OFF` turns that off). A commit is fsynced before anyone
+//! it covers is answered, so a committed ledger write survives process crash, OS
+//! crash and power loss. `NORMAL` would be faster and still survive a process
+//! crash, but a power cut could lose the last commits, and a lost debit after an
+//! on-chain payout is money gone.
+//!
+//! Group commit: the writer drains whatever is queued into one `BEGIN IMMEDIATE`
+//! transaction, gives each job its own savepoint so a failure or panic undoes
+//! only that job, commits once, and only then answers every caller. The batch
+//! grows with load and needs no timer. A failed COMMIT answers everyone with an
+//! error. Jobs use `conn.savepoint()` where they need all-or-nothing: they always
+//! run inside the batch, so a job cannot open a transaction of its own.
 //!
 //! Wire-compatibility with the TS layer, which the browser still sees:
-//!   * NUMERIC  -> JSON number (house balances stay far below 2^53);
+//!   * NUMERIC  -> JSON number, see `crate::money`;
 //!   * BIGINT   -> JSON number;
-//!   * TIMESTAMP/TIMESTAMPTZ -> ISO-8601 string with millisecond precision,
-//!     the shape PostgREST served and every call site parses. TIMESTAMP is read
-//!     as UTC rather than the server's local zone, fixing the drift the old
-//!     `new Date(value)` parser had.
+//!   * TIMESTAMPTZ -> ISO-8601 string with millisecond precision;
+//!   * BOOLEAN  -> JSON boolean.
+//!
+//! Handlers keep the `CAST($n AS type)` notation: the type there and in the bind
+//! list is what this module converts by. [`sqlite_sql`] turns it into `?n`.
 
-use std::str::FromStr;
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rust_decimal::Decimal;
+use rusqlite::functions::FunctionFlags;
+use rusqlite::types::{Value as Param, ValueRef};
+use rusqlite::{config::DbConfig, params_from_iter, Connection, OpenFlags};
 use serde_json::{Map, Number, Value};
-use sqlx::postgres::{PgArguments, PgPool, PgPoolOptions};
-use sqlx::{Arguments, Column, Row};
+use tokio::sync::{mpsc, oneshot, OnceCell, Semaphore};
 
 use crate::config::config;
 use crate::error::{ApiError, ApiResult};
+use crate::money::{fixed_json, parse_decimal, to_fixed};
+use crate::rpc;
+use crate::schema::{decode_kind, numeric_scale, Decode};
 
-static POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+pub const SCHEMA_SQL: &str = include_str!("../../../../db/schema.sqlite.sql");
+/// Splits [`SCHEMA_SQL`]: what follows it runs on a brand-new database only.
+const SEED_MARKER: &str = "-- SEED";
+/// Changes after version 1, oldest first; entry `n` moves a file to `n + 2`. The
+/// baseline in [`SCHEMA_SQL`] is frozen: a new column goes here.
+const MIGRATIONS: &[&str] = &[];
+/// Where a file ends up. A file from a newer build is refused, not guessed at.
+const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 
-pub async fn pool() -> ApiResult<&'static PgPool> {
-    POOL.get_or_try_init(build_pool).await
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+const CACHE_KIB: i64 = 64 * 1024;
+const STATEMENT_CACHE: usize = 256;
+/// Queued write jobs before `send` applies backpressure to handlers.
+const WRITE_QUEUE: usize = 4096;
+/// Most jobs in one commit: keeps a batch's latency bounded under a deep queue.
+const MAX_BATCH: usize = 256;
+/// VM steps between statement-deadline checks.
+const PROGRESS_STEPS: i32 = 10_000;
+
+/// What a job left behind. `answer` gets the commit's outcome and replies to the
+/// caller, which is why it runs after the commit and not inside the job.
+struct Ran {
+    ok: bool,
+    answer: Box<dyn FnOnce(Result<(), String>) + Send>,
 }
 
-async fn build_pool() -> Result<PgPool, ApiError> {
-    let cfg = config();
-    let url = cfg
-        .database_url
-        .as_deref()
-        .ok_or_else(|| ApiError::unavailable("DATABASE_URL is not configured"))?;
-    let opts = sqlx::postgres::PgConnectOptions::from_str(url)
-        .map_err(|e| ApiError::Other(format!("invalid DATABASE_URL: {e}")))?
-        .application_name("strike-backend");
+type WriteJob = Box<dyn FnOnce(&mut Connection) -> Ran + Send>;
 
-    let pool = PgPoolOptions::new()
-        // Serverless-era default from the TS pool (PGPOOL_MAX ?? 5): Neon caps
-        // concurrent connections, so keep it small and let it queue.
-        .max_connections(cfg.pool_max)
-        .acquire_timeout(Duration::from_secs(10))
-        .idle_timeout(Duration::from_secs(10))
-        .test_before_acquire(true)
-        // Kill runaway reads so one slow query cannot pin a pooled connection,
-        // and release a connection held open by a stalled transaction.
-        // `set_config` rather than `SET`: the statement form takes a literal,
-        // so the only parameterised option is this function.
-        .after_connect(move |conn, _meta| {
-            let statement_timeout = cfg.statement_timeout_ms.to_string();
-            Box::pin(async move {
-                sqlx::query("SELECT set_config('statement_timeout', $1, false)")
-                    .bind(&statement_timeout)
-                    .execute(&mut *conn)
-                    .await?;
-                sqlx::query("SELECT set_config('idle_in_transaction_session_timeout', '10000', false)")
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect_with(opts)
-        .await
-        .map_err(|e| ApiError::Other(format!("database connection failed: {e}")))?;
-
-    Ok(pool)
+/// Commits and jobs since start; `jobs / batches` is the average batch size.
+#[derive(Default)]
+struct WriterStats {
+    batches: AtomicU64,
+    jobs: AtomicU64,
 }
 
-/// Renders a row with the same JSON shapes the TS type parsers produced.
-pub fn row_to_json(row: &sqlx::postgres::PgRow) -> Value {
-    let mut map = Map::new();
-    for (idx, column) in row.columns().iter().enumerate() {
-        let value = decode_column(row, idx, &column.type_info().to_string());
-        map.insert(column.name().to_string(), value);
+struct Reader {
+    conn: Connection,
+    /// Milliseconds on the process clock after which the running query aborts.
+    deadline_ms: Arc<AtomicI64>,
+}
+
+/// A handle to one database file: one writer thread plus a read pool.
+pub struct Db {
+    path: Arc<str>,
+    writer: mpsc::Sender<WriteJob>,
+    stats: Arc<WriterStats>,
+    readers: Arc<Mutex<Vec<Reader>>>,
+    read_permits: Arc<Semaphore>,
+    statement_timeout_ms: u64,
+}
+
+fn process_ms() -> i64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as i64
+}
+
+fn configure(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+    conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
+    // Without this a mistyped "column" silently becomes a string literal.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
+    register_like(conn)
+}
+
+fn open_writer(path: &str) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let fullfsync = if config().sqlite_fullfsync {
+        "ON"
+    } else {
+        "OFF"
+    };
+    conn.pragma_update(None, "fullfsync", fullfsync)?;
+    configure(&conn)?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+/// Brings a file to [`SCHEMA_VERSION`] using `PRAGMA user_version`, which commits
+/// with the transaction. A file at version 0 with tables predates versioning: it
+/// gets the DDL it may lack, but it has seen the seed, and running it again could
+/// undo an admin's decision.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == SCHEMA_VERSION {
+        return Ok(());
     }
-    Value::Object(map)
+    if version > SCHEMA_VERSION {
+        return Err(rusqlite::Error::UserFunctionError(
+            format!("database schema is version {version}, this build knows {SCHEMA_VERSION}")
+                .into(),
+        ));
+    }
+    let mut steps = String::new();
+    if version == 0 {
+        let tables: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table'",
+            [],
+            |r| r.get(0),
+        )?;
+        steps.push_str(if tables == 0 {
+            SCHEMA_SQL
+        } else {
+            baseline_ddl()
+        });
+    }
+    for step in &MIGRATIONS[version.max(1) as usize - 1..] {
+        steps.push_str(step);
+    }
+    conn.execute_batch(&format!(
+        "BEGIN IMMEDIATE;\n{steps}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+    ))
 }
 
-pub fn rows_to_json(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
-    rows.iter().map(row_to_json).collect()
+fn baseline_ddl() -> &'static str {
+    SCHEMA_SQL
+        .split_once(SEED_MARKER)
+        .map_or(SCHEMA_SQL, |(ddl, _)| ddl)
 }
 
-fn decode_column(row: &sqlx::postgres::PgRow, idx: usize, type_name: &str) -> Value {
-    match type_name {
-        "BOOL" => get::<bool>(row, idx).map(Value::Bool).unwrap_or(Value::Null),
-        // sqlx decodes by exact width: INT2 needs i16, INT4 needs i32, INT8
-        // needs i64. One shared i64 attempt would silently null every int4.
-        "INT2" => get::<i16>(row, idx)
-            .map(|v| Value::Number(Number::from(v as i64)))
-            .unwrap_or(Value::Null),
-        "INT4" | "OID" => get::<i32>(row, idx)
-            .map(|v| Value::Number(Number::from(v as i64)))
-            .unwrap_or(Value::Null),
-        "INT8" => get::<i64>(row, idx)
-            .map(|v| Value::Number(Number::from(v)))
-            .unwrap_or(Value::Null),
-        "FLOAT4" | "FLOAT8" => get::<f64>(row, idx)
-            .and_then(|v| Number::from_f64(v).map(Value::Number))
-            .unwrap_or(Value::Null),
-        // NUMERIC arrives as a float in the TS pool; NaN/infinite decimals have
-        // no JSON representation, so they become null rather than poisoning a
-        // whole response.
-        "NUMERIC" => row
-            .try_get::<Decimal, usize>(idx)
-            .ok()
-            .and_then(|d| d.to_string().parse::<f64>().ok())
-            .and_then(|f| if f.is_finite() { Number::from_f64(f) } else { None })
+const JOB_SAVEPOINT: &str = "group_job";
+
+/// Runs one group of jobs as one transaction, then answers them all. A job that
+/// never ran is dropped, and dropping its reply is an error for its caller.
+fn run_batch(conn: &mut Connection, jobs: Vec<WriteJob>, stats: &WriterStats) {
+    let mut ran: Vec<Ran> = Vec::with_capacity(jobs.len());
+    stats.jobs.fetch_add(jobs.len() as u64, Ordering::Relaxed);
+    let lost = |ran: &mut Vec<Ran>, why: &str| {
+        for job in ran.drain(..) {
+            (job.answer)(Err(why.to_string()));
+        }
+    };
+
+    for job in jobs {
+        if conn.is_autocommit() {
+            if let Err(err) = conn.execute_batch("BEGIN IMMEDIATE") {
+                tracing::error!("sqlite batch could not begin: {err}");
+                return;
+            }
+        }
+        if let Err(err) = conn.execute_batch(&format!("SAVEPOINT {JOB_SAVEPOINT}")) {
+            tracing::error!("sqlite savepoint failed: {err}");
+            let _ = conn.execute_batch("ROLLBACK");
+            lost(&mut ran, "sqlite batch rolled back");
+            return;
+        }
+
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| job(conn)));
+        let ok = matches!(&outcome, Ok(job) if job.ok);
+        if outcome.is_err() {
+            tracing::error!("sqlite write job panicked");
+        }
+        if let Ok(job) = outcome {
+            ran.push(job);
+        }
+
+        // SQLite rolls the whole transaction back itself on some errors (disk
+        // full, I/O), which takes every earlier job in the batch with it.
+        let kept = !conn.is_autocommit()
+            && conn
+                .execute_batch(&if ok {
+                    format!("RELEASE {JOB_SAVEPOINT}")
+                } else {
+                    format!("ROLLBACK TO {JOB_SAVEPOINT}; RELEASE {JOB_SAVEPOINT}")
+                })
+                .is_ok();
+        if !kept {
+            tracing::error!("sqlite batch lost its transaction");
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            lost(&mut ran, "sqlite batch rolled back");
+        }
+    }
+
+    if conn.is_autocommit() {
+        return;
+    }
+    stats.batches.fetch_add(1, Ordering::Relaxed);
+    if let Err(err) = conn.execute_batch("COMMIT") {
+        tracing::error!("sqlite commit failed: {err}");
+        if !conn.is_autocommit() {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        lost(&mut ran, &format!("sqlite commit failed: {err}"));
+    }
+    for job in ran {
+        (job.answer)(Ok(()));
+    }
+}
+
+fn open_reader(path: &str) -> rusqlite::Result<Reader> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    configure(&conn)?;
+    conn.pragma_update(None, "query_only", "ON")?;
+    let deadline_ms = Arc::new(AtomicI64::new(i64::MAX));
+    let watched = deadline_ms.clone();
+    conn.progress_handler(
+        PROGRESS_STEPS,
+        Some(move || process_ms() > watched.load(Ordering::Relaxed)),
+    );
+    Ok(Reader { conn, deadline_ms })
+}
+
+impl Db {
+    /// Opens or creates the file and brings its schema up to date.
+    pub fn open(
+        path: impl AsRef<Path>,
+        readers: usize,
+        statement_timeout_ms: u64,
+    ) -> ApiResult<Self> {
+        let path: Arc<str> = path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| ApiError::Other("SQLITE_PATH is not valid UTF-8".to_string()))?
+            .into();
+
+        let mut conn = open_writer(&path)?;
+        let (writer, mut jobs) = mpsc::channel::<WriteJob>(WRITE_QUEUE);
+        let stats = Arc::new(WriterStats::default());
+        let thread_stats = stats.clone();
+        std::thread::Builder::new()
+            .name("sqlite-writer".to_string())
+            .spawn(move || {
+                while let Some(first) = jobs.blocking_recv() {
+                    let mut batch = vec![first];
+                    while batch.len() < MAX_BATCH {
+                        match jobs.try_recv() {
+                            Ok(job) => batch.push(job),
+                            Err(_) => break,
+                        }
+                    }
+                    run_batch(&mut conn, batch, &thread_stats);
+                }
+            })
+            .map_err(|e| ApiError::Other(format!("cannot start sqlite writer: {e}")))?;
+
+        let readers = readers.max(1);
+        let pool = (0..readers)
+            .map(|_| open_reader(&path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            path,
+            writer,
+            stats,
+            readers: Arc::new(Mutex::new(pool)),
+            read_permits: Arc::new(Semaphore::new(readers)),
+            statement_timeout_ms,
+        })
+    }
+
+    /// `(commits, jobs)` since the process started.
+    pub fn writer_stats(&self) -> (u64, u64) {
+        (
+            self.stats.batches.load(Ordering::Relaxed),
+            self.stats.jobs.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Runs `job` on the writer thread and answers once its commit is durable.
+    /// The closure is the whole critical section. It already runs in a
+    /// transaction, and an `Err` undoes everything it wrote; to undo while still
+    /// answering `Ok`, hold a `conn.savepoint()` and drop it.
+    pub async fn write<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut Connection) -> ApiResult<T> + Send + 'static,
+    ) -> ApiResult<T> {
+        let (reply, answer) = oneshot::channel();
+        self.writer
+            .send(Box::new(move |conn| {
+                let result = job(conn);
+                Ran {
+                    ok: result.is_ok(),
+                    answer: Box::new(move |commit| {
+                        let _ = reply.send(commit.map_err(ApiError::Other).and(result));
+                    }),
+                }
+            }))
+            .await
+            .map_err(|_| ApiError::Other("sqlite writer has stopped".to_string()))?;
+        answer
+            .await
+            .map_err(|_| ApiError::Other("sqlite write was not committed".to_string()))?
+    }
+
+    /// Runs `job` on a pooled read-only connection.
+    pub async fn read<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
+    ) -> ApiResult<T> {
+        let permit = self
+            .read_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ApiError::Other("sqlite read pool closed".to_string()))?;
+        let pool = self.readers.clone();
+        let path = self.path.clone();
+        let timeout = self.statement_timeout_ms as i64;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let taken = pool.lock().map_err(|_| poisoned())?.pop();
+            // None only after a job panicked and took its connection with it.
+            let reader = match taken {
+                Some(reader) => reader,
+                None => open_reader(&path)?,
+            };
+            reader
+                .deadline_ms
+                .store(process_ms() + timeout, Ordering::Relaxed);
+            let result = job(&reader.conn);
+            pool.lock().map_err(|_| poisoned())?.push(reader);
+            result
+        })
+        .await
+        .map_err(|e| ApiError::Other(format!("sqlite read task failed: {e}")))?
+    }
+
+    /// One statement with already-converted params: SELECT goes to a reader,
+    /// anything else (INSERT ... RETURNING included) to the writer.
+    pub async fn run(&self, sql: &str, params: Vec<Param>) -> ApiResult<(Vec<Value>, u64)> {
+        let sql = sqlite_sql(sql);
+        if is_read(&sql) {
+            self.read(move |conn| run_statement(conn, &sql, params, false))
+                .await
+        } else {
+            self.write(move |conn| run_statement(conn, &sql, params, true))
+                .await
+        }
+    }
+
+    pub async fn fetch(&self, sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<Vec<Value>> {
+        let params = arguments(sql, binds)?;
+        Ok(self.run(sql, params).await?.0)
+    }
+
+    /// `callRpc()` from the TS layer: named arguments to a ledger function. Each
+    /// call is one savepoint in a write batch, see `crate::rpc`.
+    pub async fn call_rpc(&self, fn_name: &str, params: &[(&str, &Value)]) -> ApiResult<Value> {
+        if !is_identifier(fn_name) {
+            return Err(ApiError::internal(format!(
+                "Unsafe function name: {fn_name}"
+            )));
+        }
+        for (name, _) in params {
+            if !is_identifier(name) {
+                return Err(ApiError::internal(format!("Unsafe parameter name: {name}")));
+            }
+        }
+        let args = rpc::Args::new(fn_name, params)?;
+        let function = fn_name.to_string();
+        self.write(move |conn| rpc::dispatch(conn, &function, &args))
+            .await
+    }
+}
+
+fn poisoned() -> ApiError {
+    ApiError::Other("sqlite read pool lock poisoned".to_string())
+}
+
+fn is_read(sql: &str) -> bool {
+    sql.trim_start()
+        .get(..6)
+        .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
+}
+
+/// Rows of one statement as JSON, for code already on a connection.
+pub fn query_rows(conn: &Connection, sql: &str, params: Vec<Param>) -> ApiResult<Vec<Value>> {
+    Ok(run_statement(conn, sql, params, false)?.0)
+}
+
+fn run_statement(
+    conn: &Connection,
+    sql: &str,
+    params: Vec<Param>,
+    is_write: bool,
+) -> ApiResult<(Vec<Value>, u64)> {
+    let mut statement = conn.prepare_cached(sql)?;
+    let names: Vec<String> = statement
+        .column_names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let mut rows = statement.query(params_from_iter(params))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut map = Map::with_capacity(names.len());
+        for (idx, name) in names.iter().enumerate() {
+            map.insert(name.clone(), cell_json(name, row.get_ref(idx)?));
+        }
+        out.push(Value::Object(map));
+    }
+    drop(rows);
+    let changed = if is_write { conn.changes() } else { 0 };
+    Ok((out, changed))
+}
+
+static DB: OnceCell<Db> = OnceCell::const_new();
+
+/// The process-wide database, opened on first use.
+pub async fn db() -> ApiResult<&'static Db> {
+    DB.get_or_try_init(|| async {
+        let cfg = config();
+        let path = cfg
+            .sqlite_path
+            .clone()
+            .ok_or_else(|| ApiError::unavailable("SQLITE_PATH is not configured"))?;
+        let (readers, timeout) = (cfg.read_pool, cfg.statement_timeout_ms);
+        tokio::task::spawn_blocking(move || Db::open(path, readers, timeout))
+            .await
+            .map_err(|e| ApiError::Other(format!("sqlite open failed: {e}")))?
+    })
+    .await
+}
+
+/// JSON for one cell, decoded by the column's name (see `crate::schema`).
+fn cell_json(column: &str, cell: ValueRef<'_>) -> Value {
+    match cell {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(i) => match decode_kind(column) {
+            Some(Decode::Numeric(scale)) => fixed_json(i, scale),
+            Some(Decode::Bool) => Value::Bool(i != 0),
+            Some(Decode::Timestamp) => timestamp_json(i),
+            None => Value::Number(Number::from(i)),
+        },
+        ValueRef::Real(f) => Number::from_f64(f)
             .map(Value::Number)
             .unwrap_or(Value::Null),
-        "JSON" | "JSONB" => get::<Value>(row, idx).unwrap_or(Value::Null),
-        "BYTEA" => get::<Vec<u8>>(row, idx)
-            .map(|b| Value::String(hex::encode(b)))
-            .unwrap_or(Value::Null),
-        "TIMESTAMPTZ" => get::<chrono::DateTime<chrono::Utc>>(row, idx)
-            .map(|dt| Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
-            .unwrap_or_else(|| string_column(row, idx)),
-        "TIMESTAMP" => get::<chrono::NaiveDateTime>(row, idx)
-            .map(|dt| Value::String(format!("{}Z", dt.format("%Y-%m-%dT%H:%M:%S%.3f"))))
-            .unwrap_or_else(|| string_column(row, idx)),
-        "DATE" => get::<chrono::NaiveDate>(row, idx)
-            .map(|d| Value::String(d.format("%Y-%m-%d").to_string()))
-            .unwrap_or(Value::Null),
-        "UUID" => get::<uuid::Uuid>(row, idx)
-            .map(|u| Value::String(u.to_string()))
-            .unwrap_or_else(|| string_column(row, idx)),
-        _ => string_column(row, idx),
+        ValueRef::Text(bytes) => Value::String(String::from_utf8_lossy(bytes).into_owned()),
+        ValueRef::Blob(bytes) => Value::String(hex::encode(bytes)),
     }
 }
 
-fn get<'a, T>(row: &'a sqlx::postgres::PgRow, idx: usize) -> Option<T>
-where
-    T: sqlx::Decode<'a, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-{
-    row.try_get::<Option<T>, usize>(idx).ok().flatten()
+fn timestamp_json(micros: i64) -> Value {
+    chrono::DateTime::from_timestamp_micros(micros)
+        .map(|dt| Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
+        .unwrap_or(Value::Null)
 }
 
-fn string_column(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
-    get::<String>(row, idx)
-        .or_else(|| get::<chrono::NaiveDateTime>(row, idx).map(|dt| format!("{}Z", dt.format("%Y-%m-%dT%H:%M:%S%.3f"))))
-        .map(Value::String)
-        .unwrap_or(Value::Null)
+pub fn now_us() -> i64 {
+    chrono::Utc::now().timestamp_micros()
+}
+
+/// The timestamp spellings Postgres accepted from this codebase; a value with no
+/// zone is UTC, the session zone the server ran in.
+pub fn parse_timestamp_us(text: &str) -> Option<i64> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
+    let text = text.trim();
+    let zoned = DateTime::parse_from_rfc3339(text)
+        .or_else(|_| DateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f%#z"))
+        .map(|dt| dt.timestamp_micros());
+    zoned.ok().or_else(|| {
+        ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
+            .iter()
+            .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
+            .or_else(|| {
+                NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                    .ok()?
+                    .and_hms_opt(0, 0, 0)
+            })
+            .map(|dt| dt.and_utc().timestamp_micros())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// LIKE
+// ---------------------------------------------------------------------------
+
+enum LikeToken {
+    AnyRun,
+    AnyChar,
+    Literal(char),
+}
+
+/// Postgres `LIKE`: `%`, `_`, and `\` escaping by default. SQLite's own LIKE
+/// folds ASCII only, has no default escape, and folds when Postgres LIKE would
+/// not, so both operators are registered as functions instead.
+fn like_match(value: &str, pattern: &str, fold_case: bool) -> Result<bool, &'static str> {
+    let (value, pattern) = if fold_case {
+        (value.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (value.to_string(), pattern.to_string())
+    };
+
+    let mut tokens = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        tokens.push(match c {
+            '%' => LikeToken::AnyRun,
+            '_' => LikeToken::AnyChar,
+            '\\' => LikeToken::Literal(
+                chars
+                    .next()
+                    .ok_or("LIKE pattern must not end with escape character")?,
+            ),
+            other => LikeToken::Literal(other),
+        });
+    }
+
+    let text: Vec<char> = value.chars().collect();
+    let (mut t, mut p) = (0, 0);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while t < text.len() {
+        match tokens.get(p) {
+            Some(LikeToken::AnyRun) => {
+                backtrack = Some((p, t));
+                p += 1;
+            }
+            Some(LikeToken::AnyChar) => {
+                t += 1;
+                p += 1;
+            }
+            Some(LikeToken::Literal(c)) if *c == text[t] => {
+                t += 1;
+                p += 1;
+            }
+            _ => match backtrack {
+                Some((run, start)) => {
+                    backtrack = Some((run, start + 1));
+                    p = run + 1;
+                    t = start + 1;
+                }
+                None => return Ok(false),
+            },
+        }
+    }
+    Ok(tokens[p..].iter().all(|t| matches!(t, LikeToken::AnyRun)))
+}
+
+fn register_like(conn: &Connection) -> rusqlite::Result<()> {
+    for (name, fold_case) in [("pg_like", false), ("pg_ilike", true)] {
+        conn.create_scalar_function(
+            name,
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            move |ctx| {
+                let value = ctx.get_raw(0).as_str_or_null()?;
+                let pattern = ctx.get_raw(1).as_str_or_null()?;
+                let (Some(value), Some(pattern)) = (value, pattern) else {
+                    return Ok(None);
+                };
+                like_match(value, pattern, fold_case)
+                    .map(Some)
+                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
+            },
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Hand-written SQL with typed binds
 // ---------------------------------------------------------------------------
 
-/// `(postgres type of the cast, value)`, one entry per `$n`.
+/// `(logical type of the placeholder, value)`, one entry per `$n`.
 pub type TypedBind<'a> = (&'a str, &'a Value);
 
 /// The highest `$n` placeholder in a statement.
@@ -174,7 +646,49 @@ pub fn highest_placeholder(sql: &str) -> usize {
     highest
 }
 
-fn arguments(sql: &str, binds: &[TypedBind]) -> ApiResult<PgArguments> {
+/// `CAST($n AS any type)` and bare `$n` both become `?n`. The value was already
+/// converted by type, and a real SQLite CAST to `uuid` would mangle it.
+pub fn sqlite_sql(sql: &str) -> String {
+    const CAST: &str = "CAST($";
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(start) = rest.find(['$', 'C']) {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let is_cast = rest.starts_with(CAST);
+        let digits_at = if is_cast { CAST.len() } else { 1 };
+        let digits = rest[digits_at..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if (!is_cast && !rest.starts_with('$')) || digits == 0 {
+            let width = rest.chars().next().map_or(1, char::len_utf8);
+            out.push_str(&rest[..width]);
+            rest = &rest[width..];
+            continue;
+        }
+        out.push('?');
+        out.push_str(&rest[digits_at..digits_at + digits]);
+        rest = &rest[digits_at + digits..];
+        if is_cast {
+            // Past the type, which may have its own parentheses.
+            let mut depth = 1;
+            let end = rest.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(i)
+            });
+            rest = &rest[end.map_or(rest.len(), |i| i + 1)..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn arguments(sql: &str, binds: &[TypedBind]) -> ApiResult<Vec<Param>> {
     let highest = highest_placeholder(sql);
     if highest != binds.len() {
         // A mismatch would bind the wrong column or leave a placeholder
@@ -184,30 +698,22 @@ fn arguments(sql: &str, binds: &[TypedBind]) -> ApiResult<PgArguments> {
             binds.len()
         )));
     }
-    let mut args = PgArguments::default();
-    for (ty, value) in binds {
-        push_typed_arg(&mut args, ty, value)?;
-    }
-    Ok(args)
+    binds.iter().map(|(ty, v)| typed_param(ty, v)).collect()
 }
 
 pub async fn fetch(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<Vec<Value>> {
-    let args = arguments(sql, binds)?;
-    let rows = sqlx::query_with(sql, args).fetch_all(pool().await?).await?;
-    Ok(rows_to_json(&rows))
+    let params = arguments(sql, binds)?;
+    Ok(db().await?.run(sql, params).await?.0)
 }
 
 pub async fn fetch_one(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<Option<Value>> {
-    let args = arguments(sql, binds)?;
-    let row = sqlx::query_with(sql, args).fetch_optional(pool().await?).await?;
-    Ok(row.as_ref().map(row_to_json))
+    Ok(fetch(sql, binds).await?.into_iter().next())
 }
 
 /// Rows affected, for UPDATE/DELETE/INSERT.
 pub async fn execute(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<u64> {
-    let args = arguments(sql, binds)?;
-    let result = sqlx::query_with(sql, args).execute(pool().await?).await?;
-    Ok(result.rows_affected())
+    let params = arguments(sql, binds)?;
+    Ok(db().await?.run(sql, params).await?.1)
 }
 
 /// A single scalar, e.g. `SELECT count(*)`.
@@ -218,93 +724,88 @@ pub async fn fetch_scalar(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<Value
     Ok(first.unwrap_or(Value::Null))
 }
 
-/// `callRpc()` from the TS layer: named-argument SELECT of a stored function.
-///
-/// Every argument is bound as text and cast by the server to the parameter type
-/// read from the catalog (see `crate::schema`). This is what replaces the
-/// "Postgres infers the type of an unspecified parameter" behaviour the TS
-/// service got for free from node-pg: an explicit `CAST($1 AS numeric)` is
-/// accepted for a numeric parameter where a bare text-typed parameter is not.
-/// Neither the type name nor the value is ever concatenated from client input -
-/// the name comes from `pg_catalog` and is re-validated, the value is bound.
 pub async fn call_rpc(fn_name: &str, params: &[(&str, &Value)]) -> ApiResult<Value> {
-    if !is_identifier(fn_name) {
-        return Err(ApiError::internal(format!("Unsafe function name: {fn_name}")));
-    }
-    for (name, _) in params {
-        if !is_identifier(name) {
-            return Err(ApiError::internal(format!("Unsafe parameter name: {name}")));
-        }
-    }
-
-    let schema = crate::schema::get().await?;
-    let mut args = PgArguments::default();
-    let mut named = Vec::with_capacity(params.len());
-
-    for (i, (name, value)) in params.iter().enumerate() {
-        let ty = schema.rpc_param_type(fn_name, name).ok_or_else(|| {
-            ApiError::internal(format!(
-                "Function {fn_name} has no parameter {name} in the public schema"
-            ))
-        })?;
-        if !is_safe_type_expression(ty) {
-            return Err(ApiError::internal(format!("Unusable type for {fn_name}.{name}")));
-        }
-        named.push(format!("\"{name}\" => CAST(${} AS {ty})", i + 1));
-        push_typed_arg(&mut args, ty, value)?;
-    }
-
-    let sql = format!("SELECT * FROM \"{fn_name}\"({})", named.join(", "));
-
-    let rows = sqlx::query_with(sql.as_str(), args)
-        .fetch_all(pool().await?)
-        .await?;
-
-    if rows.len() == 1 && rows[0].columns().len() == 1 {
-        if let Some(map) = row_to_json(&rows[0]).as_object() {
-            if let Some(v) = map.values().next() {
-                return Ok(v.clone());
-            }
-        }
-    }
-    Ok(Value::Array(rows_to_json(&rows)))
+    db().await?.call_rpc(fn_name, params).await
 }
 
-/// JSON value -> the text a CAST-from-text bind needs. `None` is SQL NULL.
+/// JSON value -> the text form of a bind. `None` is SQL NULL.
 pub fn json_bind_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
         Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
-        // serde_json prints integers exactly and floats in round-trip form,
-        // which Postgres accepts for numeric, int, float and even exponent
-        // inputs like 1e-8.
+        // serde_json prints integers exactly and floats in round-trip form.
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) => Some(s.clone()),
         other => Some(other.to_string()),
     }
 }
 
-/// Bind `value` so that `CAST($n AS type_name)` yields `type_name`.
-///
-/// `bytea` is the one type that must not go through text, because its binary
-/// format is the raw byte string; arrays are refused rather than guessed at,
+fn bad_input(type_name: &str, text: &str) -> ApiError {
+    ApiError::Other(format!(
+        "invalid input syntax for type {type_name}: \"{text}\""
+    ))
+}
+
+fn integer_param(type_name: &str, text: &str, min: i64, max: i64) -> ApiResult<Param> {
+    let parsed = text
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| bad_input(type_name, text))?;
+    if !(min..=max).contains(&parsed) {
+        return Err(ApiError::Other(format!("value \"{text}\" is out of range")));
+    }
+    Ok(Param::Integer(parsed))
+}
+
+/// The accepted spellings of the Postgres boolean input function.
+fn boolean_param(text: &str) -> ApiResult<Param> {
+    match text.trim().to_lowercase().as_str() {
+        "t" | "tr" | "tru" | "true" | "y" | "ye" | "yes" | "on" | "1" => Ok(Param::Integer(1)),
+        "f" | "fa" | "fal" | "fals" | "false" | "n" | "no" | "of" | "off" | "0" => {
+            Ok(Param::Integer(0))
+        }
+        _ => Err(bad_input("boolean", text)),
+    }
+}
+
+/// Converts `value` to the storage form of `type_name`, refusing anything
+/// Postgres' cast would have refused. Arrays are refused rather than guessed at,
 /// since a wrong guess here silently changes the money math.
-pub fn push_typed_arg(args: &mut PgArguments, type_name: &str, value: &Value) -> ApiResult<()> {
-    let added = if type_name == "bytea" {
-        let hexed = value
-            .as_str()
-            .ok_or_else(|| ApiError::internal("bytea parameter requires a hex string".to_string()))?;
-        let bytes = hex::decode(hexed.strip_prefix("0x").unwrap_or(hexed))
-            .map_err(|e| ApiError::internal(format!("bytea parameter is not hex: {e}")))?;
-        args.add(bytes)
-    } else if type_name.ends_with("[]") {
+pub fn typed_param(type_name: &str, value: &Value) -> ApiResult<Param> {
+    if type_name.ends_with("[]") {
         return Err(ApiError::internal(format!(
             "Array bind parameters are not supported (got {type_name})"
         )));
-    } else {
-        args.add(json_bind_text(value))
+    }
+    if type_name == "bytea" {
+        let hexed = value.as_str().ok_or_else(|| {
+            ApiError::internal("bytea parameter requires a hex string".to_string())
+        })?;
+        let bytes = hex::decode(hexed.strip_prefix("0x").unwrap_or(hexed))
+            .map_err(|e| ApiError::internal(format!("bytea parameter is not hex: {e}")))?;
+        return Ok(Param::Blob(bytes));
+    }
+    let Some(text) = json_bind_text(value) else {
+        return Ok(Param::Null);
     };
-    added.map(|_| ()).map_err(|e| ApiError::Other(format!("bind failed: {e}")))
+    if let Some(scale) = numeric_scale(type_name) {
+        return Ok(Param::Integer(to_fixed(parse_decimal(&text)?, scale)?));
+    }
+    match type_name {
+        "boolean" | "bool" => boolean_param(&text),
+        "smallint" | "int2" => integer_param(type_name, &text, i16::MIN.into(), i16::MAX.into()),
+        "integer" | "int" | "int4" => {
+            integer_param(type_name, &text, i32::MIN.into(), i32::MAX.into())
+        }
+        "bigint" | "int8" => integer_param(type_name, &text, i64::MIN, i64::MAX),
+        "timestamp with time zone" | "timestamptz" => parse_timestamp_us(&text)
+            .map(Param::Integer)
+            .ok_or_else(|| bad_input(type_name, &text)),
+        "uuid" => uuid::Uuid::parse_str(text.trim())
+            .map(|u| Param::Text(u.to_string()))
+            .map_err(|_| bad_input(type_name, &text)),
+        _ => Ok(Param::Text(text)),
+    }
 }
 
 /// `CAST($idx AS <type>)` when the type is known and safe to write, otherwise a
@@ -317,9 +818,9 @@ pub fn typed_placeholder(idx: usize, type_name: Option<&str>) -> String {
     }
 }
 
-/// Types reach SQL only from `pg_catalog`, never from a client. Still: allow
-/// only the characters a real type expression can contain, so a catalog entry
-/// (or a future code path) cannot smuggle SQL through a type name.
+/// Types reach SQL only from `crate::schema`, never from a client. Still: allow
+/// only the characters a real type expression can contain, so a future code path
+/// cannot smuggle SQL through a type name.
 pub fn is_safe_type_expression(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -331,24 +832,18 @@ pub fn is_safe_type_expression(value: &str) -> bool {
 }
 
 /// Untyped fallback for callers that already know the Rust type of a value.
-/// Numbers keep their integer/float identity; objects and arrays go out as JSONB.
-pub fn push_arg(args: &mut PgArguments, value: &Value) -> ApiResult<()> {
-    let added = match value {
-        Value::Null => args.add(Option::<String>::None),
-        Value::Bool(b) => args.add(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                args.add(i)
-            } else if let Some(f) = n.as_f64() {
-                args.add(f.to_string())
-            } else {
-                args.add(n.to_string())
-            }
-        }
-        Value::String(s) => args.add(s.clone()),
-        other => args.add(other.clone()),
-    };
-    added.map(|_| ()).map_err(|e| ApiError::Other(format!("bind failed: {e}")))
+/// Numbers keep their integer/float identity; objects and arrays go out as JSON text.
+pub fn untyped_param(value: &Value) -> Param {
+    match value {
+        Value::Null => Param::Null,
+        Value::Bool(b) => Param::Integer(*b as i64),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => Param::Integer(i),
+            None => Param::Text(n.to_string()),
+        },
+        Value::String(s) => Param::Text(s.clone()),
+        other => Param::Text(other.to_string()),
+    }
 }
 
 /// The ledger functions answer `{"success": bool, ...}`; scalars get wrapped so
@@ -372,28 +867,45 @@ pub fn is_identifier(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
         && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-        && bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-/// Postgres error code, e.g. "23505" for unique violations. Handlers branch on
-/// this to turn a duplicate insert into a 409.
-pub fn pg_error_code(err: &sqlx::Error) -> Option<String> {
-    err.as_database_error()
-        .and_then(|db| db.code().map(|c| c.to_string()))
+/// The Postgres code of a constraint failure, e.g. "23505" for unique
+/// violations, so the cause logged by handlers keeps its meaning.
+pub fn pg_error_code(err: &rusqlite::Error) -> Option<String> {
+    use rusqlite::ffi;
+    let code = err.sqlite_error()?.extended_code;
+    Some(
+        match code {
+            ffi::SQLITE_CONSTRAINT_UNIQUE | ffi::SQLITE_CONSTRAINT_PRIMARYKEY => "23505",
+            ffi::SQLITE_CONSTRAINT_CHECK => "23514",
+            ffi::SQLITE_CONSTRAINT_NOTNULL => "23502",
+            ffi::SQLITE_CONSTRAINT_FOREIGNKEY => "23503",
+            other => return Some(format!("sqlite:{other}")),
+        }
+        .to_string(),
+    )
 }
 
-pub fn is_unique_violation(err: &sqlx::Error) -> bool {
+pub fn is_unique_violation(err: &rusqlite::Error) -> bool {
     pg_error_code(err).as_deref() == Some("23505")
 }
 
 pub async fn ping() -> ApiResult<()> {
-    sqlx::query("SELECT 1").execute(pool().await?).await?;
-    Ok(())
+    db().await?
+        .read(|conn| {
+            conn.query_row("SELECT 1", [], |_| Ok(()))?;
+            Ok(())
+        })
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn identifier_guard() {
@@ -425,23 +937,43 @@ mod tests {
     fn bind_text_covers_every_json_shape() {
         assert_eq!(json_bind_text(&Value::Null), None);
         assert_eq!(json_bind_text(&Value::Bool(true)).as_deref(), Some("true"));
-        assert_eq!(json_bind_text(&Value::Bool(false)).as_deref(), Some("false"));
-        assert_eq!(json_bind_text(&serde_json::json!(5)).as_deref(), Some("5"));
-        assert_eq!(json_bind_text(&serde_json::json!(7.25)).as_deref(), Some("7.25"));
-        assert_eq!(json_bind_text(&serde_json::json!(i64::MAX)).as_deref(), Some("9223372036854775807"));
-        assert_eq!(json_bind_text(&serde_json::json!("0xabc")).as_deref(), Some("0xabc"));
         assert_eq!(
-            json_bind_text(&serde_json::json!({"success": true})).as_deref(),
+            json_bind_text(&Value::Bool(false)).as_deref(),
+            Some("false")
+        );
+        assert_eq!(json_bind_text(&json!(5)).as_deref(), Some("5"));
+        assert_eq!(json_bind_text(&json!(7.25)).as_deref(), Some("7.25"));
+        assert_eq!(
+            json_bind_text(&json!(i64::MAX)).as_deref(),
+            Some("9223372036854775807")
+        );
+        assert_eq!(json_bind_text(&json!("0xabc")).as_deref(), Some("0xabc"));
+        assert_eq!(
+            json_bind_text(&json!({"success": true})).as_deref(),
             Some(r#"{"success":true}"#)
         );
     }
 
     #[test]
     fn type_expressions_are_revalidated() {
-        for ok in ["numeric", "integer", "timestamp with time zone", "character varying", "public.status", "jsonb"] {
+        for ok in [
+            "numeric",
+            "numeric(30,10)",
+            "integer",
+            "timestamp with time zone",
+            "character varying",
+            "public.status",
+            "jsonb",
+        ] {
             assert!(is_safe_type_expression(ok), "rejected {ok}");
         }
-        for bad in ["", "numeric; DROP TABLE x", "int) => 1", "a' OR '1'='1", &"x".repeat(200)] {
+        for bad in [
+            "",
+            "numeric; DROP TABLE x",
+            "int) => 1",
+            "a' OR '1'='1",
+            &"x".repeat(200),
+        ] {
             assert!(!is_safe_type_expression(bad), "accepted {bad}");
         }
     }
@@ -455,28 +987,267 @@ mod tests {
 
     #[test]
     fn typed_binds_reject_shapes_they_cannot_encode() {
-        let mut args = PgArguments::default();
-        push_typed_arg(&mut args, "numeric", &serde_json::json!(1.5)).unwrap();
-        push_typed_arg(&mut args, "bytea", &serde_json::json!("0xdeadbeef")).unwrap();
-        assert!(push_typed_arg(&mut args, "bytea", &serde_json::json!("not-hex")).is_err());
-        assert!(push_typed_arg(&mut args, "text[]", &serde_json::json!(["a"])).is_err());
+        assert_eq!(
+            typed_param("numeric", &json!(1.5)).unwrap(),
+            Param::Integer(15_000_000_000)
+        );
+        assert!(matches!(
+            typed_param("bytea", &json!("0xdeadbeef")).unwrap(),
+            Param::Blob(_)
+        ));
+        assert!(typed_param("bytea", &json!("not-hex")).is_err());
+        assert!(typed_param("text[]", &json!(["a"])).is_err());
         // NULL is bindable for every cast target.
-        push_typed_arg(&mut args, "uuid", &Value::Null).unwrap();
+        assert_eq!(typed_param("uuid", &Value::Null).unwrap(), Param::Null);
     }
 
     #[test]
-    fn arguments_can_be_pushed_for_every_json_shape() {
-        let mut args = PgArguments::default();
+    fn typed_binds_convert_to_storage_form() {
+        assert_eq!(
+            typed_param("numeric(10,4)", &json!(1.23456)).unwrap(),
+            Param::Integer(12_346)
+        );
+        assert_eq!(
+            typed_param("numeric(20,8)", &json!("0.00000001")).unwrap(),
+            Param::Integer(1)
+        );
+        assert!(typed_param("numeric", &json!(1e30)).is_err());
+        assert!(typed_param("numeric", &json!("NaN")).is_err());
+        assert_eq!(
+            typed_param("bigint", &json!("42")).unwrap(),
+            Param::Integer(42)
+        );
+        assert!(typed_param("bigint", &json!(1.5)).is_err());
+        assert!(typed_param("integer", &json!(3_000_000_000i64)).is_err());
+        assert_eq!(
+            typed_param("boolean", &json!(true)).unwrap(),
+            Param::Integer(1)
+        );
+        assert_eq!(
+            typed_param("boolean", &json!("f")).unwrap(),
+            Param::Integer(0)
+        );
+        assert!(typed_param("boolean", &json!("maybe")).is_err());
+        assert_eq!(
+            typed_param("timestamp with time zone", &json!("1970-01-01T00:00:01.5Z")).unwrap(),
+            Param::Integer(1_500_000)
+        );
+        assert!(typed_param("timestamp with time zone", &json!("yesterday")).is_err());
+        assert_eq!(
+            typed_param("uuid", &json!("8F1B0000-0000-4000-8000-000000000000")).unwrap(),
+            Param::Text("8f1b0000-0000-4000-8000-000000000000".into())
+        );
+        assert!(typed_param("uuid", &json!("not-a-uuid")).is_err());
+        assert_eq!(
+            typed_param("character varying", &json!(12)).unwrap(),
+            Param::Text("12".into())
+        );
+    }
+
+    #[test]
+    fn arguments_can_be_built_for_every_json_shape() {
         for value in [
             Value::Null,
             Value::Bool(true),
-            Value::Number(serde_json::json!(5).as_i64().unwrap().into()),
-            Value::Number(Number::from_f64(1.25).unwrap()),
+            json!(5),
+            json!(1.25),
             Value::String("0xabc".into()),
-            serde_json::json!({"a": 1}),
-            serde_json::json!([1, 2]),
+            json!({"a": 1}),
+            json!([1, 2]),
         ] {
-            push_arg(&mut args, &value).unwrap();
+            let _ = untyped_param(&value);
         }
+        assert_eq!(untyped_param(&json!(5)), Param::Integer(5));
+        assert_eq!(untyped_param(&json!(1.25)), Param::Text("1.25".into()));
+    }
+
+    #[test]
+    fn placeholders_become_sqlite_numbered_params() {
+        assert_eq!(
+            sqlite_sql("SELECT a FROM t WHERE a = CAST($1 AS text) AND b = $2"),
+            "SELECT a FROM t WHERE a = ?1 AND b = ?2"
+        );
+        assert_eq!(
+            sqlite_sql(
+                "VALUES (CAST($12 AS numeric(30,10)), CAST($3 AS timestamp with time zone))"
+            ),
+            "VALUES (?12, ?3)"
+        );
+        // A repeated placeholder stays one parameter; reuse must not shift binds.
+        assert_eq!(
+            sqlite_sql("(code LIKE CAST($1 AS text) OR w LIKE CAST($1 AS text))"),
+            "(code LIKE ?1 OR w LIKE ?1)"
+        );
+        assert_eq!(sqlite_sql("SELECT COUNT(*) AS c"), "SELECT COUNT(*) AS c");
+        assert_eq!(sqlite_sql("CASE WHEN x"), "CASE WHEN x");
+        assert_eq!(
+            sqlite_sql("Müller $ CAST(x AS text)"),
+            "Müller $ CAST(x AS text)"
+        );
+    }
+
+    #[test]
+    fn like_follows_postgres() {
+        let like = |v, p| like_match(v, p, false).unwrap();
+        let ilike = |v, p| like_match(v, p, true).unwrap();
+        assert!(like("0xAbC", "0xA%"));
+        // LIKE is case-sensitive, unlike SQLite's built-in.
+        assert!(!like("0xAbC", "0xa%"));
+        assert!(ilike("0xAbC", "0xa%"));
+        assert!(ilike("0XABC", "%abc"));
+        assert!(ilike("ÄPFEL", "äpfel"), "non-ASCII folds too");
+        assert!(ilike("abc", "a_c"));
+        assert!(!ilike("abc", "a_"));
+        assert!(ilike("abc", "%%%"));
+        assert!(ilike("", "%"));
+        assert!(!ilike("", "_"));
+        assert!(ilike("aXbXc", "a%b%c"));
+        // `\` escapes by default.
+        assert!(ilike("50%", "50\\%"));
+        assert!(!ilike("500", "50\\%"));
+        assert!(ilike("a_b", "a\\_b"));
+        assert!(!ilike("axb", "a\\_b"));
+        assert!(like_match("x", "x\\", true).is_err());
+    }
+
+    #[test]
+    fn cells_decode_by_column_name() {
+        assert_eq!(
+            cell_json("balance", ValueRef::Integer(15_000_000_000)).to_string(),
+            "1.5"
+        );
+        assert_eq!(cell_json("won", ValueRef::Integer(1)), json!(true));
+        assert_eq!(
+            cell_json("created_at", ValueRef::Integer(1_500_999)),
+            json!("1970-01-01T00:00:01.500Z")
+        );
+        assert_eq!(cell_json("count", ValueRef::Integer(3)), json!(3));
+        assert_eq!(cell_json("signed_at", ValueRef::Integer(3)), json!(3));
+        assert_eq!(cell_json("balance", ValueRef::Null), Value::Null);
+    }
+
+    const SEEDED: &str = "Csx2cq3q7GeV79hFUuRR4Pa2T6JUBoC2UjWGbkVqQ4t4";
+
+    fn banned(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM banned_wallets WHERE wallet_address = ?1",
+            [SEEDED],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_new_database_is_seeded_once_and_a_restart_keeps_the_unban() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!((banned(&conn), version(&conn)), (1, SCHEMA_VERSION));
+
+        conn.execute("DELETE FROM banned_wallets", []).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(banned(&conn), 0, "an admin's unban survives a restart");
+    }
+
+    #[test]
+    fn a_file_from_before_versioning_is_never_reseeded_but_gets_new_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(baseline_ddl()).unwrap();
+        conn.execute_batch("DROP TABLE deposit_locks").unwrap();
+        assert_eq!(version(&conn), 0);
+
+        migrate(&conn).unwrap();
+        assert_eq!((banned(&conn), version(&conn)), (0, SCHEMA_VERSION));
+        let table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = 'deposit_locks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1);
+    }
+
+    #[test]
+    fn a_file_made_by_the_sql_alone_counts_as_seeded() {
+        // What `strike-data init` and the migration tool do.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        assert_eq!((banned(&conn), version(&conn)), (1, 1));
+        conn.execute("DELETE FROM banned_wallets", []).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(banned(&conn), 0);
+    }
+
+    #[test]
+    fn a_file_from_a_newer_build_is_refused() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(migrate(&conn).is_err());
+    }
+
+    #[test]
+    fn schema_matches_the_sql_file() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        let mut actual = Vec::new();
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for table in &tables {
+            let mut info = conn
+                .prepare(&format!(
+                    "SELECT name, type FROM pragma_table_info('{table}')"
+                ))
+                .unwrap();
+            let columns = info
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap();
+            for column in columns {
+                let (name, storage) = column.unwrap();
+                actual.push((table.clone(), name, storage));
+            }
+        }
+
+        let expected: Vec<(String, String, String)> = crate::schema::COLUMNS
+            .iter()
+            .map(|(table, column, ty)| {
+                let storage = if ty == &"text" || ty == &"uuid" {
+                    "TEXT"
+                } else {
+                    "INTEGER"
+                };
+                (table.to_string(), column.to_string(), storage.to_string())
+            })
+            .collect();
+        let sorted = |mut v: Vec<(String, String, String)>| {
+            v.sort();
+            v
+        };
+        assert_eq!(sorted(actual), sorted(expected));
+
+        let not_strict: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_list \
+                 WHERE schema = 'main' AND type = 'table' AND strict = 0 \
+                   AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(not_strict, 0, "every table is STRICT");
     }
 }

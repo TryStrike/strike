@@ -1,0 +1,249 @@
+'use client';
+
+/**
+ * Shared presentation primitives for the admin dashboard panels: skeletons,
+ * empty states, inline error+retry, pagination, section headers and the typed
+ * confirmation control used by every danger-zone action.
+ */
+
+import React, { useState } from 'react';
+
+export function shortenAddress(addr: string): string {
+    return addr ? `${addr.slice(0, 8)}...${addr.slice(-6)}` : 'N/A';
+}
+
+export function fmtPnL(n: number | undefined | null): string {
+    // A missing/failed number must never masquerade as a real zero — '—' is
+    // the agreed "no data" rendering across the admin panels.
+    if (n === undefined || n === null || !Number.isFinite(n)) return '—';
+    return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+export const Table = ({ children }: { children: React.ReactNode }) => (
+    <table className="w-full text-left border-collapse">{children}</table>
+);
+
+export const THead = ({ labels }: { labels: string[] }) => (
+    <thead>
+        <tr className="border-b border-white/10 text-xs font-black uppercase tracking-wide text-white/30">
+            {labels.map((l, i) => (
+                <th key={l} className={`px-8 py-6 ${i === labels.length - 1 ? 'text-right' : ''}`}>{l}</th>
+            ))}
+        </tr>
+    </thead>
+);
+
+export const StatBox = ({ title, value, label }: { title: string; value: React.ReactNode; label?: string }) => (
+    <div className="p-8 bg-white/[0.02] border border-white/5 rounded-[2.5rem] space-y-4">
+        <p className="text-xs font-black uppercase tracking-wider text-white/30">{title}</p>
+        <div>
+            <h3 className="text-4xl font-black text-white tracking-tight">{value}</h3>
+            {label && <p className="text-xs font-bold text-white/20 uppercase tracking-widest">{label}</p>}
+        </div>
+    </div>
+);
+
+export const TabBtn = ({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) => (
+    <button
+        onClick={onClick}
+        aria-pressed={active}
+        className={`pb-4 text-xs font-black uppercase tracking-widest transition-all border-b-2 ${
+            active ? 'text-white border-white' : 'text-white/20 border-transparent hover:text-white/40'
+        }`}
+    >
+        {label}
+    </button>
+);
+
+/** Rows of shimmering bars — every list panel shows this instead of a spinner. */
+export function SkeletonRows({ rows = 6, className = '' }: { rows?: number; className?: string }) {
+    return (
+        <div className={`space-y-3 ${className}`} role="status" aria-label="Loading">
+            {Array.from({ length: rows }).map((_, i) => (
+                <div key={i} className="animate-pulse flex items-center gap-4 px-8 py-4">
+                    <div className="h-3 w-24 rounded bg-white/[0.06]" />
+                    <div className="h-3 flex-1 rounded bg-white/[0.05]" />
+                    <div className="h-3 w-16 rounded bg-white/[0.06]" />
+                    <div className="h-3 w-20 rounded bg-white/[0.04]" />
+                </div>
+            ))}
+        </div>
+    );
+}
+
+export function EmptyState({ title, hint, action }: { title: string; hint?: string; action?: React.ReactNode }) {
+    return (
+        <div className="px-8 py-16 text-center space-y-2">
+            <p className="text-xs font-black uppercase tracking-widest text-white/25">{title}</p>
+            {hint && <p className="text-xs text-white/20 max-w-xl mx-auto leading-relaxed">{hint}</p>}
+            {action}
+        </div>
+    );
+}
+
+/** Inline error with a Retry button — used by every panel and the withdrawal queue. */
+export function ErrorState({ message, onRetry, retrying }: { message: string; onRetry: () => void; retrying?: boolean }) {
+    return (
+        <div className="px-8 py-10 text-center space-y-3" role="alert">
+            <p className="text-xs font-black uppercase tracking-widest text-rose-400/80">Request failed</p>
+            <p className="text-xs text-white/40 font-mono max-w-xl mx-auto break-words">{message}</p>
+            <button
+                type="button"
+                onClick={onRetry}
+                disabled={retrying}
+                className="px-5 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-[10px] font-black uppercase tracking-widest text-white transition-all disabled:opacity-50"
+            >
+                {retrying ? 'Retrying…' : 'Retry'}
+            </button>
+        </div>
+    );
+}
+
+export function PanelHeader({
+    eyebrow, title, right,
+}: {
+    eyebrow?: string;
+    title?: React.ReactNode;
+    right?: React.ReactNode;
+}) {
+    return (
+        <div className="p-6 border-b border-white/5 flex flex-wrap gap-4 items-center justify-between bg-white/[0.01]">
+            <div>
+                {eyebrow && <p className="text-xs font-black uppercase tracking-wider text-white/30">{eyebrow}</p>}
+                {title && <p className="text-sm text-white/50">{title}</p>}
+            </div>
+            <div className="flex gap-3 items-center flex-wrap justify-end">{right}</div>
+        </div>
+    );
+}
+
+/**
+ * Server-side pagination strip: shows window position and Prev/Next.
+ * `onPage(offset)` is called with the new zero-based offset.
+ */
+export function Pagination({
+    offset, limit, total, onPage, loading,
+}: {
+    offset: number;
+    limit: number;
+    total: number | null | undefined;
+    onPage: (nextOffset: number) => void;
+    loading?: boolean;
+}) {
+    const t = typeof total === 'number' && Number.isFinite(total) ? Math.max(total, 0) : null;
+    const hasPrev = offset > 0;
+    const hasNext = t === null ? limit > 0 && offset + limit < (t ?? Infinity) : offset + limit < t;
+    const from = t === null || t === 0 ? 0 : Math.min(offset + 1, t);
+    const to = t === null ? offset + limit : Math.min(offset + limit, t);
+    return (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-8 py-4 border-t border-white/5">
+            <p className="text-[11px] font-mono text-white/35">
+                {t === null ? '—' : `${from}–${to} of ${t.toLocaleString()}`} rows
+            </p>
+            <div className="flex gap-2">
+                <button
+                    type="button"
+                    onClick={() => onPage(Math.max(0, offset - limit))}
+                    disabled={!hasPrev || loading}
+                    className="px-4 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                >
+                    ← Prev
+                </button>
+                <button
+                    type="button"
+                    onClick={() => onPage(offset + limit)}
+                    disabled={!hasNext || loading}
+                    className="px-4 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                >
+                    Next →
+                </button>
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Danger-zone confirmation: the action button opens a small inline form and
+ * only fires `onConfirm` once the operator has typed `phrase` exactly. Prevents
+ * misclicks on bans / unbans / freezes / payouts without relying on window.confirm.
+ */
+export function TypedConfirmButton({
+    phrase, label, onConfirm, buttonClassName = '', disabled, busy,
+}: {
+    phrase: string;
+    label: string;
+    onConfirm: () => Promise<void> | void;
+    buttonClassName?: string;
+    disabled?: boolean;
+    busy?: boolean;
+}) {
+    const [open, setOpen] = useState(false);
+    const [typed, setTyped] = useState('');
+    const [working, setWorking] = useState(false);
+    const matches = typed.trim() === phrase;
+
+    return (
+        <span className="inline-flex flex-col items-end gap-2">
+            {!open ? (
+                <button
+                    type="button"
+                    onClick={() => setOpen(true)}
+                    disabled={disabled || busy}
+                    className={buttonClassName}
+                >
+                    {busy ? '…' : label}
+                </button>
+            ) : (
+                <span className="flex flex-col gap-1.5 items-end">
+                    <span className="text-[10px] font-mono text-white/40 whitespace-nowrap">
+                        Type <span className="text-white font-black">{phrase}</span> to confirm
+                    </span>
+                    <span className="flex gap-1.5 items-center">
+                        <input
+                            autoFocus
+                            value={typed}
+                            onChange={(e) => setTyped(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && matches && !working) {
+                                    e.preventDefault();
+                                    setWorking(true);
+                                    Promise.resolve(onConfirm())
+                                        .then(() => { setOpen(false); setTyped(''); })
+                                        .finally(() => setWorking(false));
+                                }
+                                if (e.key === 'Escape') { setOpen(false); setTyped(''); }
+                            }}
+                            placeholder={phrase}
+                            aria-label={`Confirm by typing ${phrase}`}
+                            className="w-28 px-2 py-1 rounded bg-black/60 border border-white/15 text-white text-xs font-mono placeholder:text-white/20 focus:outline-none focus:border-white/40"
+                        />
+                        <button
+                            type="button"
+                            disabled={!matches || working || busy}
+                            onClick={async () => {
+                                setWorking(true);
+                                try {
+                                    await onConfirm();
+                                    setOpen(false);
+                                    setTyped('');
+                                } finally {
+                                    setWorking(false);
+                                }
+                            }}
+                            className="px-2.5 py-1 rounded bg-white text-black text-[10px] font-black uppercase tracking-wider disabled:opacity-30"
+                        >
+                            {working ? '…' : 'Go'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => { setOpen(false); setTyped(''); }}
+                            className="px-2 py-1 rounded text-[10px] font-bold uppercase text-white/40 hover:text-white/70"
+                        >
+                            Cancel
+                        </button>
+                    </span>
+                </span>
+            )}
+        </span>
+    );
+}

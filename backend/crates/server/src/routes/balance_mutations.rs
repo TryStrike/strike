@@ -12,7 +12,8 @@
 //! The four ledger functions this family drives:
 //!   * `place_bet_locked` — bet: the bet_lock row plus `deduct_balance_for_bet`,
 //!     inside one transaction,
-//!   * `settle_bet_payout` — win: payout lock, bet claim, `credit_balance_for_payout`,
+//!   * `settle_round` — win, and the sweep: `strike_core::settlement` owns it. The
+//!     route only proves the caller holds the bet's token,
 //!   * `update_balance_for_deposit` — deposit, once the tx hash is claimed,
 //!   * withdraw writes `withdrawal_requests` only: the balance is debited later,
 //!     by the admin accept route, through `update_balance_for_withdrawal`.
@@ -20,6 +21,9 @@
 //! Order is the specification. Every route runs its checks in the TS source
 //! order, including the quirks that decide *which* 400 a caller gets, so a
 //! request refused before now is refused before then.
+
+// `!(x > 0)` is the NaN-safe spelling; `Rejection` is the wire body on purpose.
+#![allow(clippy::neg_cmp_op_on_partial_ord, clippy::result_large_err)]
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
@@ -36,6 +40,11 @@ use strike_core::db::{self, rpc_object};
 use strike_core::error::ApiError;
 use strike_core::eth::{self, DepositFailure};
 use strike_core::ledger;
+use strike_core::settlement::{self, Settled};
+use strike_core::ticks;
+use strike_core::withdrawals;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 use crate::bans::is_globally_banned;
 use crate::http::require_balance_session;
@@ -56,14 +65,13 @@ fn raw_currency(body: &Value) -> String {
     }
 }
 
-/// `DEFAULT_TTL_SECONDS` in `lib/balance/settlementToken.ts`. The bet route calls
-/// `createSettlementToken(payload)` without a TTL, so the payout window is five
-/// minutes (floored at 60s inside `crypto`).
-const SETTLEMENT_TTL_SECONDS: i64 = 5 * 60;
+/// Long enough to claim the longest round. A token past this only loses the
+/// client its answer: the sweep has settled the round anyway.
+const SETTLEMENT_TTL_SECONDS: i64 = settlement::MAX_ROUND_MS / 1000 + 5 * 60;
 
-/// `process.env.NODE_ENV === 'test'`. The TS routes use it to skip the
-/// settlement-token and signed-intent requirements for their test suites; a
-/// served process is never in that mode, so the bypass is permanently off here.
+/// `process.env.NODE_ENV === 'test'`. The TS routes use it to skip the signed-intent
+/// requirement for their test suites; a served process is never in that mode, so
+/// the bypass is permanently off here.
 const ALLOW_TEST_BYPASS: bool = false;
 
 pub fn routes() -> Router {
@@ -133,7 +141,9 @@ async fn balance_rows(variants: &[String], currency: &str) -> Vec<Value> {
         "SELECT balance, status, user_address FROM user_balances \
           WHERE user_address IN ({in_list}) AND currency = {currency_bind}"
     );
-    sql::fetch(&statement, &binds.refs()).await.unwrap_or_default()
+    sql::fetch(&statement, &binds.refs())
+        .await
+        .unwrap_or_default()
 }
 
 /// The `verifier.reason` spelling from `lib/balance/verifyArcDepositTx.ts`. The
@@ -156,7 +166,10 @@ fn failure_reason(failure: &DepositFailure) -> &'static str {
 /// `Deposit has {n}/{MIN} confirmations`, so the count is read back from it.
 fn confirmations_from_message(message: &str) -> Option<u64> {
     let start = message.char_indices().find(|(_, c)| c.is_ascii_digit())?.0;
-    let digits: String = message[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
@@ -176,23 +189,17 @@ fn mint_settlement(
     currency: &str,
     max_payout: f64,
 ) -> Result<String, ledger::Rejection> {
-    crypto::create_settlement_token(bet_id, user_address, currency, max_payout, SETTLEMENT_TTL_SECONDS)
-        .map_err(|err| {
-            tracing::error!("[bet] settlement signing failed: {err}");
-            ledger::route_crash()
-        })
-}
-
-/// `error.message` from a Postgres failure — what the TS matched the `strike_*`
-/// exception names against.
-fn database_error_message(err: &ApiError) -> String {
-    match err {
-        ApiError::Db(db_err) => db_err
-            .as_database_error()
-            .map(|db_err| db_err.message().to_string())
-            .unwrap_or_else(|| db_err.to_string()),
-        other => other.to_string(),
-    }
+    crypto::create_settlement_token(
+        bet_id,
+        user_address,
+        currency,
+        max_payout,
+        SETTLEMENT_TTL_SECONDS,
+    )
+    .map_err(|err| {
+        tracing::error!("[bet] settlement signing failed: {err}");
+        ledger::route_crash()
+    })
 }
 
 /// `tierOf(user_balances.user_address = key)`: the `.single()` the TS wrapped in
@@ -252,6 +259,17 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
     }
     let plan = ledger::bet_tail(head, body)?;
 
+    // Everything settlement will need, from the server's own feed. A refusal here
+    // has moved no money. The `endTime` a classic client sends is not read.
+    let stake = ledger::exact_amount(plan.amount)
+        .ok_or_else(|| (400, ledger::error_body("Invalid bet amount")))?;
+    let frozen = settlement::freeze_bet(body, stake, ticks::buffer(), now_ms())?;
+    let terms = serde_json::to_value(&frozen.terms).map_err(|err| {
+        tracing::error!("[bet] round terms failed to serialize: {err}");
+        ledger::route_crash()
+    })?;
+    let max_payout = frozen.max_payout.to_f64().ok_or_else(ledger::route_crash)?;
+
     // Match GET /api/balance/[address]: one wallet can hold legacy rows under a
     // different address spelling (e.g. EVM casing).
     let variants = address::search_variants(user_address);
@@ -279,20 +297,14 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
     if bets::is_truthy(body.get("betRequestId")) && client_request_id.is_none() {
         tracing::warn!("[bet] rejected malformed betRequestId, deriving a server key");
     }
-    let bet_request_id = client_request_id
-        .unwrap_or_else(|| ledger::derived_bet_request_id(body.get("roundId"), &plan.user_key, now_ms()));
+    let bet_request_id = client_request_id.unwrap_or_else(|| {
+        ledger::derived_bet_request_id(body.get("roundId"), &plan.user_key, now_ms())
+    });
 
     let bet_id = ledger::build_bet_id(now_ms(), &uuid_hex12());
-    let multiplier = body.get("multiplier").and_then(ledger::number_of).unwrap_or(0.0);
-    // `Number((betAmount * multiplier).toFixed(8))`; a non-finite product is the
-    // TS RangeError, which the outer catch answers as 500.
-    let max_payout = ledger::bet_max_payout(plan.amount, multiplier).ok_or_else(ledger::route_crash)?;
     // Signed before the deduction so it can be persisted with the lock row and
     // replayed verbatim when the same request arrives twice.
     let settlement_token = mint_settlement(&bet_id, &ledger_user_key, &plan.currency, max_payout)?;
-    // Click-time round end: epoch ms or an ISO string, `null` when neither.
-    let end_time = ledger::bet_end_time(body.get("endTime"))?;
-    let end_time_value = end_time.map(Value::String).unwrap_or(Value::Null);
 
     // ── Lock-first, single-transaction bet placement ─────────────────────────
     // place_bet_locked inserts the bet_lock row (unique on idempotency_key),
@@ -306,9 +318,19 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
             ("p_currency", &Value::String(plan.currency.clone())),
             ("p_idempotency_key", &Value::String(bet_request_id.clone())),
             ("p_bet_id", &Value::String(bet_id.clone())),
-            ("p_max_payout", &Value::from(max_payout)),
-            ("p_end_time", &end_time_value),
-            ("p_settlement_token", &Value::String(settlement_token.clone())),
+            (
+                "p_max_payout",
+                &Value::String(frozen.max_payout.to_string()),
+            ),
+            (
+                "p_end_time",
+                &Value::String(settlement::end_time_iso(&frozen)),
+            ),
+            (
+                "p_settlement_token",
+                &Value::String(settlement_token.clone()),
+            ),
+            ("p_round", &terms),
         ],
     )
     .await
@@ -317,6 +339,7 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
         (503, ledger::error_body("Service unavailable"))
     })?;
 
+    let round = result.get("round");
     match ledger::bet_rpc_decision(&result, &ledger_user_key, &plan.currency) {
         // Never deduct twice. Replay the original response when the first attempt
         // got far enough to sign one.
@@ -324,21 +347,30 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
             tracing::warn!("[bet] duplicate request replayed: {bet_request_id}");
             // Re-sign so a retried request still has a settlement window; the bet
             // row can only be claimed once, so this cannot double-pay.
-            let token = mint_settlement(&mint.bet_id, &mint.user_address, &mint.currency, mint.max_payout)?;
+            let token = mint_settlement(
+                &mint.bet_id,
+                &mint.user_address,
+                &mint.currency,
+                mint.max_payout,
+            )?;
             Ok(ledger::bet_success_body(
                 new_balance_value(&result),
                 &mint.bet_id,
                 &token,
                 true,
+                round,
             ))
         }
         ledger::BetRpcDecision::ReplayStored { bet_id, token, .. } => {
-            tracing::warn!("[bet] duplicate request replayed with the stored token: {bet_request_id}");
+            tracing::warn!(
+                "[bet] duplicate request replayed with the stored token: {bet_request_id}"
+            );
             Ok(ledger::bet_success_body(
                 new_balance_value(&result),
                 &bet_id,
                 &token,
                 true,
+                round,
             ))
         }
         ledger::BetRpcDecision::Conflict { body: error } => {
@@ -347,18 +379,29 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
         }
         // Fail closed on anything that is not an explicit, well-formed success: an
         // ambiguous lock/deduction outcome must never mint a payout token.
-        ledger::BetRpcDecision::FailClosed { status, body: error } => {
+        ledger::BetRpcDecision::FailClosed {
+            status,
+            body: error,
+        } => {
             tracing::error!(
                 "[bet] bet not placed (fail closed): {}",
-                error.get("error").and_then(|v| v.as_str()).unwrap_or("malformed RPC result")
+                error
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("malformed RPC result")
             );
             Err((status, error))
         }
-        ledger::BetRpcDecision::Success { new_balance, bet_id, token } => Ok(ledger::bet_success_body(
+        ledger::BetRpcDecision::Success {
+            new_balance,
+            bet_id,
+            token,
+        } => Ok(ledger::bet_success_body(
             bets::js_num(new_balance),
             &bet_id,
             &token,
             false,
+            round,
         )),
     }
 }
@@ -372,9 +415,20 @@ async fn deposit(headers: HeaderMap, raw: Bytes) -> Response {
         Ok(body) => body,
         Err(response) => return response,
     };
-    match deposit_run(&body).await {
-        Ok(body) => Json(body).into_response(),
-        Err(rejection) => reject(rejection),
+    // Its own task: from the lock on, the fee transfer can outlast the client, and
+    // a dropped future would leave the tx hash burned with nothing credited.
+    let hold = eth::hold_payout();
+    let run = tokio::spawn(async move {
+        let _hold = hold;
+        deposit_run(&body).await
+    });
+    match run.await {
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(rejection)) => reject(rejection),
+        Err(panic) => {
+            tracing::error!("[deposit] task failed: {panic}");
+            reject(ledger::deposit_unavailable())
+        }
     }
 }
 
@@ -398,10 +452,14 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
     let deposit_user_key = address::canonical(user_address);
     let tier = tier_for(&deposit_user_key).await;
 
-    let (fee_amount, net_deposit_amount) = ledger::deposit_net(head.amount, tier);
-    if !(net_deposit_amount > 0.0) {
-        return Err(ledger::deposit_net_rejection(ledger::fee_percent_label(tier)));
-    }
+    let split = ledger::deposit_net(head.amount, tier);
+    let Some((fee_amount, net_deposit_amount)) = split.filter(|(_, net)| *net > Decimal::ZERO)
+    else {
+        return Err(ledger::deposit_net_rejection(ledger::fee_percent_label(
+            tier,
+        )));
+    };
+    let net_deposit_text = Value::String(net_deposit_amount.to_string());
 
     // Verify the transfer on-chain before crediting. The requirement is the
     // claimed amount in base units rounded UP, so the ledger can never credit
@@ -413,7 +471,8 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
         &ledger::deposit_required_amount_string(head.amount),
         ledger::USDC_DECIMALS,
     )
-    .await {
+    .await
+    {
         Ok(verification) => verification,
         Err((failure, message)) => {
             let reason = failure_reason(&failure);
@@ -422,7 +481,8 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
                 // invalid deposit: the caller has a real transaction and will
                 // retry with the same hash.
                 tracing::warn!("[deposit] on-chain verification pending, retryable: {reason}");
-                let confirmations = if matches!(failure, DepositFailure::InsufficientConfirmations) {
+                let confirmations = if matches!(failure, DepositFailure::InsufficientConfirmations)
+                {
                     confirmations_from_message(&message)
                 } else {
                     None
@@ -446,7 +506,7 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
         ("transaction_hash", Value::String(tx_hash.clone())),
         ("user_address", Value::String(deposit_user_key.clone())),
         ("currency", Value::String(currency.clone())),
-        ("amount", Value::from(net_deposit_amount)),
+        ("amount", net_deposit_text.clone()),
     ] {
         let ty = column_type("deposit_locks", name).await.map_err(|err| {
             tracing::error!("[deposit] deposit lock column unavailable: {err}");
@@ -473,7 +533,8 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
     // the dedicated collector wallet. A failure here must NOT block the user's
     // deposit, so it is logged and the deposit proceeds without a fee tx.
     let fee_tx = collect_platform_fee(&currency, fee_amount).await;
-    let combined_tx_hash = ledger::combined_tx_hash(&Value::String(tx_hash.clone()), fee_tx.as_deref());
+    let combined_tx_hash =
+        ledger::combined_tx_hash(&Value::String(tx_hash.clone()), fee_tx.as_deref());
 
     // Credit only into the address the on-chain Transfer was attributed to.
     let user_key = address::canonical(if verification.payer_address.is_empty() {
@@ -487,9 +548,12 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
         "update_balance_for_deposit",
         &[
             ("p_user_address", &Value::String(user_key.clone())),
-            ("p_deposit_amount", &Value::from(net_deposit_amount)),
+            ("p_deposit_amount", &net_deposit_text),
             ("p_currency", &Value::String(currency.clone())),
-            ("p_transaction_hash", &Value::String(combined_tx_hash.clone())),
+            (
+                "p_transaction_hash",
+                &Value::String(combined_tx_hash.clone()),
+            ),
         ],
     )
     .await;
@@ -526,8 +590,10 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
 
     // Log the platform fee so the admin dashboard can track per-wallet fee
     // totals. Non-blocking — a fee logging failure must never break the deposit.
-    if fee_amount > 0.0 {
-        if let Err(err) = log_platform_fee(&user_key, &currency, fee_amount, &combined_tx_hash).await {
+    if fee_amount > Decimal::ZERO {
+        if let Err(err) =
+            log_platform_fee(&user_key, &currency, fee_amount, &combined_tx_hash).await
+        {
             tracing::warn!("[deposit] fee log failed (non-blocking): {err}");
         }
     }
@@ -536,8 +602,8 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
     // fee, and when the ledger credited it. Never the client's own recomputation.
     Ok(ledger::deposit_success_body(
         ledger::parse_float_of(result.get("new_balance")),
-        fee_amount,
-        net_deposit_amount,
+        fee_amount.to_f64().unwrap_or(f64::NAN),
+        net_deposit_amount.to_f64().unwrap_or(f64::NAN),
         &iso_ms(now_ms()),
     ))
 }
@@ -545,8 +611,9 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
 /// `collectPlatformFeeFromTreasury`: the treasury -> collector-wallet transfer for
 /// `fee_amount`. `None` is the TS `null` (no fee, no configured wallet, or a
 /// transfer that threw) and never blocks the deposit.
-async fn collect_platform_fee(currency: &str, fee_amount: f64) -> Option<String> {
-    if !(fee_amount > 0.0) {
+async fn collect_platform_fee(currency: &str, fee_amount: Decimal) -> Option<String> {
+    let fee_units = ledger::floor_to_token(fee_amount);
+    if fee_units <= Decimal::ZERO {
         return None;
     }
     // `getPlatformFeeWalletAddress`: only USDC has a collector wallet. Every
@@ -558,12 +625,12 @@ async fn collect_platform_fee(currency: &str, fee_amount: f64) -> Option<String>
         None
     };
     let Some(fee_wallet) = fee_wallet else {
-        tracing::warn!("[platformFee] Fee wallet not configured for {currency}. Skipping fee collection.");
+        tracing::warn!(
+            "[platformFee] Fee wallet not configured for {currency}. Skipping fee collection."
+        );
         return None;
     };
 
-    // `ethers.parseUnits(String(feeAmount), 6)`: a notation ethers rejects is the
-    // throw the TS caught.
     let treasury = match eth::Treasury::from_config() {
         Ok(treasury) => treasury,
         Err(err) => {
@@ -571,7 +638,7 @@ async fn collect_platform_fee(currency: &str, fee_amount: f64) -> Option<String>
             return None;
         }
     };
-    let value = match eth::parse_units(&fee_amount.to_string(), ledger::USDC_DECIMALS) {
+    let value = match eth::parse_units(&fee_units.to_string(), ledger::USDC_DECIMALS) {
         Ok(value) => value,
         Err(err) => {
             tracing::error!("[deposit] Fee collection failed (non-blocking): {err}");
@@ -592,7 +659,7 @@ async fn collect_platform_fee(currency: &str, fee_amount: f64) -> Option<String>
 async fn log_platform_fee(
     user_key: &str,
     currency: &str,
-    fee_amount: f64,
+    fee_amount: Decimal,
     combined_tx_hash: &str,
 ) -> Result<(), ApiError> {
     let mut binds = Binds::new();
@@ -602,7 +669,7 @@ async fn log_platform_fee(
         ("user_address", Value::String(user_key.to_string())),
         ("currency", Value::String(currency.to_string())),
         ("operation_type", Value::String("platform_fee".to_string())),
-        ("amount", Value::from(fee_amount)),
+        ("amount", Value::String(fee_amount.to_string())),
         (
             "transaction_hash",
             Value::String(format!("fee:deposit:{combined_tx_hash}")),
@@ -653,102 +720,51 @@ async fn win(headers: HeaderMap, raw: Bytes) -> Response {
     }
 }
 
+/// Asks for the result of a bet the caller holds the token for. The token is
+/// required, and proves only that: the outcome and the money are computed by
+/// `settle_round`, and nothing in this body but the bet id reaches it.
 async fn win_run(body: &Value) -> Result<Value, ledger::Rejection> {
-    let request = ledger::win_head(body, ALLOW_TEST_BYPASS)?;
+    let request = ledger::win_head(body)?;
     let user_address = request.user_address;
 
     if !address::is_address(user_address) {
         return Err((400, ledger::error_body("Invalid wallet address format")));
     }
-
-    // The win amount is validated *before* the ban probe in the TS, while
-    // `win_after_ban` bundles it with the currency gate that belongs after it.
-    // This inline gate reproduces the order; `win_after_ban` repeats the same
-    // check below and cannot disagree with it.
-    let win_amount = ledger::number_of(request.win_amount);
-    let is_real_number = matches!(request.win_amount, Value::Number(_));
-    if !win_amount.map(|amount| amount > 0.0 && amount.is_finite()).unwrap_or(false) || !is_real_number
-    {
-        return Err((400, ledger::error_body("Win amount must be greater than zero")));
-    }
-
     if is_globally_banned(user_address).await {
         return Err(ledger::banned_rejection());
     }
 
     let user_key = address::canonical(user_address);
     let currency = ledger::win_after_ban(&request)?;
-    let win_amount_value = win_amount.unwrap_or(0.0);
 
-    // The payout is guarded by the HMAC settlement token the bet route signed:
-    // bet id, address, currency and the payout ceiling, all read from the payload.
-    if bets::is_truthy(Some(&request.settlement_token)) {
-        let Some(token) = request.settlement_token.as_str() else {
-            // `token.split('.')` on a non-string throws in the TS, and the outer
-            // catch answers the generic 500.
-            return Err(ledger::route_crash());
-        };
-        let payload = crypto::verify_settlement_token(Some(token));
-        if payload.is_none() {
-            return Err((401, ledger::error_body("Invalid settlement token")));
-        }
-        if let Some(rejection) = ledger::win_token_failure(
-            payload.as_ref(),
-            request.bet_id,
-            &user_key,
-            &currency,
-            win_amount_value,
-        ) {
-            return Err(rejection);
-        }
+    let Some(token) = request.settlement_token.as_str() else {
+        // `token.split('.')` on a non-string throws in the TS, and the outer
+        // catch answers the generic 500.
+        return Err(ledger::route_crash());
+    };
+    let payload = crypto::verify_settlement_token(Some(token));
+    if payload.is_none() {
+        return Err((401, ledger::error_body("Invalid settlement token")));
+    }
+    if let Some(rejection) =
+        ledger::win_token_failure(payload.as_ref(), request.bet_id, &user_key, &currency)
+    {
+        return Err(rejection);
     }
 
-    // ── Atomic payout: lock row + bet claim + credit in one transaction ──
-    // Nothing here reads-then-writes: a concurrent retry loses on either the
-    // unique payout_lock index or the consumed_at UPDATE, and credits nothing.
-    let result = match db::call_rpc(
-        "settle_bet_payout",
-        &[
-            ("p_bet_id", request.bet_id),
-            ("p_user_address", &Value::String(user_key.clone())),
-            ("p_payout_amount", request.win_amount),
-            ("p_currency", &Value::String(currency.clone())),
-        ],
-    )
-    .await
-    {
-        Err(err) => {
-            // An aborted call carries the PL/pgSQL exception text; the three
-            // `strike_*` exceptions are the ledger refusing this payout by name.
-            let message = database_error_message(&err);
-            if let Some(rejection) = ledger::win_map_settle_error(&message) {
-                tracing::error!("[balance/win] payout refused: {message}");
-                return Err(rejection);
-            }
-            tracing::error!("[balance/win] database error while settling payout: {err}");
-            return Err(ledger::win_unavailable());
-        }
-        Ok(result) => result,
-    };
-
     let bet_id = bets::value_to_string(request.bet_id);
-    match ledger::win_rpc_decision(&result, &bet_id, win_amount_value) {
-        // The first attempt credited this bet — a retry (or a concurrent
-        // duplicate POST) is the same end state for the player. Answer 200 with
-        // duplicate: true so clients treat it as success and refresh the balance,
-        // never as an error they would "retry" again.
-        ledger::WinRpcDecision::Duplicate(body) => {
-            tracing::warn!("[balance/win] duplicate payout acknowledged as success for betId={bet_id}");
-            Ok(body)
+    let database = db::db().await.map_err(|err| {
+        tracing::error!("[balance/win] database unavailable: {err}");
+        ledger::win_unavailable()
+    })?;
+    match settlement::settle(database, &bet_id, "claim", now_ms()).await {
+        Ok(Settled::Done(result)) => Ok(ledger::win_body(&result, &bet_id)),
+        Ok(Settled::Open { end_ms }) => Err(ledger::win_round_open(end_ms)),
+        Ok(Settled::Unknown) => Err(ledger::win_unknown_bet()),
+        Err(err) => {
+            tracing::error!("[balance/win] database error while settling: {err}");
+            Err(ledger::win_unavailable())
         }
-        ledger::WinRpcDecision::FailClosed { status, body: error } => {
-            tracing::error!(
-                "[balance/win] payout not credited (fail closed): {}",
-                error.get("error").and_then(|v| v.as_str()).unwrap_or("malformed RPC result")
-            );
-            Err((status, error))
-        }
-        ledger::WinRpcDecision::Success(body) => Ok(body),
     }
 }
 
@@ -791,7 +807,9 @@ async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
         }
         // A `signedAt` that is not a number is JS `NaN`, and every comparison
         // against NaN is false: expired.
-        let signed_at_ms = signed_at.and_then(ledger::number_of).filter(|value| value.is_finite());
+        let signed_at_ms = signed_at
+            .and_then(ledger::number_of)
+            .filter(|value| value.is_finite());
         match signed_at_ms {
             Some(ms) if crypto::is_authorization_fresh(ms as i64) => {}
             _ => return Err(ledger::withdraw_expired()),
@@ -809,10 +827,11 @@ async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
         let signature_text = signature.and_then(Value::as_str);
         // `ethers.verifyMessage` throws on a signature it cannot parse, and the
         // outer catch answers the generic 500.
-        let recovered = match signature_text.and_then(|sig| eth::recover_personal_signer(&message, sig)) {
-            Some(recovered) => recovered,
-            None => return Err(ledger::route_crash()),
-        };
+        let recovered =
+            match signature_text.and_then(|sig| eth::recover_personal_signer(&message, sig)) {
+                Some(recovered) => recovered,
+                None => return Err(ledger::route_crash()),
+            };
         if address::canonical(&recovered) != address::canonical(user_address) {
             return Err(ledger::withdraw_signature_mismatch());
         }
@@ -832,220 +851,57 @@ async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
             ledger::WithdrawRows::Reject(rejection) => return Err(rejection),
         };
 
-    // ── Signed-intent replay ─────────────────────────────────────────────────
-    // The signature is a unique nonce for one (address, amount, signedAt). If a
-    // row already exists for it, this POST is a retry of a request the player
-    // already made (double-click, refresh-then-resend, flaky network after the
-    // row landed), so replay the original instead of queueing a second payout.
-    if bets::is_truthy(signature) {
-        let existing = withdrawal_by_signature(signature.and_then(Value::as_str).unwrap_or_default()).await;
-        if let Some(existing) = existing {
-            tracing::warn!(
-                "[withdraw] replaying existing withdrawal request {} for a repeated signature",
-                existing.get("id").map(ledger::js_to_string).unwrap_or_default()
-            );
-            return Ok(ledger::withdraw_replay_body(&existing, &balance));
-        }
-    }
-
-    // ── Withdrawal cap: max payout = total_deposited × 1.08 ──
-    // Ledger totals accumulate in exact base units (6 decimals). A row the
-    // converter cannot read makes the whole comparison fail closed.
-    let deposits = audit_amounts(&variants, &head.currency, "deposit").await;
-    let withdrawn = audit_amounts(&variants, &head.currency, "withdrawal").await;
-    let pending = pending_request_amounts(&variants, &head.currency).await;
-    ledger::withdraw_cap_check(head.amount, &deposits, &withdrawn, &pending, &head.currency)?;
-
-    // Count ALL completed + pending withdrawals for this wallet. Completed ones
-    // are tracked in balance_audit_log (operation_type='withdrawal'), pending ones
-    // in withdrawal_requests with status='pending'. Intentionally across ALL
-    // currencies/chains — abuse detection is global.
-    let withdrawal_count =
-        audit_withdrawal_count(&variants).await + pending_withdrawal_count(&variants).await;
-    let is_exempt = ledger::frequency_review_exempt(user_address, &config().withdrawal_frequency_exempt);
-    let triggers_frequency_review = ledger::frequency_review_triggered(is_exempt, withdrawal_count);
-
-    // 2. Resolve user tier from DB — never trust a client-supplied value.
-    let tier = tier_for(&db_address).await;
-    let (fee_amount, net_withdraw_amount) = ledger::withdraw_net(head.amount_num, tier);
-    if !(net_withdraw_amount > 0.0) {
-        return Err(ledger::withdraw_net_rejection(ledger::fee_percent_label(tier)));
-    }
-
-    let request_id = insert_withdrawal_request(WithdrawalInsert {
-        user_address: address::canonical(user_address),
-        currency: head.currency.clone(),
-        amount: head.amount.clone(),
-        fee_amount,
-        net_amount: net_withdraw_amount,
-        signature: signature.cloned().unwrap_or(Value::Null),
-        signed_at: signed_at.cloned().unwrap_or(Value::Null),
-        decided_by: if triggers_frequency_review {
-            // Stamp the reason so the dashboard can distinguish security/manual
-            // review cases from an ordinary queue entry.
-            Value::String(ledger::frequency_review_stamp(withdrawal_count))
-        } else {
-            Value::Null
+    // Replay check, cap, frequency count, tier and insert: one transaction. Each
+    // request sees every pending row, and a signed intent can only ever be one row.
+    let queued = withdrawals::queue(
+        db::db().await.map_err(|err| {
+            tracing::error!("[withdraw] database unavailable: {err}");
+            ledger::withdraw_insert_failed()
+        })?,
+        withdrawals::QueueRequest {
+            user_key: address::canonical(user_address),
+            variants,
+            ledger_address: db_address,
+            currency: head.currency.clone(),
+            amount: head.amount.clone(),
+            amount_num: head.amount_num,
+            signature: signature.cloned().unwrap_or(Value::Null),
+            signed_at: signed_at.cloned().unwrap_or(Value::Null),
+            frequency_exempt: ledger::frequency_review_exempt(
+                user_address,
+                &config().withdrawal_frequency_exempt,
+            ),
         },
-    })
+    )
     .await?;
 
-    // The ledger has only queued the payout — the money moves when an admin accept
-    // route re-verifies the intent and pays. Never report more than that.
-    Ok(ledger::withdraw_success_body(
-        request_id,
-        &balance,
-        fee_amount,
-        net_withdraw_amount,
-        &iso_ms(now_ms()),
-        triggers_frequency_review,
-        withdrawal_count,
-    ))
-}
-
-/// `withdrawal_requests` rows already carrying this exact signature. A failed
-/// lookup means "no existing row": the TS read `replayRows?.[0]` and moved on.
-async fn withdrawal_by_signature(signature: &str) -> Option<Value> {
-    let bind = Value::String(signature.to_string());
-    sql::fetch_one(
-        "SELECT id, status, amount, fee_amount, net_amount FROM withdrawal_requests \
-          WHERE signature = CAST($1 AS text) LIMIT 1",
-        &[("text", &bind)],
-    )
-    .await
-    .inspect_err(|err| tracing::warn!("[withdraw] signature replay lookup failed: {err}"))
-    .ok()
-    .flatten()
-}
-
-/// One `SELECT amount` for the cap inputs. The TS `Promise.all` kept going when a
-/// query errored (`data ?? []`), so an error contributes nothing to the totals
-/// rather than refusing the withdrawal.
-async fn audit_amounts(variants: &[String], currency: &str, operation: &str) -> Vec<Value> {
-    let mut binds = Binds::new();
-    let operation_bind = binds.push_static("text", Value::String(operation.to_string()));
-    let currency_bind = binds.push_static("text", Value::String(currency.to_string()));
-    let in_list = bind_variants(&mut binds, variants);
-    let statement = format!(
-        "SELECT amount FROM balance_audit_log \
-          WHERE operation_type = {operation_bind} AND currency = {currency_bind} \
-            AND user_address IN ({in_list})"
-    );
-    fetch_or_empty(&statement, &binds).await
-}
-
-/// The pending/approved request amounts the cap also counts. `approved` is not a
-/// status the queue can hold (the CHECK allows pending/accepted/rejected), so it
-/// matches nothing — kept because the TS asked for it.
-async fn pending_request_amounts(variants: &[String], currency: &str) -> Vec<Value> {
-    let mut binds = Binds::new();
-    let currency_bind = binds.push_static("text", Value::String(currency.to_string()));
-    let pending = binds.push_static("text", Value::String("pending".to_string()));
-    let approved = binds.push_static("text", Value::String("approved".to_string()));
-    let in_list = bind_variants(&mut binds, variants);
-    let statement = format!(
-        "SELECT amount FROM withdrawal_requests \
-          WHERE currency = {currency_bind} AND status IN ({pending}, {approved}) \
-            AND user_address IN ({in_list})"
-    );
-    fetch_or_empty(&statement, &binds).await
-}
-
-async fn fetch_or_empty(statement: &str, binds: &Binds) -> Vec<Value> {
-    sql::fetch(statement, &binds.refs())
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("[withdraw] cap input query failed: {err}");
-            Vec::new()
-        })
-}
-
-/// `select('id', { count: 'exact', head: true })`: the count alone, with the same
-/// "an error is zero" tolerance the TS had.
-async fn audit_withdrawal_count(variants: &[String]) -> i64 {
-    let mut binds = Binds::new();
-    let operation_bind = binds.push_static("text", Value::String("withdrawal".to_string()));
-    let in_list = bind_variants(&mut binds, variants);
-    let statement = format!(
-        "SELECT count(*) FROM balance_audit_log \
-          WHERE operation_type = {operation_bind} AND user_address IN ({in_list})"
-    );
-    count_or_zero(&statement, &binds).await
-}
-
-async fn pending_withdrawal_count(variants: &[String]) -> i64 {
-    let mut binds = Binds::new();
-    let status_bind = binds.push_static("text", Value::String("pending".to_string()));
-    let in_list = bind_variants(&mut binds, variants);
-    let statement = format!(
-        "SELECT count(*) FROM withdrawal_requests \
-          WHERE status = {status_bind} AND user_address IN ({in_list})"
-    );
-    count_or_zero(&statement, &binds).await
-}
-
-async fn count_or_zero(statement: &str, binds: &Binds) -> i64 {
-    let scalar = sql::fetch_scalar(statement, &binds.refs())
-        .await
-        .unwrap_or(Value::Null);
-    scalar.as_i64().unwrap_or(0)
-}
-
-struct WithdrawalInsert {
-    user_address: String,
-    currency: String,
-    amount: Value,
-    fee_amount: f64,
-    net_amount: f64,
-    signature: Value,
-    signed_at: Value,
-    decided_by: Value,
-}
-
-/// The `withdrawal_requests` insert with `.select('*').single()`: the queue row is
-/// created and its id is what the response reports. Only `id` is read back — every
-/// other field in the response was computed server-side above.
-async fn insert_withdrawal_request(
-    request: WithdrawalInsert,
-) -> Result<Value, ledger::Rejection> {
-    // `signature: authorizationSignature || null`, `signed_at: signedAt || null`.
-    let or_null = |value: Value| if bets::is_truthy(Some(&value)) { value } else { Value::Null };
-
-    let values: [(&str, Value); 9] = [
-        ("user_address", Value::String(request.user_address)),
-        ("currency", Value::String(request.currency)),
-        ("amount", request.amount),
-        ("fee_amount", Value::from(request.fee_amount)),
-        ("net_amount", Value::from(request.net_amount)),
-        ("signature", or_null(request.signature)),
-        ("signed_at", or_null(request.signed_at)),
-        ("status", Value::String("pending".to_string())),
-        ("decided_by", request.decided_by),
-    ];
-
-    let mut binds = Binds::new();
-    let mut names = Vec::new();
-    let mut placeholders = Vec::new();
-    for (name, value) in values {
-        let ty = column_type("withdrawal_requests", name).await.map_err(|err| {
-            tracing::error!("[withdraw] unknown withdrawal_requests column {name}: {err}");
-            ledger::withdraw_insert_failed()
-        })?;
-        names.push(format!("\"{name}\""));
-        placeholders.push(binds.push(ty, value));
+    match queued {
+        withdrawals::Queued::Replay(existing) => {
+            tracing::warn!(
+                "[withdraw] replaying existing withdrawal request {} for a repeated intent",
+                existing
+                    .get("id")
+                    .map(ledger::js_to_string)
+                    .unwrap_or_default()
+            );
+            Ok(ledger::withdraw_replay_body(&existing, &balance))
+        }
+        // The ledger has only queued the payout — the money moves when an admin
+        // accept route re-verifies the intent and pays. Never report more than that.
+        withdrawals::Queued::Created {
+            id,
+            fee_amount,
+            net_amount,
+            frequency_review,
+            withdrawal_count,
+        } => Ok(ledger::withdraw_success_body(
+            id,
+            &balance,
+            fee_amount,
+            net_amount,
+            &iso_ms(now_ms()),
+            frequency_review,
+            withdrawal_count,
+        )),
     }
-
-    let statement = format!(
-        "INSERT INTO withdrawal_requests ({}) VALUES ({}) RETURNING id",
-        names.join(", "),
-        placeholders.join(", ")
-    );
-    let row = sql::fetch_one(&statement, &binds.refs())
-        .await
-        .map_err(|err| {
-            tracing::error!("[withdraw] failed to create withdrawal request: {err}");
-            ledger::withdraw_insert_failed()
-        })?
-        .ok_or_else(ledger::withdraw_insert_failed)?;
-    Ok(row.get("id").cloned().unwrap_or(Value::Null))
 }

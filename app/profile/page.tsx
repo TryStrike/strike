@@ -1,13 +1,53 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+/**
+ * /profile — the player hub.
+ *
+ * Three server-backed blocks, each with its own loading / empty / failed /
+ * unauthorised state so one dead read never degrades the whole page:
+ *
+ *   identity   user_profiles username (registry) + derived avatar
+ *   treasury   house credits + tier   (GET /api/balance/[address])
+ *   record     win rate, net PnL, streaks, sparkline (GET /api/bets/stats)
+ *   ledger     last settled rounds   (GET /api/bets/history)
+ *
+ * Identity is always keyed by the CANONICAL address (lowercase for 0x…), the
+ * same spelling the ledger rows use, so one wallet can never accumulate two
+ * profile rows. Usernames are rendered as text only. The full wallet address is
+ * never on screen: it is shortened by lib/utils/address and leaves through an
+ * explicit copy action (components/profile/AddressChip).
+ */
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
-import { useStore, useHouseBalance, useWalletAddress, useIsConnected, useUserTier } from '@/lib/store';
 import { useShallow } from 'zustand/react/shallow';
+import { useStore, useHouseBalance, useWalletAddress, useIsConnected, useUserTier } from '@/lib/store';
 import { useToast } from '@/lib/hooks/useToast';
 import { openReferralShareOnX, referralLandingUrl } from '@/lib/referral/shareOnX';
-import { Wallet, User as UserIcon, ClockCounterClockwise as History, Link as LinkIcon, Check, PencilSimple as Edit2, Lightning as Zap, Shield, Crown, SquaresFour as LayoutGrid, Pulse as Activity, ShieldCheck, CaretRight as ChevronRight } from '@phosphor-icons/react';
+import { canonicalHouseUserAddress } from '@/lib/wallet/canonicalAddress';
+import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
+import { WalletConnect } from '@/components/wallet';
+import { identityDisplayState, prepareUsernameWrite, readProfile, type ProfileRead } from '@/lib/profile/identity';
+import PerformanceSection from '@/components/profile/PerformanceSection';
+import IdentityPanel from '@/components/profile/IdentityPanel';
+import BalanceTierPanel from '@/components/profile/BalanceTierPanel';
+import LedgerPreview from '@/components/profile/LedgerPreview';
+import { AddressChip } from '@/components/profile/AddressChip';
+import {
+    User as UserIcon,
+    Link as LinkIcon,
+    Check,
+    Lightning as Zap,
+    Shield,
+    Crown,
+    Pulse as Activity,
+    ShieldCheck,
+    CaretRight as ChevronRight,
+    WarningCircle,
+    Wallet,
+    ClockCounterClockwise as History,
+} from '@phosphor-icons/react';
 
 const TIER_DATA = [
     {
@@ -51,7 +91,7 @@ const TIER_DATA = [
         withdrawal: 'Instant',
         fee: '8%',
         requirement: '$500',
-    }
+    },
 ];
 
 export default function ProfilePage() {
@@ -60,91 +100,158 @@ export default function ProfilePage() {
     const houseBalance = useHouseBalance();
     const userTier = useUserTier();
     const {
-        username,
-        updateUsername,
-        recentTrades,
-        isLoadingTrades,
+        isUpdatingUsername,
         referralCode,
         referralCount,
+        referralLoadError,
+        referralsLoading,
         accessCode,
-        fetchRecentTrades,
-        fetchReferralInfo,
-        demoBalance,
         accountType,
+        demoBalance,
+        balanceError,
+        balanceLoading,
         fetchBalance,
-    } = useStore(useShallow((s) => ({ username: s.username, updateUsername: s.updateUsername, recentTrades: s.recentTrades, isLoadingTrades: s.isLoadingTrades, referralCode: s.referralCode, referralCount: s.referralCount, accessCode: s.accessCode, fetchRecentTrades: s.fetchRecentTrades, fetchReferralInfo: s.fetchReferralInfo, demoBalance: s.demoBalance, accountType: s.accountType, fetchBalance: s.fetchBalance })));
+        fetchReferralInfo,
+        updateUsername,
+    } = useStore(
+        useShallow((s) => ({
+            isUpdatingUsername: s.isUpdatingUsername,
+            referralCode: s.referralCode,
+            referralCount: s.referralCount,
+            referralLoadError: s.referralLoadError,
+            referralsLoading: s.isLoadingReferrals,
+            accessCode: s.accessCode,
+            accountType: s.accountType,
+            demoBalance: s.demoBalance,
+            balanceError: s.error,
+            balanceLoading: s.isLoading,
+            fetchBalance: s.fetchBalance,
+            fetchReferralInfo: s.fetchReferralInfo,
+            updateUsername: s.updateUsername,
+        })),
+    );
 
-    const treasuryAmount = accountType === 'demo' ? demoBalance : houseBalance;
+    /** The ONE identity key: canonical, so the registry cannot fork a wallet. */
+    const identityKey = useMemo(() => (address ? canonicalHouseUserAddress(address) : null), [address]);
 
-    // Sync house credits from API on profile (trade page does this; /profile did not).
+    // ── identity ──────────────────────────────────────────────────────────────
+    const [profileRead, setProfileRead] = useState<ProfileRead | null>(null);
+    const [profileLoading, setProfileLoading] = useState(false);
+    const [profileNonce, setProfileNonce] = useState(0);
+
     useEffect(() => {
-        if (isConnected && address && accountType === 'real') {
-            fetchBalance(address);
+        if (!identityKey) {
+            setProfileRead(null);
+            setProfileLoading(false);
+            return;
         }
-    }, [isConnected, address, accountType, fetchBalance]);
+        let cancelled = false;
+        setProfileLoading(true);
+        setProfileRead(null);
+        void readProfile(identityKey).then((read) => {
+            if (cancelled) return;
+            setProfileRead(read);
+            setProfileLoading(false);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [identityKey, profileNonce]);
 
-    // Fetch recent trades + referral row (same auth headers as /api/referral)
+    const identityState = identityDisplayState(profileRead, profileLoading);
+    const storedUsername = profileRead?.kind === 'found' ? profileRead.username : null;
+
+    const handleSaveUsername = useCallback(
+        async (stored: string) => {
+            // Re-check the rules + identity key at the write site: a scripted
+            // call must not be able to store what the input would have refused.
+            const intent = prepareUsernameWrite(identityKey, stored);
+            if (!intent.ok) return { outcome: 'rejected' as const, message: intent.error.message };
+            if (accountType === 'demo') {
+                return { outcome: 'error' as const, message: 'Practice wallets cannot register a public name.' };
+            }
+            // Existing app write path (store -> profileSlice -> POST /api/db).
+            const ok = await updateUsername(intent.address, intent.stored);
+            if (!ok) {
+                return {
+                    outcome: 'rejected' as const,
+                    message: 'That name is already claimed, or the registry refused it.',
+                };
+            }
+            setProfileRead({ kind: 'found', username: intent.stored });
+            return { outcome: 'ok' as const, message: null };
+        },
+        [accountType, identityKey, updateUsername],
+    );
+
+    // ── treasury ──────────────────────────────────────────────────────────────
+    const [balanceLoadedFor, setBalanceLoadedFor] = useState<string | null>(null);
+    const [balanceNonce, setBalanceNonce] = useState(0);
+
     useEffect(() => {
-        if (isConnected && address) {
-            fetchRecentTrades(address);
-            fetchReferralInfo(address);
-        }
-    }, [isConnected, address, fetchRecentTrades, fetchReferralInfo]);
+        if (!isConnected || !identityKey || accountType === 'demo') return;
+        let cancelled = false;
+        void Promise.resolve(fetchBalance(identityKey)).then(() => {
+            if (!cancelled) setBalanceLoadedFor(identityKey);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [isConnected, identityKey, accountType, fetchBalance, balanceNonce]);
 
-    const currentTierIndex = TIER_DATA.findIndex(t => t.id === userTier);
+    const refreshBalance = useCallback(() => setBalanceNonce((n) => n + 1), []);
+
+    // ── referrals (unchanged server path) ─────────────────────────────────────
+    useEffect(() => {
+        if (isConnected && identityKey) void fetchReferralInfo(identityKey);
+    }, [isConnected, identityKey, fetchReferralInfo]);
+
+    const [copySuccess, setCopySuccess] = useState<string | null>(null);
+    const [isTierModalOpen, setIsTierModalOpen] = useState(false);
+    const toast = useToast();
+
+    const copyReferralCode = useCallback(async () => {
+        const code = (referralCode ?? '').trim();
+        if (!code) {
+            toast.error('Referral code not ready yet');
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(code);
+            setCopySuccess('Code');
+            setTimeout(() => setCopySuccess(null), 2000);
+        } catch {
+            toast.error('Clipboard is blocked in this browser');
+        }
+    }, [referralCode, toast]);
+
+    const currentTierIndex = TIER_DATA.findIndex((t) => t.id === userTier);
     const safeTierIndex = currentTierIndex === -1 ? 0 : currentTierIndex;
     const currentTierData = TIER_DATA[safeTierIndex];
     const nextTier = TIER_DATA[safeTierIndex + 1];
 
-    const [isTierModalOpen, setIsTierModalOpen] = useState(false);
-    const [isEditing, setIsEditing] = useState(false);
-    const [newUsername, setNewUsername] = useState('');
-    const [copySuccess, setCopySuccess] = useState<string | null>(null);
-    const toast = useToast();
-
-    useEffect(() => {
-        if (username) {
-            setNewUsername(username.replace('.strike', ''));
-        }
-    }, [username]);
-
-    const handleUpdateUsername = async () => {
-        if (!address || !newUsername) return;
-        const formattedUsername = `${newUsername.toLowerCase()}.strike`;
-        const success = await updateUsername(address, formattedUsername);
-        if (success) {
-            setIsEditing(false);
-        } else {
-            alert('Username already taken or invalid.');
-        }
-    };
-
-    const copyToClipboard = (text: string, type: string) => {
-        navigator.clipboard.writeText(text);
-        setCopySuccess(type);
-        setTimeout(() => setCopySuccess(null), 2000);
-    };
-
+    // ── not connected ─────────────────────────────────────────────────────────
     if (!isConnected) {
         return (
-            <motion.div
+            <motion.main
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="min-h-screen bg-[#02040a] flex flex-col items-center justify-center p-6 text-center text-white"
+                className="flex min-h-screen flex-col items-center justify-center gap-8 bg-[#02040a] p-6 text-center text-white"
             >
-                <div className="w-20 h-20 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-center mb-8">
-                    <Wallet className="w-8 h-8 text-white/40" />
+                <div className="flex h-20 w-20 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
+                    <Wallet className="h-8 w-8 text-white/40" />
                 </div>
-                <h1 className="text-2xl font-black text-white uppercase tracking-widest mb-4">STRIKE Registry</h1>
-                <p className="text-gray-500 max-w-xs mx-auto text-[10px] font-bold uppercase tracking-[0.2em] leading-relaxed mb-8">
-                    Synchronization required. Please authorize your wallet to access neural trading identity.
-                </p>
-                <div className="w-80 h-[1px] bg-white/10" />
-            </motion.div>
+                <div className="space-y-3">
+                    <h1 className="text-2xl font-black uppercase tracking-widest">Strike Registry</h1>
+                    <p className="mx-auto max-w-xs text-[10px] font-bold uppercase leading-relaxed tracking-[0.2em] text-gray-500">
+                        A connected wallet is required to read your identity, house credits and betting record.
+                    </p>
+                </div>
+                <WalletConnect />
+                <div className="h-[1px] w-80 bg-white/10" />
+            </motion.main>
         );
     }
-
-    const shortenAddr = (addr: string) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 
     return (
         <motion.main
@@ -152,112 +259,126 @@ export default function ProfilePage() {
             animate={{ opacity: 1 }}
             className="min-h-screen bg-[#02040a] text-white selection:bg-white selection:text-black pb-20"
         >
-            {/* Header / Identity Bar */}
+            {/* Identity + treasury bar */}
             <motion.div
                 initial={{ y: -50 }}
                 animate={{ y: 0 }}
                 transition={{ duration: 0.6, ease: [0.23, 1, 0.32, 1] }}
-                className="border-b border-white/5 bg-[#050505] sticky top-0 z-40 px-6 py-5"
+                className="sticky top-0 z-40 border-b border-white/5 bg-[#050505] px-6 py-5"
             >
-                <div className="max-w-6xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-6">
-                    <div className="flex items-center gap-6">
-                        <motion.div
-                            initial={{ scale: 0.8 }}
-                            animate={{ scale: 1 }}
-                            className="w-16 h-16 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-center font-black text-2xl text-white/60"
-                        >
-                            {username ? username[0].toUpperCase() : '?'}
-                        </motion.div>
-                        <div className="space-y-1">
-                            {isEditing ? (
-                                <div className="flex items-center gap-2">
-                                    <input
-                                        type="text"
-                                        value={newUsername}
-                                        onChange={(e) => setNewUsername(e.target.value)}
-                                        className="bg-white/5 border border-white/10 rounded-lg px-3 py-1 font-bold text-lg text-white focus:outline-none focus:border-white/20"
-                                        autoFocus
-                                    />
-                                    <button onClick={handleUpdateUsername} className="p-2 bg-white text-black rounded-lg hover:bg-gray-200 transition-all">
-                                        <Check className="w-4 h-4" />
-                                    </button>
-                                    <button onClick={() => setIsEditing(false)} className="text-[10px] uppercase font-black text-white/40 hover:text-white ml-2">Cancel</button>
-                                </div>
-                            ) : (
-                                <div className="flex items-center gap-3 group">
-                                    <h1 className="text-2xl font-black tracking-tighter sm:text-3xl">
-                                        {username || 'Anonymous Node'}
-                                    </h1>
-                                    <button onClick={() => setIsEditing(true)} className="p-1.5 opacity-0 group-hover:opacity-100 bg-white/5 hover:bg-white/10 rounded-lg transition-all text-white/30 hover:text-white">
-                                        <Edit2 className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            )}
-                            <div className="flex items-center gap-3">
-                                <span className="text-[10px] font-mono text-white/40">{shortenAddr(address || '')}</span>
-                                <div className="w-1 h-1 bg-white/20 rounded-full" />
-                                <span className={`text-[9px] font-black uppercase tracking-widest ${currentTierData.color}`}>{userTier} STATUS</span>
-                            </div>
+                <div className="mx-auto flex max-w-6xl flex-col justify-between gap-6 md:flex-row md:items-center">
+                    <IdentityPanel
+                        address={address}
+                        username={storedUsername}
+                        loadedOnce={identityState !== 'loading'}
+                        nameUnavailable={identityState === 'unknown'}
+                        isSaving={isUpdatingUsername}
+                        readOnly={accountType === 'demo'}
+                        onSave={handleSaveUsername}
+                    />
+                    <div className="flex flex-col items-end gap-4 sm:flex-row sm:items-center sm:gap-4 sm:justify-end">
+                        <BalanceTierPanel
+                            isConnected={isConnected}
+                            address={address}
+                            accountType={accountType}
+                            balance={houseBalance}
+                            demoBalance={demoBalance}
+                            tier={userTier}
+                            isLoading={balanceLoading}
+                            error={balanceError}
+                            loadedOnce={balanceLoadedFor === identityKey}
+                            onRefresh={refreshBalance}
+                        />
+                        <div className="hidden h-10 w-[1px] bg-white/5 md:block" />
+                        <div className="flex flex-wrap items-center gap-2">
+                            <Link
+                                href="/history"
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-all hover:bg-white/15"
+                            >
+                                <History className="h-3.5 w-3.5" /> Bet History
+                            </Link>
+                            <Link
+                                href="/withdrawals"
+                                className="rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-white transition-all hover:bg-white/15"
+                            >
+                                Withdrawals
+                            </Link>
+                            <Link
+                                href="/referrals"
+                                className="rounded-xl bg-white px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-black transition-all hover:bg-gray-200"
+                            >
+                                Referrals
+                            </Link>
                         </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                        <div className="text-right">
-                            <p className="text-[9px] font-black uppercase tracking-[0.2em] text-white/20 mb-1">
-                                {accountType === 'demo' ? 'Practice balance' : 'House credits'}
-                            </p>
-                            <p className="text-xl font-bold font-mono">
-                                {treasuryAmount.toFixed(4)}{' '}
-                                <span className="text-xs text-white/40">USDC</span>
-                            </p>
-                            {accountType === 'demo' && (
-                                <p className="text-[8px] font-bold uppercase tracking-wider text-emerald-400/80 mt-0.5">Demo mode — not on-chain</p>
-                            )}
-                        </div>
-                        <div className="w-[1px] h-10 bg-white/5 mx-2 hidden md:block" />
-                        <Link href="/referrals" className="px-5 py-3 bg-white text-black text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-gray-200 transition-all active:scale-95 shadow-xl">
-                            Referral System
-                        </Link>
-                        <Link href="/withdrawals" className="px-5 py-3 bg-white/10 border border-white/20 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-white/15 transition-all active:scale-95">
-                            Withdrawals
-                        </Link>
                     </div>
                 </div>
             </motion.div>
 
-            <div className="max-w-6xl mx-auto px-6 py-8 space-y-12">
-                {/* Highlights Grid - Enhanced with Tier Info */}
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                    <StatCard label="Total Refs" value={referralCount} icon={UserIcon} />
-                    <StatCard label="Protocol Status" value="Online" status="emerald" icon={Activity} />
-                    <StatCard label="Region" value="Global" icon={LayoutGrid} />
-                    <StatCard label="Uptime" value="100%" icon={Zap} />
+            <div className="mx-auto max-w-6xl space-y-8 px-6 py-8">
+                {accountType === 'demo' && (
+                    <p className="flex items-center gap-2 rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.03] px-4 py-3 text-[9px] font-black uppercase tracking-widest text-emerald-400/80">
+                        <InfoDot /> Practice balance — demo bets are excluded from the official record and from payouts.
+                    </p>
+                )}
+
+                {identityState === 'unknown' && (
+                    <button
+                        type="button"
+                        onClick={() => setProfileNonce((n) => n + 1)}
+                        className="flex w-full items-center gap-2 rounded-2xl border border-rose-500/15 bg-rose-500/[0.04] px-4 py-3 text-left text-[9px] font-black uppercase tracking-widest text-rose-400 transition-colors hover:text-rose-300"
+                    >
+                        <WarningCircle className="h-4 w-4 shrink-0" />
+                        Registry read failed — your name could not be loaded. Click to retry.
+                    </button>
+                )}
+
+                {/* Compact real-state grid. Nothing here is decorative: every
+                    cell is either a server fact or an explicit unknown. */}
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                     <StatCard
-                        label="Governance"
-                        value={userTier.toUpperCase()}
-                        icon={Shield}
-                        status="emerald"
-                        clickable
+                        label="Referrals"
+                        value={
+                            referralLoadError
+                                ? 'Unavailable'
+                                : referralsLoading && !referralCode
+                                  ? '…'
+                                  : String(referralCount ?? 0)
+                        }
+                        icon={UserIcon}
+                        status={referralLoadError ? 'rose' : 'emerald'}
                         purple
-                        onClick={() => setIsTierModalOpen(true)}
                     />
+                    <StatCard
+                        label="Record Window"
+                        value={accountType === 'demo' ? 'Practice' : 'On-chain'}
+                        icon={Activity}
+                        status="emerald"
+                    />
+                    <StatCard label="Tier" value={userTier.toUpperCase()} icon={Shield} status="emerald" clickable onClick={() => setIsTierModalOpen(true)} />
                 </div>
 
-                {/* Tier Benefits */}
+                <PerformanceSection
+                    wallet={address}
+                    accountType={accountType}
+                    ensureSession={ensureBalanceSession}
+                />
+
+                {/* Tier benefits */}
                 <section className="rounded-[2rem] border border-white/10 bg-[#050505] p-6">
-                    <div className="flex items-center justify-between mb-6">
+                    <div className="mb-6 flex items-center justify-between">
                         <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-white/30">Tier Benefits</h2>
                         <button
                             onClick={() => setIsTierModalOpen(true)}
-                            className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-white/50 hover:text-white transition-colors"
+                            className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-white/50 transition-colors hover:text-white"
                         >
-                            View all tiers <ChevronRight className="w-3 h-3" />
+                            View all tiers <ChevronRight className="h-3 h-3" />
                         </button>
                     </div>
 
-                    <div className={`rounded-2xl border ${currentTierData.borderColor} ${currentTierData.bgColor} p-5 mb-4`}>
-                        <div className="flex items-center justify-between mb-4">
+                    <div className={`mb-4 rounded-2xl border ${currentTierData.borderColor} ${currentTierData.bgColor} p-5`}>
+                        <div className="mb-4 flex items-center justify-between">
                             <div className="flex items-center gap-3">
-                                <currentTierData.iconComp className={`w-5 h-5 ${currentTierData.color}`} />
+                                <currentTierData.iconComp className={`h-5 w-5 ${currentTierData.color}`} />
                                 <span className={`text-sm font-black uppercase tracking-widest ${currentTierData.color}`}>
                                     {currentTierData.name} Tier
                                 </span>
@@ -265,7 +386,7 @@ export default function ProfilePage() {
                             <span className="text-[10px] font-mono text-white/50">{currentTierData.requirement}</span>
                         </div>
 
-                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
                             <BenefitItem label="Assets" value={currentTierData.assets} />
                             <BenefitItem label="Blitz" value={currentTierData.blitz} colored />
                             <BenefitItem label="Payout" value={currentTierData.payout} colored />
@@ -275,9 +396,9 @@ export default function ProfilePage() {
                     </div>
 
                     {nextTier && (
-                        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 flex items-center justify-between">
+                        <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.02] p-4">
                             <div>
-                                <p className="text-[9px] font-black uppercase tracking-widest text-white/30 mb-1">Next Unlock</p>
+                                <p className="mb-1 text-[9px] font-black uppercase tracking-widest text-white/30">Next Unlock</p>
                                 <p className="text-sm font-bold text-white/80">
                                     Reach <span className="font-mono">{nextTier.requirement}</span> to unlock{' '}
                                     <span className={nextTier.color}>{nextTier.name}</span>
@@ -288,110 +409,77 @@ export default function ProfilePage() {
                     )}
                 </section>
 
-                {/* Bottom Bento Section */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                    {/* Trading Ledger */}
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        whileInView={{ opacity: 1, y: 0 }}
-                        viewport={{ once: true }}
-                        className="lg:col-span-7 bg-[#050505] border border-white/5 rounded-[2rem] overflow-hidden"
-                    >
-                        <div className="p-6 border-b border-white/5 flex items-center justify-between">
-                            <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-white/20 flex items-center gap-3">
-                                <History className="w-3 h-3" /> Trading Ledger
-                            </h2>
-                        </div>
+                {/* Ledger + referral sidebar */}
+                <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                    <div className="lg:col-span-7">
+                        <LedgerPreview wallet={address} ensureSession={ensureBalanceSession} />
+                    </div>
 
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-left">
-                                <thead>
-                                    <tr className="border-b border-white/5 bg-white/[0.01] text-[9px] uppercase font-black tracking-widest text-white/20">
-                                        <th className="px-6 py-4">Asset</th>
-                                        <th className="px-6 py-4">Status</th>
-                                        <th className="px-6 py-4">Amount</th>
-                                        <th className="px-6 py-4 text-right">Result</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-white/5">
-                                    {isLoadingTrades ? (
-                                        <tr><td colSpan={4} className="px-6 py-12 text-center text-[9px] uppercase font-black text-white/10 animate-pulse">Neural Link Active...</td></tr>
-                                    ) : recentTrades.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-6 py-12 text-center text-[10px] uppercase font-black text-white/10">No recent activity</td></tr>
-                                    ) : (
-                                        recentTrades.map((trade, idx) => (
-                                            <tr key={idx} className="hover:bg-white/[0.01] transition-all group">
-                                                <td className="px-6 py-4 text-xs font-bold uppercase">{trade.asset}</td>
-                                                <td className="px-6 py-4">
-                                                    <span className={`text-[7px] font-black uppercase px-2 py-0.5 rounded border ${trade.direction === 'UP' ? 'text-emerald-400 border-emerald-400/20' : 'text-rose-400 border-rose-400/20'}`}>
-                                                        {trade.direction}
-                                                    </span>
-                                                </td>
-                                                <td className="px-6 py-4 font-mono text-[10px] text-white/30">{Number(trade.amount).toFixed(2)}</td>
-                                                <td className="px-6 py-4 text-right font-black text-xs">
-                                                    <span className={trade.won ? 'text-emerald-400' : 'text-white/10'}>
-                                                        {trade.won ? `+${Number(trade.payout).toFixed(2)}` : `-${Number(trade.amount).toFixed(2)}`}
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                        ))
-                                    )}
-                                </tbody>
-                            </table>
-                        </div>
-                    </motion.div>
-
-                    {/* Sidebar Area */}
-                    <div className="lg:col-span-5 flex flex-col gap-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-6">
-                            <motion.section
-                                initial={{ opacity: 0, scale: 0.98 }}
-                                whileInView={{ opacity: 1, scale: 1 }}
-                                className="bg-[#050505] border border-white/5 rounded-[2rem] p-6 flex flex-col justify-between"
-                            >
-                                <div className="space-y-5">
-                                    <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-white/20">Node Protocol</h2>
-                                    <div className="p-4 bg-white/[0.03] border border-white/10 rounded-xl flex items-center justify-between">
-                                        <span className="font-mono font-black text-lg tracking-widest text-white/80">{referralCode || '---'}</span>
-                                        <button onClick={() => copyToClipboard(referralCode || '', 'Code')} className="text-white/20 hover:text-white transition-all">
-                                            {copySuccess === 'Code' ? <Check className="w-4 h-4 text-emerald-400" /> : <LinkIcon className="w-4 h-4" />}
-                                        </button>
-                                    </div>
+                    <div className="flex flex-col gap-6 lg:col-span-5">
+                        <section className="flex flex-col justify-between rounded-[2rem] border border-white/5 bg-[#050505] p-6">
+                            <div className="space-y-5">
+                                <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-white/20">Referral Code</h2>
+                                <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                                    <span className="font-mono text-lg font-black tracking-widest text-white/80">
+                                        {referralCode || '---'}
+                                    </span>
                                     <button
                                         type="button"
-                                        onClick={() => {
-                                            if (!referralCode?.trim()) {
-                                                toast.error('Referral code not ready yet');
-                                                return;
-                                            }
-                                            openReferralShareOnX(referralLandingUrl(referralCode));
-                                        }}
-                                        className="w-full py-4 bg-white text-black rounded-xl text-[9px] font-black uppercase tracking-[0.2em] hover:bg-gray-200 transition-all"
+                                        onClick={() => void copyReferralCode()}
+                                        aria-label="Copy referral code"
+                                        className="text-white/20 transition-all hover:text-white"
                                     >
-                                        Share Access
+                                        {copySuccess === 'Code' ? (
+                                            <Check className="h-4 h-4 text-emerald-400" />
+                                        ) : (
+                                            <LinkIcon className="h-4 h-4" />
+                                        )}
                                     </button>
                                 </div>
-                            </motion.section>
+                                {referralLoadError && (
+                                    <p className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-rose-400">
+                                        <WarningCircle className="h-3 w-3" /> {referralLoadError}
+                                    </p>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (!referralCode?.trim()) {
+                                            toast.error('Referral code not ready yet');
+                                            return;
+                                        }
+                                        openReferralShareOnX(referralLandingUrl(referralCode));
+                                    }}
+                                    className="w-full rounded-xl bg-white py-4 text-[9px] font-black uppercase tracking-[0.2em] text-black transition-all hover:bg-gray-200"
+                                >
+                                    Share Access
+                                </button>
+                            </div>
+                        </section>
 
-                            <motion.section
-                                initial={{ opacity: 0, scale: 0.98 }}
-                                whileInView={{ opacity: 1, scale: 1 }}
-                                transition={{ delay: 0.1 }}
-                                className="bg-emerald-500/[0.02] border border-emerald-500/10 rounded-[2rem] p-6 space-y-4"
-                            >
-                                <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-emerald-500/40">Security Key</h2>
-                                <div className="p-4 bg-emerald-500/5 border border-emerald-500/10 rounded-xl flex items-center justify-between">
-                                    <span className="font-mono font-black text-sm text-emerald-400 tracking-[0.2em] truncate mr-4">{accessCode || 'INITIALIZING'}</span>
-                                    <ShieldCheck className="w-5 h-5 text-emerald-400/20" />
+                        <section className="space-y-4 rounded-[2rem] border border-emerald-500/10 bg-emerald-500/[0.02] p-6">
+                            <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-emerald-500/40">Session</h2>
+                            {accessCode ? (
+                                <div className="flex items-center justify-between rounded-xl border border-emerald-500/10 bg-emerald-500/5 p-4">
+                                    <span className="font-mono text-sm font-black tracking-[0.2em] text-emerald-400">
+                                        Access: Verified
+                                    </span>
+                                    <ShieldCheck className="h-5 w-5 text-emerald-400/60" />
                                 </div>
-                                <p className="text-[9px] text-white/20 font-bold leading-relaxed uppercase">Neural verify active. Keep this node key private to prevent breach.</p>
-                            </motion.section>
-                        </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    <p className="text-[9px] font-bold uppercase leading-relaxed text-white/20">
+                                        Reads use this browser&apos;s first-party session. Access codes are never displayed.
+                                    </p>
+                                    <AddressChip address={address} label="Wallet" className="justify-start" />
+                                </div>
+                            )}
+                        </section>
                     </div>
                 </div>
             </div>
 
-            {/* Governance Tiers Modal */}
+            {/* Tier modal */}
             <AnimatePresence>
                 {isTierModalOpen && (
                     <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
@@ -406,54 +494,63 @@ export default function ProfilePage() {
                             initial={{ opacity: 0, scale: 0.95, y: 20 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                            className="relative w-full max-w-4xl bg-[#0a0a0b] border border-white/10 rounded-[3rem] p-8 md:p-12 shadow-[0_32px_120px_rgba(0,0,0,1)] overflow-hidden"
+                            className="relative w-full max-w-4xl overflow-hidden rounded-[3rem] border border-white/10 bg-[#0a0a0b] p-8 shadow-[0_32px_120px_rgba(0,0,0,1)] md:p-12"
                         >
-                            <div className="flex justify-between items-start mb-12">
+                            <div className="mb-12 flex items-start justify-between">
                                 <div>
-                                    <h2 className="text-[10px] font-black uppercase tracking-[0.4em] text-white/20 mb-2">Governance Protocol</h2>
+                                    <h2 className="mb-2 text-[10px] font-black uppercase tracking-[0.4em] text-white/20">
+                                        Tier System
+                                    </h2>
                                     <h2 className="text-3xl font-black tracking-tighter">Tier Access Rights</h2>
                                 </div>
-                                <button onClick={() => setIsTierModalOpen(false)} className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl transition-all">
-                                    <Check className="w-6 h-6 rotate-45" />
+                                <button
+                                    onClick={() => setIsTierModalOpen(false)}
+                                    aria-label="Close tiers"
+                                    className="rounded-2xl bg-white/5 p-3 transition-all hover:bg-white/10"
+                                >
+                                    <Check className="h-6 w-6 rotate-45" />
                                 </button>
                             </div>
 
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
                                 {TIER_DATA.map((t, index) => (
                                     <div
                                         key={t.id}
-                                        className={`p-8 rounded-[2rem] border transition-all ${t.id === userTier
-                                            ? 'bg-white/[0.04] border-white/20 shadow-[0_0_50px_rgba(255,255,255,0.03)]'
-                                            : 'bg-white/[0.01] border-white/5'
-                                            }`}
+                                        className={`rounded-[2rem] border p-8 transition-all ${
+                                            t.id === userTier
+                                                ? 'border-white/20 bg-white/[0.04] shadow-[0_0_50px_rgba(255,255,255,0.03)]'
+                                                : 'border-white/5 bg-white/[0.01]'
+                                        }`}
                                     >
-                                        <div className="flex justify-between items-center mb-8">
-                                            <t.iconComp className={`w-8 h-8 ${t.id === userTier ? t.color : 'text-white/20'}`} />
+                                        <div className="mb-8 flex items-center justify-between">
+                                            <t.iconComp className={`h-8 w-8 ${t.id === userTier ? t.color : 'text-white/20'}`} />
                                             {t.id === userTier && (
-                                                <span className="text-[8px] font-black text-[#00ff88] bg-[#00ff88]/10 px-3 py-1 rounded-full border border-[#00ff88]/20 flex items-center gap-1.5">
-                                                    <span className="w-1.5 h-1.5 bg-[#00ff88] rounded-full animate-pulse" />
+                                                <span className="flex items-center gap-1.5 rounded-full border border-[#00ff88]/20 bg-[#00ff88]/10 px-3 py-1 text-[8px] font-black text-[#00ff88]">
+                                                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#00ff88]" />
                                                     Active
                                                 </span>
                                             )}
                                         </div>
-                                        <h3 className="text-2xl font-black mb-1">{t.name}</h3>
-                                        <p className="text-[9px] font-black text-white/20 uppercase tracking-[0.3em] mb-10">Neural Access LVL 0{index + 1}</p>
+                                        <h3 className="mb-1 text-2xl font-black">{t.name}</h3>
+                                        <p className="mb-10 text-[9px] font-black uppercase tracking-[0.3em] text-white/20">
+                                            Access level 0{index + 1}
+                                        </p>
 
                                         <div className="space-y-6">
-                                            <div className="flex justify-between items-center">
-                                                <span className="text-[9px] font-black text-white/20 uppercase tracking-widest">Payout</span>
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[9px] font-black uppercase tracking-widest text-white/20">Payout</span>
                                                 <span className="text-xs font-black text-[#00ff88]">{t.payout}</span>
                                             </div>
-                                            <div className="flex justify-between items-center">
-                                                <span className="text-[9px] font-black text-white/20 uppercase tracking-widest">Blitz</span>
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[9px] font-black uppercase tracking-widest text-white/20">Blitz</span>
                                                 <span className="text-xs font-black text-[#00ff88]">{t.blitz}</span>
                                             </div>
-                                            <div className="flex justify-between items-center">
-                                                <span className="text-[9px] font-black text-white/20 uppercase tracking-widest">Protocol Fee</span>
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[9px] font-black uppercase tracking-widest text-white/20">Protocol Fee</span>
                                                 <span className="text-xs font-black text-[#00ff88]">{t.fee}</span>
                                             </div>
-                                            <div className="pt-6 border-t border-white/5">
-                                                <p className="text-[8px] font-black text-white/10 uppercase mb-1">Requirement</p>
+                                            <div className="border-t border-white/5 pt-6">
+                                                <p className="mb-1 text-[8px] font-black uppercase text-white/10">Requirement</p>
                                                 <p className="font-mono text-lg font-black text-white/40">{t.requirement}</p>
                                             </div>
                                         </div>
@@ -468,40 +565,61 @@ export default function ProfilePage() {
     );
 }
 
-const StatCard = ({ label, value, icon: Icon, status, clickable, onClick, purple }: any) => (
+function InfoDot() {
+    return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />;
+}
+
+const StatCard = ({
+    label,
+    value,
+    icon: Icon,
+    status,
+    clickable,
+    onClick,
+    purple,
+}: {
+    label: string;
+    value: string;
+    icon: React.ComponentType<{ className?: string }>;
+    status?: string;
+    clickable?: boolean;
+    onClick?: () => void;
+    purple?: boolean;
+}) => (
     <motion.div
         whileHover={clickable ? { scale: 1.02, y: -4 } : {}}
         whileTap={clickable ? { scale: 0.98 } : {}}
-        onClick={onClick}
-        className={`relative overflow-hidden bg-[#050505] border rounded-[2rem] p-8 space-y-4 transition-all group ${purple
-            ? 'border-purple-500/30 shadow-[0_0_30px_rgba(168,85,247,0.1)] bg-gradient-to-br from-[#0a0510] to-[#050505]'
-            : 'border-white/5 shadow-xl hover:bg-white/[0.02]'
-            } ${clickable ? 'cursor-pointer hover:border-white/20' : ''}`}
+        onClick={clickable ? onClick : undefined}
+        className={`group relative overflow-hidden rounded-[2rem] border p-8 transition-all ${
+            purple
+                ? 'border-purple-500/30 bg-gradient-to-br from-[#0a0510] to-[#050505] shadow-[0_0_30px_rgba(168,85,247,0.1)]'
+                : 'border-white/5 bg-[#050505] shadow-xl hover:bg-white/[0.02]'
+        } ${clickable ? 'cursor-pointer hover:border-white/20' : ''}`}
     >
-        {purple && (
-            <motion.div
-                animate={{
-                    opacity: [0.1, 0.2, 0.1],
-                    scale: [1, 1.1, 1],
-                }}
-                transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                className="absolute inset-0 bg-purple-500/10 blur-3xl -z-10"
-            />
-        )}
-
         <div className="flex items-center justify-between">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform ${purple ? 'bg-purple-500/20' : 'bg-white/5'
-                }`}>
-                <Icon className={`w-5 h-5 ${purple ? 'text-purple-400' : 'text-white/30'}`} />
+            <div
+                className={`flex h-10 w-10 items-center justify-center rounded-xl transition-transform group-hover:scale-110 ${
+                    purple ? 'bg-purple-500/20' : 'bg-white/5'
+                }`}
+            >
+                <Icon className={`h-5 w-5 ${purple ? 'text-purple-400' : 'text-white/30'}`} />
             </div>
             {status && (
-                <div className={`w-2 h-2 rounded-full ${status === 'emerald' ? 'bg-[#00ff88] shadow-[0_0_10px_#00ff88]' : 'bg-white/20'
-                    }`} />
+                <div
+                    className={`h-2 w-2 rounded-full ${
+                        status === 'emerald' ? 'bg-[#00ff88] shadow-[0_0_10px_#00ff88]' : 'bg-rose-400'
+                    }`}
+                />
             )}
         </div>
         <div>
-            <p className={`text-[10px] font-black uppercase tracking-[0.3em] mb-1.5 ${purple ? 'text-purple-400/40' : 'text-white/20'
-                }`}>{label}</p>
+            <p
+                className={`mb-1.5 text-[10px] font-black uppercase tracking-[0.3em] ${
+                    purple ? 'text-purple-400/40' : 'text-white/20'
+                }`}
+            >
+                {label}
+            </p>
             <p className="text-2xl font-black tracking-tight">{value}</p>
         </div>
     </motion.div>
@@ -509,7 +627,9 @@ const StatCard = ({ label, value, icon: Icon, status, clickable, onClick, purple
 
 const BenefitItem = ({ label, value, colored }: { label: string; value: string; colored?: boolean }) => (
     <div className="flex flex-col">
-        <span className="text-[9px] font-black text-white/10 uppercase tracking-widest leading-none mb-2">{label}</span>
-        <span className={`text-[11px] font-black uppercase tracking-widest truncate ${colored ? 'text-[#00ff88]' : 'text-white/60'}`}>{value}</span>
+        <span className="mb-2 text-[9px] font-black uppercase leading-none tracking-widest text-white/10">{label}</span>
+        <span className={`truncate text-[11px] font-black uppercase tracking-widest ${colored ? 'text-[#00ff88]' : 'text-white/60'}`}>
+            {value}
+        </span>
     </div>
 );

@@ -2,13 +2,13 @@
 //!
 //! The transport and the bind-count check live in `strike_core::db`; this module
 //! re-exports them so handlers keep one import, and adds the `IN (...)`
-//! placeholder builder. Every value goes through `push_typed_arg`, and the caller
+//! placeholder builder. Every value goes through `typed_param`, and the caller
 //! writes the matching `CAST($n AS <type>)` in the statement, so the declared
 //! parameter type and the cast can never disagree silently.
 
 use strike_core::db;
 
-pub use db::{execute, fetch, fetch_one, fetch_scalar};
+pub use db::{execute, fetch, fetch_one};
 
 /// `CAST($start AS text), CAST($start+1 AS text), ...` for an `IN (...)` list.
 /// The caller binds one value per entry, in the same order. A count of zero is
@@ -53,8 +53,7 @@ mod tests {
         // not from a connection attempt - so this passes with no DATABASE_URL.
         let err = fetch("SELECT $1, $2", &[("text", &value)])
             .await
-            .err()
-            .expect("arity mismatch is refused");
+            .expect_err("arity mismatch is refused");
         assert!(err.to_string().contains("placeholders"), "{err}");
     }
 

@@ -1,0 +1,14 @@
+# Installed to /etc/strike/litestream.yml. Litestream expands ${...} from the
+# environment: SQLITE_PATH from strike-data, the rest from /etc/strike/litestream.env.
+#
+# S3-compatible stores take everything in the URL, for example
+#   s3://my-bucket/strike?endpoint=https://<account>.r2.cloudflarestorage.com&region=auto
+# Credentials: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+snapshot:
+  interval: 24h
+  retention: 168h
+
+dbs:
+  - path: ${SQLITE_PATH}
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}

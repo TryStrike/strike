@@ -1,0 +1,49 @@
+[Unit]
+Description=Strike backend (Rust, the only SQLite writer)
+After=network-online.target
+Wants=network-online.target
+# Keep trying through a bad minute, then stop thrashing the ledger.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+User=strike
+Group=strike
+# No .env.local here, so dotenvy finds nothing: the EnvironmentFile is the config.
+WorkingDirectory=/var/lib/strike
+EnvironmentFile=/etc/strike/backend.env
+Environment=NODE_ENV=production
+Environment=BIND_ADDR=127.0.0.1:8080
+Environment=SQLITE_PATH=/var/lib/strike/strike.sqlite
+ExecStart=/opt/strike/bin/strike-backend
+Restart=on-failure
+RestartSec=5
+
+# SIGTERM (systemd's default) closes the listener and the price streams, lets
+# requests answer, then waits for any payout in flight, which is the one slow
+# stop: an accept can wait out 180 s of confirmations on each of its two transfers.
+# Commits are durable when acknowledged. A SIGKILL past this leaves the row
+# `accepted` with no hash, for docs/OPERATIONS.md to reconcile.
+TimeoutStopSec=420
+
+LimitNOFILE=65536
+TasksMax=4096
+UMask=0077
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/strike
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

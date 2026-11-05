@@ -1,0 +1,14 @@
+[package]
+name = "migrate_pg_to_sqlite"
+workspace = "../../backend"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+strike-core.workspace = true
+rusqlite.workspace = true
+rust_decimal.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

@@ -44,9 +44,10 @@ fn panel_response(status: u16, body: String) -> Response {
     } else {
         "no-store"
     };
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
     response
 }
 

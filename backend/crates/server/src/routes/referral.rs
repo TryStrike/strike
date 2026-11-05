@@ -124,8 +124,7 @@ async fn friends(params: &HashMap<String, String>) -> ApiResult<Value> {
 
     // `{ count: 'exact' }` counted every matching row, the page only carried one
     // window of them, so the two numbers are read by separate statements.
-    let count_sql =
-        format!("SELECT COUNT(*)::bigint AS count FROM user_referrals WHERE {where_clause}");
+    let count_sql = format!("SELECT COUNT(*) AS count FROM user_referrals WHERE {where_clause}");
     let db_count = db::fetch_scalar(&count_sql, &bind_refs)
         .await
         .map_err(friends_failure)?;
@@ -313,7 +312,10 @@ async fn register(body: &Value) -> ApiResult<Value> {
                 if let Some(referrer) = &referrer {
                     increment_referrer(referrer).await;
                 }
-                return Ok(register_response(field(&row, "referral_code"), field(&row, "referral_count")));
+                return Ok(register_response(
+                    field(&row, "referral_code"),
+                    field(&row, "referral_count"),
+                ));
             }
             // `.single()` over an insert that produced no row is an error whose
             // code is not a unique violation: the TS breaks out and answers 500.
@@ -395,8 +397,11 @@ async fn bind_referrer(existing: &Value, referrer: &str) -> ApiResult<u64> {
 /// and the TS fired the RPC without checking it.
 async fn increment_referrer(referrer: &str) {
     let address = Value::String(referrer.to_string());
-    if let Err(err) = db::call_rpc("increment_referral_count", &[("referrer_address", &address)])
-        .await
+    if let Err(err) = db::call_rpc(
+        "increment_referral_count",
+        &[("referrer_address", &address)],
+    )
+    .await
     {
         tracing::error!("[referral] increment_referral_count failed {err}");
     }
@@ -407,7 +412,10 @@ async fn increment_referrer(referrer: &str) {
 /// Owned text binds for one `IN (CAST($n AS text), …)` list, in order. The
 /// values must outlive `text_refs`, which borrows them.
 fn text_values(values: &[String]) -> Vec<Value> {
-    values.iter().map(|value| Value::String(value.clone())).collect()
+    values
+        .iter()
+        .map(|value| Value::String(value.clone()))
+        .collect()
 }
 
 /// The `(postgres type, value)` pairs `db::fetch` takes, one text bind per value.

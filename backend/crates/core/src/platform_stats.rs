@@ -103,7 +103,9 @@ fn parse_js_number(raw: &str) -> f64 {
     };
     let lower = body.to_lowercase();
     if let Some(hex) = lower.strip_prefix("0x") {
-        return u64::from_str_radix(hex, 16).map(|v| sign * v as f64).unwrap_or(f64::NAN);
+        return u64::from_str_radix(hex, 16)
+            .map(|v| sign * v as f64)
+            .unwrap_or(f64::NAN);
     }
     body.parse::<f64>().map(|v| sign * v).unwrap_or(f64::NAN)
 }
@@ -168,7 +170,10 @@ pub fn parse_epoch_ms(value: Option<&Value>) -> f64 {
                 chrono::NaiveDateTime::parse_from_str(s.trim(), "%Y-%m-%dT%H:%M:%S%.f")
                     .map(|dt| dt.and_utc().timestamp_millis() as f64)
             })
-            .or_else(|_| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as f64))
+            .or_else(|_| {
+                chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+                    .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as f64)
+            })
             .unwrap_or(f64::NAN),
         _ => f64::NAN,
     }
@@ -209,9 +214,7 @@ impl NetworkPnL {
 pub fn aggregate_by_network(rows: &[Value]) -> BTreeMap<String, NetworkPnL> {
     let mut acc: BTreeMap<String, NetworkPnL> = BTreeMap::new();
     for row in rows {
-        let entry = acc
-            .entry(network_label(row.get("network")))
-            .or_default();
+        let entry = acc.entry(network_label(row.get("network"))).or_default();
         entry.volume += number_or_zero(row.get("amount"));
         entry.payout += number_or_zero(row.get("payout"));
     }
@@ -254,9 +257,18 @@ impl ModeStats {
         map.insert("platformPnL".into(), number_to_json(self.platform_pnl));
         map.insert("platformPnLByNetwork".into(), Value::Object(networks));
         map.insert("totalUsers".into(), json_usize(self.total_users));
-        map.insert("totalReferrals".into(), number_to_json(self.total_referrals));
-        map.insert("averageSessionSeconds".into(), number_to_json(self.average_session_seconds));
-        map.insert("sessionSampleCount".into(), json_usize(self.session_sample_count));
+        map.insert(
+            "totalReferrals".into(),
+            number_to_json(self.total_referrals),
+        );
+        map.insert(
+            "averageSessionSeconds".into(),
+            number_to_json(self.average_session_seconds),
+        );
+        map.insert(
+            "sessionSampleCount".into(),
+            json_usize(self.session_sample_count),
+        );
         Value::Object(map)
     }
 }
@@ -402,7 +414,9 @@ fn currency_stats_to_value(stats: &BTreeMap<String, CurrencyStat>) -> Value {
 /// `Number -> Value`, with `NaN`/infinite rendering as `null` the way
 /// `JSON.stringify` does.
 pub fn number_to_json(value: f64) -> Value {
-    Number::from_f64(value).map(Value::Number).unwrap_or(Value::Null)
+    Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 fn json_usize(value: usize) -> Value {
@@ -428,9 +442,15 @@ impl PlatformStats {
         let mut map = Map::new();
         map.insert("real".into(), self.real.to_value());
         map.insert("demo".into(), self.demo.to_value());
-        map.insert("currencyStats".into(), currency_stats_to_value(&self.currency_stats));
+        map.insert(
+            "currencyStats".into(),
+            currency_stats_to_value(&self.currency_stats),
+        );
         map.insert("totalDeposits".into(), json_usize(self.total_deposits));
-        map.insert("totalWithdrawals".into(), json_usize(self.total_withdrawals));
+        map.insert(
+            "totalWithdrawals".into(),
+            json_usize(self.total_withdrawals),
+        );
         Value::Object(map)
     }
 
@@ -439,7 +459,11 @@ impl PlatformStats {
     pub fn public_value(&self) -> Value {
         let mut networks: Vec<(&String, &NetworkPnL)> =
             self.real.platform_pnl_by_network.iter().collect();
-        networks.sort_by(|a, b| b.1.volume.partial_cmp(&a.1.volume).unwrap_or(std::cmp::Ordering::Equal));
+        networks.sort_by(|a, b| {
+            b.1.volume
+                .partial_cmp(&a.1.volume)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let top_currencies: Vec<Value> = networks
             .into_iter()
             .take(5)
@@ -458,13 +482,22 @@ impl PlatformStats {
         map.insert("totalWins".into(), json_usize(self.real.total_wins));
         map.insert("totalLosses".into(), json_usize(self.real.total_losses));
         map.insert("winRate".into(), number_to_json(self.real.win_rate));
-        map.insert("totalWagered".into(), number_to_json(self.real.total_volume));
-        map.insert("totalPaidOut".into(), number_to_json(self.real.total_payout));
+        map.insert(
+            "totalWagered".into(),
+            number_to_json(self.real.total_volume),
+        );
+        map.insert(
+            "totalPaidOut".into(),
+            number_to_json(self.real.total_payout),
+        );
         map.insert("uniqueWallets".into(), json_usize(self.real.total_users));
         // Arc only: the TS hardcoded 1 and the landing page renders it.
         map.insert("chainsActive".into(), json_usize(1));
         map.insert("totalDeposits".into(), json_usize(self.total_deposits));
-        map.insert("totalWithdrawals".into(), json_usize(self.total_withdrawals));
+        map.insert(
+            "totalWithdrawals".into(),
+            json_usize(self.total_withdrawals),
+        );
         map.insert("topCurrencies".into(), Value::Array(top_currencies));
         Value::Object(map)
     }
@@ -477,9 +510,7 @@ impl PlatformStats {
 /// `LIMIT/OFFSET` with its own two binds, so the arity check can never disagree
 /// with the number of placeholders a caller wrote.
 async fn scan_pageed(select_and_where: &str) -> ApiResult<Vec<Value>> {
-    let statement = format!(
-        "{select_and_where} LIMIT CAST($1 AS int8) OFFSET CAST($2 AS int8)"
-    );
+    let statement = format!("{select_and_where} LIMIT CAST($1 AS int8) OFFSET CAST($2 AS int8)");
     let mut rows = Vec::new();
     let mut from = 0_i64;
     loop {
@@ -519,19 +550,27 @@ pub async fn compute(now_ms: i64) -> ApiResult<PlatformStats> {
     .await
     .map_err(|e| ApiError::Other(format!("balance_audit_log: {e}")))?;
 
-    let balances = db::fetch("SELECT currency, balance, user_address FROM user_balances", &[])
-        .await
-        .map_err(|e| ApiError::Other(format!("user_balances: {e}")))?;
+    let balances = db::fetch(
+        "SELECT currency, balance, user_address FROM user_balances",
+        &[],
+    )
+    .await
+    .map_err(|e| ApiError::Other(format!("user_balances: {e}")))?;
 
-    let referrals = db::fetch("SELECT user_address, referral_count FROM user_referrals", &[])
-        .await
-        .map_err(|e| ApiError::Other(format!("user_referrals: {e}")))?;
+    let referrals = db::fetch(
+        "SELECT user_address, referral_count FROM user_referrals",
+        &[],
+    )
+    .await
+    .map_err(|e| ApiError::Other(format!("user_referrals: {e}")))?;
 
     let banned = db::fetch("SELECT wallet_address FROM banned_wallets", &[])
         .await
         .map_err(|e| ApiError::Other(format!("banned_wallets: {e}")))?;
 
-    Ok(aggregate(&bets, &sessions, &audit, &balances, &referrals, &banned, now_ms))
+    Ok(aggregate(
+        &bets, &sessions, &audit, &balances, &referrals, &banned, now_ms,
+    ))
 }
 
 /// The pure half of `computePlatformStats`, split out so the invariants above
@@ -553,20 +592,33 @@ pub fn aggregate(
     let mut demo_users: BTreeSet<String> = BTreeSet::new();
     for row in bets {
         if let Some(key) = user_key(row.get("wallet_address")) {
-            (if is_demo_bet(row) { &mut demo_users } else { &mut real_users }).insert(key);
+            (if is_demo_bet(row) {
+                &mut demo_users
+            } else {
+                &mut real_users
+            })
+            .insert(key);
         }
     }
     // Deposited-but-never-bet wallets and banned wallets are "users" too.
     for row in balances {
         if let Some(key) = user_key(row.get("user_address")) {
-            (if is_demo_wallet(row.get("user_address")) { &mut demo_users } else { &mut real_users })
-                .insert(key);
+            (if is_demo_wallet(row.get("user_address")) {
+                &mut demo_users
+            } else {
+                &mut real_users
+            })
+            .insert(key);
         }
     }
     for row in banned {
         if let Some(key) = user_key(row.get("wallet_address")) {
-            (if is_demo_wallet(row.get("wallet_address")) { &mut demo_users } else { &mut real_users })
-                .insert(key);
+            (if is_demo_wallet(row.get("wallet_address")) {
+                &mut demo_users
+            } else {
+                &mut real_users
+            })
+            .insert(key);
         }
     }
 
@@ -574,15 +626,29 @@ pub fn aggregate(
         referrals
             .iter()
             .filter(|r| is_demo_wallet(r.get("user_address")) == demo)
-            .fold(0.0_f64, |acc, r| acc + number_or_zero(r.get("referral_count")))
+            .fold(0.0_f64, |acc, r| {
+                acc + number_or_zero(r.get("referral_count"))
+            })
     };
 
     let (avg_real, count_real) = session_average(sessions, false, now_ms);
     let (avg_demo, count_demo) = session_average(sessions, true, now_ms);
 
     PlatformStats {
-        real: build_mode_stats(&real_bets, &real_users, referral_total(false), avg_real, count_real),
-        demo: build_mode_stats(&demo_bets, &demo_users, referral_total(true), avg_demo, count_demo),
+        real: build_mode_stats(
+            &real_bets,
+            &real_users,
+            referral_total(false),
+            avg_real,
+            count_real,
+        ),
+        demo: build_mode_stats(
+            &demo_bets,
+            &demo_users,
+            referral_total(true),
+            avg_demo,
+            count_demo,
+        ),
         currency_stats: currency_stats(balances),
         total_deposits: audit
             .iter()
@@ -614,7 +680,10 @@ mod tests {
         let by_id = bet("demo-b3", "0xAbC0", 10.0, 4.0, true, "Arc");
         assert!(!is_demo_bet(&real));
         assert!(is_demo_bet(&by_wallet));
-        assert!(is_demo_bet(&by_id), "the id prefix alone must flip the row to demo");
+        assert!(
+            is_demo_bet(&by_id),
+            "the id prefix alone must flip the row to demo"
+        );
     }
 
     #[test]
@@ -635,7 +704,10 @@ mod tests {
         assert_eq!(public["totalPaidOut"], json!(30.0));
         // The landing page shows one chain and never a demo figure.
         assert_eq!(public["chainsActive"], json!(1));
-        assert!(public.get("demo").is_none(), "the demo subset is not public");
+        assert!(
+            public.get("demo").is_none(),
+            "the demo subset is not public"
+        );
         assert_eq!(public["topCurrencies"].as_array().unwrap().len(), 1);
     }
 
@@ -667,13 +739,25 @@ mod tests {
     fn an_open_session_counts_the_idle_tail_but_never_the_future() {
         let started = NOW as f64 - 60_000.0;
         // Ended sessions are exact.
-        assert_eq!(session_duration_seconds(started, started, Some(started + 120_000.0), NOW as f64), 120);
+        assert_eq!(
+            session_duration_seconds(started, started, Some(started + 120_000.0), NOW as f64),
+            120
+        );
         // Open ones stop at last ping + 90s...
-        assert_eq!(session_duration_seconds(started, NOW as f64 - 30_000.0, None, NOW as f64), 60);
+        assert_eq!(
+            session_duration_seconds(started, NOW as f64 - 30_000.0, None, NOW as f64),
+            60
+        );
         // ...but never run past the clock they were measured against.
-        assert_eq!(session_duration_seconds(started, NOW as f64 + 600_000.0, None, NOW as f64), 60);
+        assert_eq!(
+            session_duration_seconds(started, NOW as f64 + 600_000.0, None, NOW as f64),
+            60
+        );
         // A garbage timestamp yields 0 rather than a negative dwell.
-        assert_eq!(session_duration_seconds(f64::NAN, f64::NAN, None, NOW as f64), 0);
+        assert_eq!(
+            session_duration_seconds(f64::NAN, f64::NAN, None, NOW as f64),
+            0
+        );
     }
 
     #[test]
@@ -724,7 +808,10 @@ mod tests {
         ];
         let banned = vec![json!({ "wallet_address": "0xAB C0".replace(' ', "") })];
         let stats = aggregate(&bets, &[], &[], &balances, &[], &banned, NOW);
-        assert_eq!(stats.real.total_users, 2, "the same lowercase key must not count twice");
+        assert_eq!(
+            stats.real.total_users, 2,
+            "the same lowercase key must not count twice"
+        );
         assert_eq!(stats.currency_stats["USDC"].total_balance, 15.0);
         assert_eq!(stats.currency_stats["USDC"].user_count, 2);
     }
@@ -750,7 +837,10 @@ mod tests {
             json!({ "user_address": "0xreal2", "referral_count": null }),
         ];
         let stats = aggregate(&[], &[], &[], &[], &referrals, &[], NOW);
-        assert_eq!(stats.real.total_referrals, 3.0, "a null count adds nothing, not NaN");
+        assert_eq!(
+            stats.real.total_referrals, 3.0,
+            "a null count adds nothing, not NaN"
+        );
         assert_eq!(stats.demo.total_referrals, 7.0);
     }
 

@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { useReducedMotion } from 'framer-motion';
 import { BlurFade, CountdownRing, Marquee, SlidingNumber, WordRotate } from '@/components/landing/primitives';
 import { explorerAddressUrl, getArcConfig } from '@/lib/arc/config';
 import { BRAND } from '@/lib/brand';
 import { SiteNav } from '@/components/SiteNav';
 import { ArcProof } from '@/components/landing/ArcProof';
 import { glassPrimary } from '@/components/ui/kit';
-import { ArrowDown, ArrowUp, ArrowUpRight } from '@phosphor-icons/react';
+import { ArrowDown, ArrowUp, ArrowUpRight, Minus } from '@phosphor-icons/react';
 
 const HERO_ASSETS = [
   { symbol: 'BTC', name: 'Bitcoin', pair: 'BTC / USD' },
@@ -18,55 +19,125 @@ const HERO_ASSETS = [
 ];
 const TICKER = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'GOLD', 'SILVER', 'EUR', 'GBP', 'JPY', 'AAPL', 'NVDA', 'TSLA', 'SPX', 'WTI'];
 
+/** Same localStorage key the /trade poller (lib/utils/priceFeed) writes on
+ *  every successful fetch — lets a fresh landing visit start from the last
+ *  known prices instead of an empty/placeholder flash. */
+const PRICE_CACHE_KEY = 'strike_last_price_cache_v1';
+
 function fmt(v: number) {
   const dp = v >= 100 ? 2 : v >= 1 ? 4 : 6;
   return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }
 
-/** Polls the app's price route; keeps the previous tick so we can show direction. */
-function usePrices(ms = 1500) {
+/** Only finite, positive numbers may enter price state — NaN/0/strings from a
+ *  bad payload can never reach the UI. */
+function sanitizePrices(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw && typeof raw === 'object') {
+    for (const [sym, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[sym] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * Live rolling price for the hero + ticker.
+ * - Polls /api/prices/latest once a second; a failed poll simply keeps the
+ *   last known snapshot (state is only ever merged into, never cleared).
+ * - Subscribes to /api/prices/stream (SSE) as an optimization; if EventSource
+ *   is missing or the stream breaks, the browser reconnects and the 1s poll
+ *   keeps flowing regardless.
+ */
+function usePrices() {
   const [state, setState] = useState<{ prices: Record<string, number>; prev: Record<string, number> }>({
     prices: {},
     prev: {},
   });
+
   useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(PRICE_CACHE_KEY);
+      if (raw) {
+        const seed = sanitizePrices(JSON.parse(raw));
+        if (Object.keys(seed).length > 0) {
+          setState((cur) => ({ prev: cur.prev, prices: { ...seed, ...cur.prices } }));
+        }
+      }
+    } catch {
+      // corrupt cache: the poll will fill it in
+    }
+
     let live = true;
     const tick = async () => {
       try {
         // GET of all assets: CDN-cached and shared with the trade screen.
         const res = await fetch('/api/prices/latest');
-        const { prices: next } = await res.json();
-        if (!live || !next) return;
+        if (!res.ok) return; // keep the last known prices on a failed poll
+        const body = (await res.json()) as { prices?: unknown };
+        const next = sanitizePrices(body?.prices);
+        if (!live || Object.keys(next).length === 0) return;
         setState((cur) => ({ prev: cur.prices, prices: { ...cur.prices, ...next } }));
       } catch {
         // keep the last prices on a failed poll
       }
     };
     tick();
-    const id = setInterval(tick, ms);
+    const id = setInterval(tick, 1000);
     return () => {
       live = false;
       clearInterval(id);
     };
-  }, [ms]);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.EventSource !== 'function') return;
+    const es = new EventSource('/api/prices/stream');
+    es.onmessage = (event: MessageEvent) => {
+      try {
+        const tick = JSON.parse(String(event.data)) as { asset?: unknown; price?: unknown };
+        const sym = typeof tick?.asset === 'string' ? tick.asset : '';
+        const price = typeof tick?.price === 'number' ? tick.price : NaN;
+        if (!sym || !Number.isFinite(price) || price <= 0) return;
+        setState((cur) => ({ prev: cur.prices, prices: { ...cur.prices, [sym]: price } }));
+      } catch {
+        // ignore a malformed frame; the poll remains the source of truth
+      }
+    };
+    // No onerror handler on purpose: EventSource auto-reconnects, and the 1s
+    // poll keeps the hero live while the stream is down.
+    return () => es.close();
+  }, []);
+
   return state;
 }
 
 export default function Landing() {
   const { prices, prev } = usePrices();
+  const reduceMotion = useReducedMotion();
   const [i, setI] = useState(0);
   useEffect(() => {
+    // Under reduced motion the hero stays on one asset — nothing auto-advances.
+    if (reduceMotion) return;
     const id = setInterval(() => setI((n) => n + 1), 5000);
     return () => clearInterval(id);
-  }, []);
+  }, [reduceMotion]);
 
-  const hero = HERO_ASSETS[i % HERO_ASSETS.length];
+  const hero = HERO_ASSETS[reduceMotion ? 0 : i % HERO_ASSETS.length];
   const price = prices[hero.symbol];
-  const [whole, frac] = price ? fmt(price).split('.') : ['—', ''];
-  const dir = price && prev[hero.symbol] ? Math.sign(price - prev[hero.symbol]) : 0;
+  const prevPrice = prev[hero.symbol];
+  const priceText = typeof price === 'number' && Number.isFinite(price) && price > 0 ? fmt(price) : null;
+  const [whole, frac] = priceText ? priceText.split('.') : ['', ''];
+  const dir = typeof price === 'number' && typeof prevPrice === 'number' ? Math.sign(price - prevPrice) : 0;
 
   return (
-    <div className="min-h-full shrink-0 bg-white text-[#0A0C10] font-[family-name:var(--font-inter-tight)] selection:bg-[#2151F5] selection:text-white">
+    <div className="min-h-full shrink-0 bg-white text-[#0A0C10] font-[family-name:var(--font-inter-tight)] tabular-nums selection:bg-[#2151F5] selection:text-white">
+      <a
+        href="#landing-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-[#0A0C10] focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
+      >
+        Skip to content
+      </a>
       <SiteNav
         sticky
         right={
@@ -76,6 +147,7 @@ export default function Landing() {
         }
       />
 
+      <div id="landing-content" tabIndex={-1} className="focus:outline-none">
       {/* Hero */}
       <section className="relative overflow-hidden">
         <div
@@ -128,12 +200,37 @@ export default function Landing() {
                 <CountdownRing size={56} />
               </div>
 
-              <div className="mt-6 font-[family-name:var(--font-jetbrains-mono)] text-[clamp(44px,9vw,76px)] font-semibold leading-none tracking-[-0.05em]">
-                <SlidingNumber value={whole} />
-                {frac && <span className="text-[#B7BDC7]">.<SlidingNumber value={frac} /></span>}
+              <div className="mt-6 font-[family-name:var(--font-jetbrains-mono)] text-[clamp(44px,9vw,76px)] font-semibold leading-none tracking-[-0.05em] tabular-nums">
+                {/* An invisible widest-case sizer pins the row width so digit-count
+                    changes never shift the layout; the live value overlays it.
+                    Before the first tick: reserved whitespace, never "—"/NaN/0. */}
+                <span className="relative inline-block align-top">
+                  <span aria-hidden="true" className="invisible">
+                    1,111,111.11
+                  </span>
+                  {priceText && (
+                    <span className="absolute inset-0 flex whitespace-nowrap">
+                      <SlidingNumber value={whole} />
+                      {frac && <span className="text-[#6B7280]">.<SlidingNumber value={frac} /></span>}
+                    </span>
+                  )}
+                </span>
+                {!priceText && <span className="sr-only">Loading live price</span>}
               </div>
-              <div className={`mt-3 font-[family-name:var(--font-jetbrains-mono)] text-sm ${dir < 0 ? 'text-[#C2410C]' : 'text-[#2151F5]'}`}>
-                <span className="inline-flex items-center gap-1.5">{dir < 0 ? <ArrowDown size={14} weight="bold" /> : <ArrowUp size={14} weight="bold" />} moving {dir < 0 ? 'down' : 'up'}</span>
+              {/* Three-state direction: never claim "moving up" on dir=0 / no data. */}
+              <div className={`mt-3 min-h-[1.25rem] font-[family-name:var(--font-jetbrains-mono)] text-sm ${dir < 0 ? 'text-[#C2410C]' : dir > 0 ? 'text-[#2151F5]' : 'text-[#6B7280]'}`}>
+                {priceText ? (
+                  typeof prevPrice === 'number' ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      {dir < 0 ? <ArrowDown size={14} weight="bold" aria-hidden="true" /> : dir > 0 ? <ArrowUp size={14} weight="bold" aria-hidden="true" /> : <Minus size={14} weight="bold" aria-hidden="true" />}
+                      moving {dir < 0 ? 'down' : dir > 0 ? 'up' : 'sideways'}
+                    </span>
+                  ) : (
+                    'waiting for next tick…'
+                  )
+                ) : (
+                  'connecting to live feed…'
+                )}
               </div>
 
               <div className="mt-7 grid grid-cols-2 gap-3">
@@ -156,8 +253,10 @@ export default function Landing() {
               const d = v && prev[s] ? Math.sign(v - prev[s]) : 0;
               return (
                 <span key={s} className="whitespace-nowrap text-[#4A505C]">
-                  <span className="text-[#9AA1AD]">{s}</span> {v ? fmt(v) : '—'}{' '}
-                  <span className={`inline-block align-[-2px] ${d < 0 ? 'text-[#C2410C]' : 'text-[#2151F5]'}`}>{d < 0 ? <ArrowDown size={13} weight="bold" /> : <ArrowUp size={13} weight="bold" />}</span>
+                  <span className="text-[#6B7280]">{s}</span> {v ? fmt(v) : '—'}{' '}
+                  <span className={`inline-block align-[-2px] ${d < 0 ? 'text-[#C2410C]' : d > 0 ? 'text-[#2151F5]' : 'text-[#6B7280]'}`}>
+                    {d < 0 ? <ArrowDown size={13} weight="bold" aria-hidden="true" /> : d > 0 ? <ArrowUp size={13} weight="bold" aria-hidden="true" /> : <Minus size={13} weight="bold" aria-hidden="true" />}
+                  </span>
                 </span>
               );
             })}
@@ -169,9 +268,9 @@ export default function Landing() {
       <section id="how" className="scroll-mt-16">
         <div className="mx-auto max-w-[1040px] px-5 py-28 sm:px-8">
           <BlurFade className="text-center">
-            <div className="font-[family-name:var(--font-jetbrains-mono)] text-xs uppercase tracking-[0.18em] text-[#9AA1AD]">How it works</div>
+            <div className="font-[family-name:var(--font-jetbrains-mono)] text-xs uppercase tracking-[0.18em] text-[#6B7280]">How it works</div>
             <h2 className="mt-4 font-[family-name:var(--font-instrument-serif)] text-[clamp(40px,5vw,60px)] font-normal leading-[1] tracking-[-0.02em]">
-              Three taps. <span className="italic text-[#9AA1AD]">That&apos;s it.</span>
+              Three taps. <span className="italic text-[#6B7280]">That&apos;s it.</span>
             </h2>
           </BlurFade>
 
@@ -205,7 +304,7 @@ export default function Landing() {
               <div className="grid h-36 place-items-center rounded-[18px] bg-[#F6F7F9]">
                 <div className="text-center">
                   <div className="font-[family-name:var(--font-jetbrains-mono)] text-[28px] font-medium tracking-[-0.04em] text-[#2151F5]">+0.75</div>
-                  <div className="font-[family-name:var(--font-jetbrains-mono)] text-xs text-[#9AA1AD]">USDC · paid on-chain</div>
+                  <div className="font-[family-name:var(--font-jetbrains-mono)] text-xs text-[#6B7280]">USDC · paid on-chain</div>
                 </div>
               </div>
               <div className="px-4 pb-4 pt-5">
@@ -251,12 +350,13 @@ export default function Landing() {
         <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-4 px-5 py-6 text-[13px] text-[#6B7280] sm:px-8">
           <span>© {BRAND.name} · Prices via Yahoo Finance &amp; Binance · Not financial advice</span>
           <div className="flex gap-6">
-            <a href={explorerAddressUrl(getArcConfig().treasuryAddress)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:text-[#0A0C10]">Treasury contract <ArrowUpRight size={13} /></a>
+            <a href={explorerAddressUrl(getArcConfig().treasuryAddress)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:text-[#0A0C10]">Treasury contract <ArrowUpRight size={13} aria-hidden="true" /></a>
             {BRAND.social.x && <a href={BRAND.social.x} target="_blank" rel="noopener noreferrer" className="hover:text-[#0A0C10]">X</a>}
             {BRAND.social.telegram && <a href={BRAND.social.telegram} target="_blank" rel="noopener noreferrer" className="hover:text-[#0A0C10]">Telegram</a>}
           </div>
         </div>
       </footer>
+      </div>
     </div>
   );
 }

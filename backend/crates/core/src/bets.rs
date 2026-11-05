@@ -139,7 +139,9 @@ pub fn number_coerce(value: &Value) -> Option<f64> {
             if s.is_empty() {
                 return Some(0.0);
             }
-            if t.eq_ignore_ascii_case("infinity") || t.starts_with('+') && t[1..].eq_ignore_ascii_case("infinity") {
+            if t.eq_ignore_ascii_case("infinity")
+                || t.starts_with('+') && t[1..].eq_ignore_ascii_case("infinity")
+            {
                 return Some(f64::INFINITY);
             }
             if t.eq_ignore_ascii_case("-infinity") {
@@ -203,7 +205,9 @@ pub fn js_num(n: f64) -> Value {
         // values that came through round6 on real stakes; keep 0.
         return Value::Number(if i == 0 { 0.into() } else { i.into() });
     }
-    serde_json::Number::from_f64(n).map(Value::Number).unwrap_or(Value::Null)
+    serde_json::Number::from_f64(n)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 fn js_i64(v: i64) -> Value {
@@ -229,7 +233,9 @@ pub fn parse_date_ms(raw: &str) -> Option<i64> {
     // Date-only: UTC midnight.
     if s.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-' {
         if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-            return d.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp_millis());
+            return d
+                .and_hms_opt(0, 0, 0)
+                .map(|dt| dt.and_utc().timestamp_millis());
         }
         return None;
     }
@@ -355,7 +361,9 @@ fn asset_code_ok(code: &str) -> bool {
         && bytes.len() <= 16
         && bytes[0].is_ascii_alphabetic()
         && bytes[0].is_ascii_uppercase()
-        && bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
 }
 
 fn parse_bound(raw: Option<&String>) -> Result<Option<String>, String> {
@@ -379,13 +387,21 @@ pub fn parse_history_request(params: &Params) -> Result<HistoryQuery, String> {
         return Err("Invalid wallet parameter".to_string());
     }
 
-    let limit =
-        clamp_int(params.get("limit").map(String::as_str), DEFAULT_HISTORY_LIMIT, 1, MAX_HISTORY_LIMIT);
+    let limit = clamp_int(
+        params.get("limit").map(String::as_str),
+        DEFAULT_HISTORY_LIMIT,
+        1,
+        MAX_HISTORY_LIMIT,
+    );
     let offset_param = params.get("offset").map(|s| s.as_str());
     let offset = clamp_int(offset_param, 0, 0, MAX_HISTORY_OFFSET);
 
     let mut asset: Option<String> = None;
-    if let Some(raw) = params.get("asset").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(raw) = params
+        .get("asset")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         let code = raw.to_uppercase();
         if code != "ALL" {
             if !asset_code_ok(&code) {
@@ -402,10 +418,18 @@ pub fn parse_history_request(params: &Params) -> Result<HistoryQuery, String> {
     if !OUTCOMES.contains(&raw_outcome.as_str()) {
         return Err("Invalid outcome filter".to_string());
     }
-    let outcome = if raw_outcome == "all" { None } else { Some(raw_outcome) };
+    let outcome = if raw_outcome == "all" {
+        None
+    } else {
+        Some(raw_outcome)
+    };
 
     let mut direction: Option<String> = None;
-    if let Some(raw) = params.get("direction").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(raw) = params
+        .get("direction")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         let code = raw.to_uppercase();
         if !DIRECTIONS.contains(&code.as_str()) {
             return Err("Invalid direction filter".to_string());
@@ -438,7 +462,10 @@ const CHAIN_TX_KEYS: [&str; 3] = ["tx_hash", "txHash", "settlement_tx_hash"];
 
 fn is_chain_tx_hash(value: &str) -> bool {
     // /^0x[0-9a-fA-F]{64}$/
-    let Some(hex_part) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) else {
+    let Some(hex_part) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
         return false;
     };
     hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
@@ -468,7 +495,10 @@ pub fn decorate_history_row(row: &Value) -> Value {
     let is_demo = is_demo_bet_row(&Value::Object(map.clone()));
     let tx = pick_row_tx_hash(&Value::Object(map.clone()));
     map.insert("isDemoBet".into(), Value::Bool(is_demo));
-    map.insert("txHash".into(), tx.map(Value::String).unwrap_or(Value::Null));
+    map.insert(
+        "txHash".into(),
+        tx.map(Value::String).unwrap_or(Value::Null),
+    );
     map.insert("ledgerRef".into(), Value::String(value_to_string(&id)));
     Value::Object(map)
 }
@@ -481,6 +511,7 @@ pub const STATS_DEFAULT_WINDOW: &str = "30d";
 pub const STATS_MAX_ROWS: usize = 5000;
 
 /// Parses the `window` query param; Err means "reject the request with 400".
+#[allow(clippy::result_unit_err)]
 pub fn parse_stats_window(raw: Option<&str>) -> Result<String, ()> {
     let Some(v) = raw.filter(|s| !s.is_empty()) else {
         return Ok(STATS_DEFAULT_WINDOW.to_string());
@@ -520,7 +551,11 @@ fn number_field(row: &Value, key: &str) -> f64 {
 
 /// Net result of one settled bet: (payout if won, else 0) - stake.
 pub fn bet_net(row: &Value) -> f64 {
-    let payout = if bool_field(row, "won") { number_field(row, "payout") } else { 0.0 };
+    let payout = if bool_field(row, "won") {
+        number_field(row, "payout")
+    } else {
+        0.0
+    };
     payout - number_field(row, "amount")
 }
 
@@ -568,12 +603,15 @@ pub fn compute_streaks(won_flags: &[bool]) -> (i64, i64) {
 /// zero-filled so the sparkline never sees missing dates. Rows outside the
 /// trailing window are ignored.
 pub fn build_daily_series(rows: &[Value], days: i64, now: i64) -> Vec<Value> {
-    let bounded_days = days.max(1).min(365) as usize;
+    let bounded_days = days.clamp(1, 365) as usize;
     let today = utc_midnight_ms(now);
-    let keys: Vec<String> =
-        (0..bounded_days).rev().map(|i| utc_day_key(today - i as i64 * MS_PER_DAY)).collect();
+    let keys: Vec<String> = (0..bounded_days)
+        .rev()
+        .map(|i| utc_day_key(today - i as i64 * MS_PER_DAY))
+        .collect();
 
-    let mut buckets: Vec<(String, i64, f64, f64)> = keys.iter().map(|k| (k.clone(), 0i64, 0f64, 0f64)).collect();
+    let mut buckets: Vec<(String, i64, f64, f64)> =
+        keys.iter().map(|k| (k.clone(), 0i64, 0f64, 0f64)).collect();
     for row in rows {
         let key = utc_day_key(effective_ms(row));
         if let Some(b) = buckets.iter_mut().find(|(k, ..)| *k == key) {
@@ -615,7 +653,9 @@ fn trade_of(row: &Value) -> Value {
     map.insert("net".into(), js_num(round(bet_net(row))));
     map.insert(
         "at".into(),
-        at.filter(|v| is_truthy(Some(v))).map(|v| Value::String(value_to_string(v))).unwrap_or(Value::Null),
+        at.filter(|v| is_truthy(Some(v)))
+            .map(|v| Value::String(value_to_string(v)))
+            .unwrap_or(Value::Null),
     );
     map.insert("amount".into(), js_num(round(number_field(row, "amount"))));
     map.insert("won".into(), Value::Bool(bool_field(row, "won")));
@@ -625,13 +665,22 @@ fn trade_of(row: &Value) -> Value {
 /// `aggregateWalletStats`: demo rows dropped here (single source of truth),
 /// rows sorted oldest→newest by settlement time, then summarised into the
 /// exact JSON shape the TS route ships.
-pub fn aggregate_wallet_stats(input_rows: &[Value], window: &str, now: i64, max_rows: Option<usize>) -> Value {
-    let rows: Vec<Value> = input_rows.iter().filter(|r| !is_demo_bet_row(r)).cloned().collect();
+pub fn aggregate_wallet_stats(
+    input_rows: &[Value],
+    window: &str,
+    now: i64,
+    max_rows: Option<usize>,
+) -> Value {
+    let rows: Vec<Value> = input_rows
+        .iter()
+        .filter(|r| !is_demo_bet_row(r))
+        .cloned()
+        .collect();
     let max = max_rows.unwrap_or(usize::MAX);
     let truncated = rows.len() > max;
 
     let mut chronological = rows.clone();
-    chronological.sort_by_key(|r| effective_ms(r));
+    chronological.sort_by_key(effective_ms);
     if truncated {
         let start = rows.len() - max;
         chronological = chronological[start..].to_vec();
@@ -695,18 +744,31 @@ pub fn aggregate_wallet_stats(input_rows: &[Value], window: &str, now: i64, max_
             m.insert("wins".into(), js_i64(*w));
             m.insert(
                 "winRate".into(),
-                js_num(if *bets > 0 { round((*w as f64 / *bets as f64) * 100.0 * 10.0) / 10.0 } else { 0.0 }),
+                js_num(if *bets > 0 {
+                    round((*w as f64 / *bets as f64) * 100.0 * 10.0) / 10.0
+                } else {
+                    0.0
+                }),
             );
             m.insert("volume".into(), js_num(round(*vol)));
             m.insert("netPnl".into(), js_num(round(*net)));
             Value::Object(m)
         })
         .collect();
-    let volumes: Vec<f64> =
-        per_asset_values.iter().map(|v| v.get("volume").and_then(Value::as_f64).unwrap_or(0.0)).collect();
+    let volumes: Vec<f64> = per_asset_values
+        .iter()
+        .map(|v| v.get("volume").and_then(Value::as_f64).unwrap_or(0.0))
+        .collect();
     let mut idx: Vec<usize> = (0..volumes.len()).collect();
-    idx.sort_by(|a, b| volumes[*b].partial_cmp(&volumes[*a]).unwrap_or(Ordering::Equal));
-    per_asset_values = idx.into_iter().map(|i| std::mem::take(&mut per_asset_values[i])).collect();
+    idx.sort_by(|a, b| {
+        volumes[*b]
+            .partial_cmp(&volumes[*a])
+            .unwrap_or(Ordering::Equal)
+    });
+    per_asset_values = idx
+        .into_iter()
+        .map(|i| std::mem::take(&mut per_asset_values[i]))
+        .collect();
 
     let mut map = Map::new();
     map.insert("window".into(), Value::String(window.to_string()));
@@ -715,21 +777,36 @@ pub fn aggregate_wallet_stats(input_rows: &[Value], window: &str, now: i64, max_
     map.insert("losses".into(), js_i64(total_bets - wins));
     map.insert(
         "winRate".into(),
-        js_num(if total_bets > 0 { round((wins as f64 / total_bets as f64) * 100.0 * 10.0) / 10.0 } else { 0.0 }),
+        js_num(if total_bets > 0 {
+            round((wins as f64 / total_bets as f64) * 100.0 * 10.0) / 10.0
+        } else {
+            0.0
+        }),
     );
     map.insert("volume".into(), js_num(round(volume)));
     map.insert("netPnl".into(), js_num(round(net_pnl)));
     map.insert("longestWinStreak".into(), js_i64(longest_win_streak));
     map.insert("longestLossStreak".into(), js_i64(longest_loss_streak));
-    map.insert("bestTrade".into(), best.map(trade_of).unwrap_or(Value::Null));
+    map.insert(
+        "bestTrade".into(),
+        best.map(trade_of).unwrap_or(Value::Null),
+    );
     map.insert(
         "worstTrade".into(),
-        if total_bets > 0 { worst.map(trade_of).unwrap_or(Value::Null) } else { Value::Null },
+        if total_bets > 0 {
+            worst.map(trade_of).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
     );
     map.insert("perAsset".into(), Value::Array(per_asset_values));
     map.insert(
         "series".into(),
-        Value::Array(build_daily_series(&chronological, stats_series_days(window), now)),
+        Value::Array(build_daily_series(
+            &chronological,
+            stats_series_days(window),
+            now,
+        )),
     );
     map.insert("truncated".into(), Value::Bool(truncated));
     Value::Object(map)
@@ -760,7 +837,9 @@ pub fn parse_leaderboard_window(raw: Option<&str>) -> Option<&'static str> {
 
 /// Case-insensitive metric lookup; returns the canonical spelling.
 pub fn parse_metric(raw: Option<&str>) -> Option<&'static str> {
-    let v = raw.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty())?;
+    let v = raw
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())?;
     match v.as_str() {
         "netpnl" => Some("netPnl"),
         "volume" => Some("volume"),
@@ -784,7 +863,11 @@ pub fn leaderboard_window_start_ms(window: &str, now: i64) -> Option<i64> {
 /// Resolve the effective `created_at` lower bound: `window` wins when present,
 /// otherwise the legacy rolling `timeframeHours` is honoured, clamped to five
 /// years so an absurd value cannot scan forever.
-pub fn resolve_since_ms(window: Option<&str>, timeframe_hours: Option<f64>, now: i64) -> Option<i64> {
+pub fn resolve_since_ms(
+    window: Option<&str>,
+    timeframe_hours: Option<f64>,
+    now: i64,
+) -> Option<i64> {
     if let Some(w) = window {
         return leaderboard_window_start_ms(w, now);
     }
@@ -796,14 +879,26 @@ pub fn resolve_since_ms(window: Option<&str>, timeframe_hours: Option<f64>, now:
 /// Net PnL of one settled bet: the payout actually booked on a win, minus the
 /// stake. A losing row contributes `-stake` even if a stray payout is present.
 pub fn row_net_pnl(row: &Value) -> f64 {
-    let payout = if bool_field(row, "won") { number_field(row, "payout") } else { 0.0 };
+    let payout = if bool_field(row, "won") {
+        number_field(row, "payout")
+    } else {
+        0.0
+    };
     payout - number_field(row, "amount")
 }
 
 /// Board-level PnL from a wallet's totals: payout settled minus stake, 6dp.
 pub fn net_pnl_of(total_payout: f64, total_wagered: f64) -> f64 {
-    let p = if total_payout.is_finite() { total_payout } else { 0.0 };
-    let w = if total_wagered.is_finite() { total_wagered } else { 0.0 };
+    let p = if total_payout.is_finite() {
+        total_payout
+    } else {
+        0.0
+    };
+    let w = if total_wagered.is_finite() {
+        total_wagered
+    } else {
+        0.0
+    };
     round_finite(p - w)
 }
 
@@ -827,8 +922,14 @@ impl Entry {
     /// `publicRow`: the wire shape, wallet truncated, back-compat keys first.
     pub fn public_row(&self, rank: i64, username: Option<String>) -> Value {
         let mut m = Map::new();
-        m.insert("wallet_address".into(), Value::String(truncate_address(&self.wallet_address)));
-        m.insert("username".into(), username.map(Value::String).unwrap_or(Value::Null));
+        m.insert(
+            "wallet_address".into(),
+            Value::String(truncate_address(&self.wallet_address)),
+        );
+        m.insert(
+            "username".into(),
+            username.map(Value::String).unwrap_or(Value::Null),
+        );
         m.insert("total_bets".into(), js_i64(self.total_bets));
         m.insert("wins".into(), js_i64(self.wins));
         m.insert("losses".into(), js_i64(self.losses));
@@ -836,14 +937,23 @@ impl Entry {
         m.insert("total_payout".into(), js_num(self.total_payout));
         m.insert("net_profit".into(), js_num(self.net_pnl));
         m.insert("win_rate".into(), js_num(self.win_rate));
-        m.insert("primary_network".into(), Value::String(self.primary_network.clone()));
-        m.insert("primary_asset".into(), Value::String(self.primary_asset.clone()));
+        m.insert(
+            "primary_network".into(),
+            Value::String(self.primary_network.clone()),
+        );
+        m.insert(
+            "primary_asset".into(),
+            Value::String(self.primary_asset.clone()),
+        );
         m.insert("rank".into(), js_i64(rank));
         m.insert("net_pnl".into(), js_num(self.net_pnl));
         m.insert("total_volume".into(), js_num(self.total_volume));
         m.insert(
             "last_bet_at".into(),
-            self.last_bet_at.clone().map(Value::String).unwrap_or(Value::Null),
+            self.last_bet_at
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
         );
         Value::Object(m)
     }
@@ -889,6 +999,7 @@ fn bump(tally: &mut Vec<(String, i64)>, key: &str) {
 /// wallet order, like the JS Map the TS core used.
 pub fn aggregate_rows(rows: &[Value]) -> AggregateResult {
     #[rustfmt::skip]
+    #[allow(clippy::type_complexity)]
     let mut wallets: Vec<(String, i64, i64, i64, f64, f64, Vec<(String, i64)>, Vec<(String, i64)>, Option<String>)> = Vec::new();
     let mut asset_tally: Vec<(String, i64)> = Vec::new();
     let mut demo_rows_dropped = 0i64;
@@ -898,7 +1009,11 @@ pub fn aggregate_rows(rows: &[Value]) -> AggregateResult {
             demo_rows_dropped += 1;
             continue;
         }
-        let addr = canonical_address(&row.get("wallet_address").map(value_to_string).unwrap_or_default());
+        let addr = canonical_address(
+            &row.get("wallet_address")
+                .map(value_to_string)
+                .unwrap_or_default(),
+        );
         if addr.is_empty() {
             continue;
         }
@@ -908,7 +1023,17 @@ pub fn aggregate_rows(rows: &[Value]) -> AggregateResult {
         let idx = match wallets.iter().position(|(a, ..)| *a == addr) {
             Some(i) => i,
             None => {
-                wallets.push((addr.clone(), 0, 0, 0, 0.0, 0.0, Vec::new(), Vec::new(), None));
+                wallets.push((
+                    addr.clone(),
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    0.0,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                ));
                 wallets.len() - 1
             }
         };
@@ -928,7 +1053,9 @@ pub fn aggregate_rows(rows: &[Value]) -> AggregateResult {
         bump(&mut entry.7, &asset);
         bump(&mut asset_tally, &asset);
 
-        let at = coalesce(row, "created_at").map(value_to_string).filter(|s| !s.is_empty());
+        let at = coalesce(row, "created_at")
+            .map(value_to_string)
+            .filter(|s| !s.is_empty());
         if let Some(at) = at {
             let fresher = match &entry.8 {
                 None => true,
@@ -945,23 +1072,39 @@ pub fn aggregate_rows(rows: &[Value]) -> AggregateResult {
 
     let entries = wallets
         .into_iter()
-        .map(|(wallet_address, total_bets, wins, losses, total_wagered, total_payout, networks, assets, last_bet_at)| {
-            let net = net_pnl_of(total_payout, total_wagered);
-            Entry {
+        .map(
+            |(
                 wallet_address,
                 total_bets,
                 wins,
                 losses,
-                total_wagered: round_finite(total_wagered),
-                total_payout: round_finite(total_payout),
-                net_pnl: net,
-                total_volume: round_finite(total_wagered),
-                win_rate: if total_bets > 0 { (wins as f64 / total_bets as f64) * 100.0 } else { 0.0 },
-                primary_network: top_of(&networks, "USDC"),
-                primary_asset: top_of(&assets, "USDC"),
+                total_wagered,
+                total_payout,
+                networks,
+                assets,
                 last_bet_at,
-            }
-        })
+            )| {
+                let net = net_pnl_of(total_payout, total_wagered);
+                Entry {
+                    wallet_address,
+                    total_bets,
+                    wins,
+                    losses,
+                    total_wagered: round_finite(total_wagered),
+                    total_payout: round_finite(total_payout),
+                    net_pnl: net,
+                    total_volume: round_finite(total_wagered),
+                    win_rate: if total_bets > 0 {
+                        (wins as f64 / total_bets as f64) * 100.0
+                    } else {
+                        0.0
+                    },
+                    primary_network: top_of(&networks, "USDC"),
+                    primary_asset: top_of(&assets, "USDC"),
+                    last_bet_at,
+                }
+            },
+        )
         .collect();
 
     let mut assets = asset_tally;
@@ -1036,13 +1179,16 @@ pub struct RankLookup {
 
 /// Where `own` sits among `entries` (already sorted by the same metric).
 pub fn lookup_rank(entries: &[Entry], own: &Entry, metric: &str) -> RankLookup {
-    let exact_index = entries.iter().position(|e| e.wallet_address == own.wallet_address);
+    let exact_index = entries
+        .iter()
+        .position(|e| e.wallet_address == own.wallet_address);
 
     let people_ahead = match exact_index {
         Some(i) => i as i64,
-        None => {
-            entries.iter().filter(|e| compare_entries(e, own, metric) == Ordering::Less).count() as i64
-        }
+        None => entries
+            .iter()
+            .filter(|e| compare_entries(e, own, metric) == Ordering::Less)
+            .count() as i64,
     };
 
     let mut next_rank_value: Option<f64> = None;
@@ -1055,13 +1201,19 @@ pub fn lookup_rank(entries: &[Entry], own: &Entry, metric: &str) -> RankLookup {
     }
 
     let own_value = metric_value(own, metric);
-    let gap = next_rank_value.map(|v| round_finite((v - own_value).max(0.0) + if metric == "bets" { 1.0 } else { 0.01 }));
+    let gap = next_rank_value.map(|v| {
+        round_finite((v - own_value).max(0.0) + if metric == "bets" { 1.0 } else { 0.01 })
+    });
 
     RankLookup {
         rank: people_ahead + 1,
         people_ahead,
         total_ranked: entries.len() as i64,
-        next_rank: if people_ahead > 0 { Some(people_ahead) } else { None },
+        next_rank: if people_ahead > 0 {
+            Some(people_ahead)
+        } else {
+            None
+        },
         next_rank_value: next_rank_value.map(round_finite),
         gap_to_next_rank: gap,
         estimated: exact_index.is_none(),
@@ -1090,8 +1242,11 @@ pub fn clamp_limit(raw: Option<&str>) -> i64 {
 /// Asset names are bind parameters, but keep them boring anyway.
 pub fn sanitize_asset(raw: Option<&str>) -> String {
     let v = raw.unwrap_or("ALL").trim().to_uppercase();
-    let cleaned: String =
-        v.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').take(16).collect();
+    let cleaned: String = v
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(16)
+        .collect();
     if cleaned.is_empty() {
         "ALL".to_string()
     } else {
@@ -1146,7 +1301,8 @@ impl BoardCache {
 
     /// Hit only if within the TTL — this is what `getSnapshot` consults.
     pub fn get_fresh(&self, key: &str, now: i64) -> Option<&Snapshot> {
-        self.get(key).filter(|s| now - s.updated_at < LB_CACHE_TTL_MS)
+        self.get(key)
+            .filter(|s| now - s.updated_at < LB_CACHE_TTL_MS)
     }
 
     /// `Map.set` then evict-oldest while over capacity.
@@ -1171,22 +1327,36 @@ impl BoardCache {
 
 /// `metaBlock`: scan bounds and freshness for every board response. Extras are
 /// merged first, matching the TS object spread.
-pub fn meta_block(snapshot: &Snapshot, now: i64, cached: bool, extras: Vec<(String, Value)>) -> Value {
+pub fn meta_block(
+    snapshot: &Snapshot,
+    now: i64,
+    cached: bool,
+    extras: Vec<(String, Value)>,
+) -> Value {
     let mut map = Map::new();
     for (k, v) in extras {
         map.insert(k, v);
     }
     map.insert(
         "since".into(),
-        snapshot.since_ms.map(|ms| Value::String(iso_ms(ms))).unwrap_or(Value::Null),
+        snapshot
+            .since_ms
+            .map(|ms| Value::String(iso_ms(ms)))
+            .unwrap_or(Value::Null),
     );
     map.insert("scannedRows".into(), js_i64(snapshot.scanned_rows));
     map.insert("realRows".into(), js_i64(snapshot.real_rows));
     map.insert("demoRowsDropped".into(), js_i64(snapshot.demo_rows_dropped));
     map.insert("truncated".into(), Value::Bool(snapshot.truncated));
-    map.insert("updatedAt".into(), Value::String(iso_ms(snapshot.updated_at)));
+    map.insert(
+        "updatedAt".into(),
+        Value::String(iso_ms(snapshot.updated_at)),
+    );
     map.insert("cached".into(), Value::Bool(cached));
-    map.insert("stale".into(), Value::Bool(now - snapshot.updated_at >= LB_CACHE_TTL_MS));
+    map.insert(
+        "stale".into(),
+        Value::Bool(now - snapshot.updated_at >= LB_CACHE_TTL_MS),
+    );
     Value::Object(map)
 }
 
@@ -1289,7 +1459,10 @@ mod tests {
     const C: &str = "0xcccccccccccccccccccccccccccccccccccccccc";
 
     fn params(pairs: &[(&str, &str)]) -> Params {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -1327,7 +1500,10 @@ mod tests {
     #[test]
     fn date_parsing_edges() {
         assert_eq!(parse_date_ms("2026-02-01"), Some(1_769_904_000_000)); // UTC midnight
-        assert_eq!(parse_date_ms("2026-02-01T00:00:00.000Z"), Some(1_769_904_000_000));
+        assert_eq!(
+            parse_date_ms("2026-02-01T00:00:00.000Z"),
+            Some(1_769_904_000_000)
+        );
         assert_eq!(parse_date_ms("not-a-date"), None);
         assert_eq!(iso_ms(1_769_904_000_000), "2026-02-01T00:00:00.000Z");
         assert_eq!(utc_midnight_ms(1_769_904_000_000 + 1), 1_769_904_000_000);
@@ -1336,11 +1512,21 @@ mod tests {
 
     #[test]
     fn demo_rows_are_detected_like_the_ts_helper() {
-        assert!(is_demo_bet_row(&json!({"id": "demo-1700000000000", "wallet_address": WALLET_LOWER})));
-        assert!(is_demo_bet_row(&json!({"id": "DEMO-1", "wallet_address": WALLET_LOWER})));
-        assert!(is_demo_bet_row(&json!({"id": "real", "wallet_address": "0xDEMO11111111111111111111111111111111111"})));
-        assert!(is_demo_bet_row(&json!({"id": "real", "wallet_address": "0xdemooooo00000000000000000000000000000000"})));
-        assert!(!is_demo_bet_row(&json!({"id": "bet_1", "wallet_address": WALLET_LOWER})));
+        assert!(is_demo_bet_row(
+            &json!({"id": "demo-1700000000000", "wallet_address": WALLET_LOWER})
+        ));
+        assert!(is_demo_bet_row(
+            &json!({"id": "DEMO-1", "wallet_address": WALLET_LOWER})
+        ));
+        assert!(is_demo_bet_row(
+            &json!({"id": "real", "wallet_address": "0xDEMO11111111111111111111111111111111111"})
+        ));
+        assert!(is_demo_bet_row(
+            &json!({"id": "real", "wallet_address": "0xdemooooo00000000000000000000000000000000"})
+        ));
+        assert!(!is_demo_bet_row(
+            &json!({"id": "bet_1", "wallet_address": WALLET_LOWER})
+        ));
         assert!(!is_demo_bet_row(&json!({"id": null})));
         assert!(!is_demo_bet_row(&json!({})));
     }
@@ -1364,15 +1550,20 @@ mod tests {
         assert!(q.asset.is_none() && q.outcome.is_none() && q.direction.is_none());
         assert!(q.from.is_none() && q.to.is_none());
 
-        let clamped = parse_history_request(&params(&[("wallet", WALLET), ("limit", "100000")])).unwrap();
+        let clamped =
+            parse_history_request(&params(&[("wallet", WALLET), ("limit", "100000")])).unwrap();
         assert_eq!(clamped.limit, MAX_HISTORY_LIMIT);
         let junk = parse_history_request(&params(&[("wallet", WALLET), ("limit", "abc")])).unwrap();
         assert_eq!(junk.limit, DEFAULT_HISTORY_LIMIT);
-        let negative = parse_history_request(&params(&[("wallet", WALLET), ("limit", "-5")])).unwrap();
+        let negative =
+            parse_history_request(&params(&[("wallet", WALLET), ("limit", "-5")])).unwrap();
         assert_eq!(negative.limit, 1);
-        let deep =
-            parse_history_request(&params(&[("wallet", WALLET), ("offset", "999999999"), ("limit", "25")]))
-                .unwrap();
+        let deep = parse_history_request(&params(&[
+            ("wallet", WALLET),
+            ("offset", "999999999"),
+            ("limit", "25"),
+        ]))
+        .unwrap();
         assert_eq!((deep.offset, deep.paged), (MAX_HISTORY_OFFSET, true));
         let empty_offset =
             parse_history_request(&params(&[("wallet", WALLET), ("offset", " ")])).unwrap();
@@ -1382,30 +1573,40 @@ mod tests {
 
     #[test]
     fn history_params_reject_with_the_exact_ts_messages() {
-        assert_eq!(parse_history_request(&params(&[])).unwrap_err(), "Missing wallet parameter");
+        assert_eq!(
+            parse_history_request(&params(&[])).unwrap_err(),
+            "Missing wallet parameter"
+        );
         assert_eq!(
             parse_history_request(&params(&[("wallet", "not-a-wallet")])).unwrap_err(),
             "Invalid wallet parameter"
         );
         assert_eq!(
-            parse_history_request(&params(&[("wallet", WALLET), ("asset", ";--drop")])).unwrap_err(),
-            "Invalid asset filter"
-        );
-        assert_eq!(
-            parse_history_request(&params(&[("wallet", WALLET), ("asset", "TOO_LONG_ASSET_CODE_NAME")]))
+            parse_history_request(&params(&[("wallet", WALLET), ("asset", ";--drop")]))
                 .unwrap_err(),
             "Invalid asset filter"
         );
         assert_eq!(
-            parse_history_request(&params(&[("wallet", WALLET), ("outcome", "maybe")])).unwrap_err(),
+            parse_history_request(&params(&[
+                ("wallet", WALLET),
+                ("asset", "TOO_LONG_ASSET_CODE_NAME")
+            ]))
+            .unwrap_err(),
+            "Invalid asset filter"
+        );
+        assert_eq!(
+            parse_history_request(&params(&[("wallet", WALLET), ("outcome", "maybe")]))
+                .unwrap_err(),
             "Invalid outcome filter"
         );
         assert_eq!(
-            parse_history_request(&params(&[("wallet", WALLET), ("direction", "SIDEWAYS")])).unwrap_err(),
+            parse_history_request(&params(&[("wallet", WALLET), ("direction", "SIDEWAYS")]))
+                .unwrap_err(),
             "Invalid direction filter"
         );
         assert_eq!(
-            parse_history_request(&params(&[("wallet", WALLET), ("from", "not-a-date")])).unwrap_err(),
+            parse_history_request(&params(&[("wallet", WALLET), ("from", "not-a-date")]))
+                .unwrap_err(),
             "Invalid date filter"
         );
         assert_eq!(
@@ -1447,20 +1648,30 @@ mod tests {
     #[test]
     fn tx_hash_pick_prefers_the_first_real_spelling() {
         let hash = format!("0x{}", "a".repeat(64));
-        assert_eq!(pick_row_tx_hash(&json!({"tx_hash": hash.clone()})).as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            pick_row_tx_hash(&json!({"tx_hash": hash.clone()})).as_deref(),
+            Some(hash.as_str())
+        );
         assert_eq!(
             pick_row_tx_hash(&json!({"settlement_tx_hash": format!(" {hash} ")})).as_deref(),
             Some(hash.as_str())
         );
         let other = format!("0x{}", "c".repeat(64));
         assert_eq!(
-            pick_row_tx_hash(&json!({"tx_hash": hash.clone(), "settlement_tx_hash": other})).as_deref(),
+            pick_row_tx_hash(&json!({"tx_hash": hash.clone(), "settlement_tx_hash": other}))
+                .as_deref(),
             Some(hash.as_str())
         );
-        assert_eq!(pick_row_tx_hash(&json!({"tx_hash": format!("lock:{hash}")})), None);
+        assert_eq!(
+            pick_row_tx_hash(&json!({"tx_hash": format!("lock:{hash}")})),
+            None
+        );
         assert_eq!(pick_row_tx_hash(&json!({"tx_hash": "INTERNAL"})), None);
         assert_eq!(pick_row_tx_hash(&json!({"tx_hash": "0xdeadbeef"})), None);
-        assert_eq!(pick_row_tx_hash(&json!({"tx_hash": format!("0x{}", "b".repeat(63))})), None);
+        assert_eq!(
+            pick_row_tx_hash(&json!({"tx_hash": format!("0x{}", "b".repeat(63))})),
+            None
+        );
         assert_eq!(pick_row_tx_hash(&json!({"tx_hash": 12345})), None);
         assert_eq!(pick_row_tx_hash(&json!({"settlement_tx_hash": null})), None);
         assert_eq!(pick_row_tx_hash(&json!({})), None);
@@ -1490,7 +1701,10 @@ mod tests {
         assert_eq!(parse_stats_window(Some("all")).unwrap(), "all");
         assert!(parse_stats_window(Some("90d")).is_err());
         let now = 1_770_000_000_000i64;
-        assert_eq!(stats_window_start_iso("7d", now).as_deref(), Some(iso_ms(now - 7 * MS_PER_DAY).as_str()));
+        assert_eq!(
+            stats_window_start_iso("7d", now).as_deref(),
+            Some(iso_ms(now - 7 * MS_PER_DAY).as_str())
+        );
         assert_eq!(stats_window_start_iso("all", now), None);
         assert_eq!(stats_series_days("7d"), 7);
         assert_eq!(stats_series_days("30d"), 30);
@@ -1500,17 +1714,30 @@ mod tests {
     #[test]
     fn streaks_over_chronological_flags() {
         // W W L W W W L L W
-        let (win, loss) = compute_streaks(&[true, true, false, true, true, true, false, false, true]);
+        let (win, loss) =
+            compute_streaks(&[true, true, false, true, true, true, false, false, true]);
         assert_eq!((win, loss), (3, 2));
         assert_eq!(compute_streaks(&[]), (0, 0));
     }
 
     #[test]
     fn bet_net_is_defensive_on_losing_rows() {
-        assert_eq!(bet_net(&json!({"amount": "10", "payout": "19", "won": true})), 9.0);
-        assert_eq!(bet_net(&json!({"amount": "10", "payout": "0", "won": false})), -10.0);
-        assert_eq!(bet_net(&json!({"amount": "10", "payout": "999", "won": false})), -10.0);
-        assert_eq!(bet_net(&json!({"amount": null, "payout": null, "won": false})), 0.0);
+        assert_eq!(
+            bet_net(&json!({"amount": "10", "payout": "19", "won": true})),
+            9.0
+        );
+        assert_eq!(
+            bet_net(&json!({"amount": "10", "payout": "0", "won": false})),
+            -10.0
+        );
+        assert_eq!(
+            bet_net(&json!({"amount": "10", "payout": "999", "won": false})),
+            -10.0
+        );
+        assert_eq!(
+            bet_net(&json!({"amount": null, "payout": null, "won": false})),
+            0.0
+        );
     }
 
     #[test]
@@ -1521,19 +1748,25 @@ mod tests {
         assert_eq!(series.len(), 7);
         assert_eq!(series[0]["date"], json!("2026-02-04"));
         assert_eq!(series[6]["date"], json!("2026-02-10"));
-        assert!(series.iter().all(|p| p["bets"] == json!(0) && p["cumNet"] == json!(0)));
+        assert!(series
+            .iter()
+            .all(|p| p["bets"] == json!(0) && p["cumNet"] == json!(0)));
 
-        let row = |a: f64, p: f64, won: bool, at: &str| {
-            json!({"amount": a, "payout": p, "won": won, "resolved_at": at, "created_at": at})
-        };
+        let row = |a: f64, p: f64, won: bool, at: &str| json!({"amount": a, "payout": p, "won": won, "resolved_at": at, "created_at": at});
         let rows = vec![
             row(10.0, 19.0, true, "2026-02-08T05:00:00.000Z"),
             row(5.0, 0.0, false, "2026-02-09T05:00:00.000Z"),
             row(10.0, 19.0, true, "2026-01-28T05:00:00.000Z"), // outside the window
         ];
         let series = build_daily_series(&rows, 7, now);
-        let win_day = series.iter().find(|p| p["date"] == json!("2026-02-08")).unwrap();
-        let loss_day = series.iter().find(|p| p["date"] == json!("2026-02-09")).unwrap();
+        let win_day = series
+            .iter()
+            .find(|p| p["date"] == json!("2026-02-08"))
+            .unwrap();
+        let loss_day = series
+            .iter()
+            .find(|p| p["date"] == json!("2026-02-09"))
+            .unwrap();
         assert_eq!(win_day["bets"], json!(1));
         assert_eq!(win_day["net"], json!(9));
         assert_eq!(win_day["cumNet"], json!(9));
@@ -1613,7 +1846,9 @@ mod tests {
     fn stats_falls_back_to_created_at_when_unresolved() {
         let now = parse_date_ms("2026-02-10T12:00:00.000Z").unwrap();
         let created_at = iso_ms(now - 17_280_000);
-        let rows = vec![json!({"id": "c1", "wallet_address": WALLET_LOWER, "amount": 10.0, "payout": 19.0, "won": true, "resolved_at": null, "created_at": created_at})];
+        let rows = vec![
+            json!({"id": "c1", "wallet_address": WALLET_LOWER, "amount": 10.0, "payout": 19.0, "won": true, "resolved_at": null, "created_at": created_at}),
+        ];
         let stats = aggregate_wallet_stats(&rows, "7d", now, None);
         assert_eq!(stats["bestTrade"]["net"], json!(9));
         assert_eq!(stats["bestTrade"]["at"], json!(created_at));
@@ -1645,23 +1880,44 @@ mod tests {
     #[test]
     fn leaderboard_since_boundaries() {
         let now = parse_date_ms("2026-01-15T12:34:56.000Z").unwrap();
-        assert_eq!(leaderboard_window_start_ms("today", now), parse_date_ms("2026-01-15T00:00:00.000Z"));
+        assert_eq!(
+            leaderboard_window_start_ms("today", now),
+            parse_date_ms("2026-01-15T00:00:00.000Z")
+        );
         // "today" stays honest at the boundary: 23:59:59.999Z still maps to midnight.
         let edge = parse_date_ms("2026-01-15T23:59:59.999Z").unwrap();
-        assert_eq!(leaderboard_window_start_ms("today", edge), parse_date_ms("2026-01-15T00:00:00.000Z"));
-        assert_eq!(leaderboard_window_start_ms("7d", now), Some(now - 7 * MS_PER_DAY));
+        assert_eq!(
+            leaderboard_window_start_ms("today", edge),
+            parse_date_ms("2026-01-15T00:00:00.000Z")
+        );
+        assert_eq!(
+            leaderboard_window_start_ms("7d", now),
+            Some(now - 7 * MS_PER_DAY)
+        );
         assert_eq!(leaderboard_window_start_ms("all", now), None);
         assert_eq!(resolve_since_ms(Some("all"), None, now), None);
-        assert_eq!(resolve_since_ms(None, Some(168.0), now), Some(now - 168 * 3_600_000));
-        assert_eq!(resolve_since_ms(None, Some(24.0), now), Some(now - 24 * 3_600_000));
+        assert_eq!(
+            resolve_since_ms(None, Some(168.0), now),
+            Some(now - 168 * 3_600_000)
+        );
+        assert_eq!(
+            resolve_since_ms(None, Some(24.0), now),
+            Some(now - 24 * 3_600_000)
+        );
         assert_eq!(resolve_since_ms(None, None, now), None);
         assert_eq!(resolve_since_ms(None, Some(f64::NAN), now), None);
         assert_eq!(resolve_since_ms(None, Some(0.0), now), None);
         assert_eq!(resolve_since_ms(None, Some(-5.0), now), None);
         // Absurd legacy windows clamp to five years instead of scanning forever.
-        assert_eq!(resolve_since_ms(None, Some(1e12), now), Some(now - (24.0 * 365.0 * 5.0 * 3_600_000.0) as i64));
+        assert_eq!(
+            resolve_since_ms(None, Some(1e12), now),
+            Some(now - (24.0 * 365.0 * 5.0 * 3_600_000.0) as i64)
+        );
         // window wins over timeframeHours — and 'all' still short-circuits.
-        assert_eq!(resolve_since_ms(Some("7d"), Some(720.0), now), Some(now - 7 * MS_PER_DAY));
+        assert_eq!(
+            resolve_since_ms(Some("7d"), Some(720.0), now),
+            Some(now - 7 * MS_PER_DAY)
+        );
         assert_eq!(resolve_since_ms(Some("all"), Some(24.0), now), None);
     }
 
@@ -1682,7 +1938,13 @@ mod tests {
         let agg = aggregate_rows(&rows);
         assert_eq!(agg.demo_rows_dropped, 2);
         assert_eq!(agg.real_rows, 1);
-        assert_eq!(agg.entries.iter().map(|e| e.wallet_address.as_str()).collect::<Vec<_>>(), vec![A]);
+        assert_eq!(
+            agg.entries
+                .iter()
+                .map(|e| e.wallet_address.as_str())
+                .collect::<Vec<_>>(),
+            vec![A]
+        );
         assert_eq!(agg.entries[0].net_pnl, 90.0);
         assert_eq!(agg.entries[0].total_bets, 1);
         // The demo stake must not leak into the asset selector either.
@@ -1691,7 +1953,13 @@ mod tests {
         // A whole demo wallet is dropped too, even with a real-looking id.
         let rows = vec![
             lb_row(A, "r1", 10.0, 30.0, true),
-            lb_row("0xDEMO11111111111111111111111111111111111", "r2", 10.0, 1e9, true),
+            lb_row(
+                "0xDEMO11111111111111111111111111111111111",
+                "r2",
+                10.0,
+                1e9,
+                true,
+            ),
         ];
         let agg = aggregate_rows(&rows);
         assert_eq!(agg.demo_rows_dropped, 1);
@@ -1717,18 +1985,35 @@ mod tests {
         assert_eq!(e.primary_network, "ARC");
         assert_eq!(e.primary_asset, "BTC");
 
-        let full = aggregate_rows(&[lb_row(A, "f1", 10.0, 19.0, true), lb_row(A, "f2", 10.0, 21.0, true), lb_row(A, "f3", 5.0, 0.0, false), lb_row(A, "f4", 5.0, 0.0, false)]);
+        let full = aggregate_rows(&[
+            lb_row(A, "f1", 10.0, 19.0, true),
+            lb_row(A, "f2", 10.0, 21.0, true),
+            lb_row(A, "f3", 5.0, 0.0, false),
+            lb_row(A, "f4", 5.0, 0.0, false),
+        ]);
         let e = &full.entries[0];
         assert_eq!((e.total_bets, e.wins, e.losses), (4, 2, 2));
-        assert_eq!((e.total_wagered, e.total_payout, e.net_pnl), (30.0, 40.0, 10.0));
-        assert_eq!(e.net_pnl, e.total_payout - e.total_wagered, "net is payout - wagered");
+        assert_eq!(
+            (e.total_wagered, e.total_payout, e.net_pnl),
+            (30.0, 40.0, 10.0)
+        );
+        assert_eq!(
+            e.net_pnl,
+            e.total_payout - e.total_wagered,
+            "net is payout - wagered"
+        );
         assert_eq!(e.total_volume, 30.0);
         assert_eq!(e.win_rate, 50.0);
         assert_eq!(e.primary_network, "BOT");
         assert_eq!(e.primary_asset, "BTC");
 
         // A row with no wallet is ignored; an empty board is fine.
-        assert_eq!(aggregate_rows(&[json!({"id": "x", "wallet_address": "  ", "amount": 100.0})]).entries.len(), 0);
+        assert_eq!(
+            aggregate_rows(&[json!({"id": "x", "wallet_address": "  ", "amount": 100.0})])
+                .entries
+                .len(),
+            0
+        );
         let empty = aggregate_rows(&[]);
         assert!(empty.entries.is_empty());
         assert_eq!((empty.real_rows, empty.demo_rows_dropped), (0, 0));
@@ -1742,17 +2027,36 @@ mod tests {
         ];
         assert_eq!(
             aggregate_rows(&rows).assets,
-            vec![("ETH".to_string(), 2), ("BTC".to_string(), 1), ("GOLD".to_string(), 1)]
+            vec![
+                ("ETH".to_string(), 2),
+                ("BTC".to_string(), 1),
+                ("GOLD".to_string(), 1)
+            ]
         );
     }
 
     #[test]
     fn leaderboard_pnl_math() {
-        assert_eq!(row_net_pnl(&json!({"won": true, "amount": 10.0, "payout": 19.0})), 9.0);
-        assert_eq!(row_net_pnl(&json!({"won": false, "amount": 10.0, "payout": 999.0})), -10.0);
-        assert_eq!(row_net_pnl(&json!({"won": true, "amount": "2.50", "payout": "4.75"})), 2.25);
-        assert_eq!(row_net_pnl(&json!({"won": true, "amount": "oops", "payout": "4.75"})), 4.75);
-        assert_eq!(row_net_pnl(&json!({"won": false, "amount": null, "payout": null})), 0.0);
+        assert_eq!(
+            row_net_pnl(&json!({"won": true, "amount": 10.0, "payout": 19.0})),
+            9.0
+        );
+        assert_eq!(
+            row_net_pnl(&json!({"won": false, "amount": 10.0, "payout": 999.0})),
+            -10.0
+        );
+        assert_eq!(
+            row_net_pnl(&json!({"won": true, "amount": "2.50", "payout": "4.75"})),
+            2.25
+        );
+        assert_eq!(
+            row_net_pnl(&json!({"won": true, "amount": "oops", "payout": "4.75"})),
+            4.75
+        );
+        assert_eq!(
+            row_net_pnl(&json!({"won": false, "amount": null, "payout": null})),
+            0.0
+        );
         assert_eq!(net_pnl_of(100.0, 60.0), 40.0);
         assert_eq!(net_pnl_of(0.0, 25.0), -25.0);
         assert_eq!(net_pnl_of(0.1 + 0.2, 0.3), 0.0);
@@ -1772,7 +2076,13 @@ mod tests {
     #[test]
     fn leaderboard_ordering_and_tie_breaks() {
         let entries = sample_entries();
-        let by = |w: &str| entries.iter().find(|e| e.wallet_address == w).unwrap().clone();
+        let by = |w: &str| {
+            entries
+                .iter()
+                .find(|e| e.wallet_address == w)
+                .unwrap()
+                .clone()
+        };
         assert_eq!(metric_value(&by(A), "netPnl"), -10.0);
         assert_eq!(metric_value(&by(B), "netPnl"), 50.0);
         assert_eq!(metric_value(&by(C), "volume"), 90.0);
@@ -1780,7 +2090,10 @@ mod tests {
         assert_eq!(metric_value(&by(B), "bets"), 2.0);
 
         let order = |m: &str| {
-            sort_entries(&entries, m).iter().map(|e| e.wallet_address.clone()).collect::<Vec<_>>()
+            sort_entries(&entries, m)
+                .iter()
+                .map(|e| e.wallet_address.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(order("netPnl"), vec![B, C, A]);
         assert_eq!(order("volume"), vec![C, B, A]);
@@ -1794,8 +2107,16 @@ mod tests {
             json!({"id": "b1", "wallet_address": B, "amount": 10.0, "payout": 0.0, "won": false, "asset": "BTC", "network": "BOT", "created_at": "2026-01-10T00:00:00.000Z"}),
         ];
         let tied = sort_entries(&aggregate_rows(&tied_rows).entries, "bets");
-        assert_eq!(tied.iter().map(|e| e.wallet_address.as_str()).collect::<Vec<_>>(), vec![B, C]);
-        assert_eq!(sort_entries(&aggregate_rows(&tied_rows).entries, "bets"), tied);
+        assert_eq!(
+            tied.iter()
+                .map(|e| e.wallet_address.as_str())
+                .collect::<Vec<_>>(),
+            vec![B, C]
+        );
+        assert_eq!(
+            sort_entries(&aggregate_rows(&tied_rows).entries, "bets"),
+            tied
+        );
         assert_eq!(compare_entries(&tied[0], &tied[1], "bets"), Ordering::Less);
     }
 
@@ -1803,10 +2124,24 @@ mod tests {
     fn leaderboard_rank_lookup() {
         let entries = sample_entries();
         let sorted = sort_entries(&entries, "netPnl");
-        let find = |w: &str| sorted.iter().find(|e| e.wallet_address == w).unwrap().clone();
+        let find = |w: &str| {
+            sorted
+                .iter()
+                .find(|e| e.wallet_address == w)
+                .unwrap()
+                .clone()
+        };
 
         let rank = lookup_rank(&sorted, &find(C), "netPnl");
-        assert_eq!((rank.rank, rank.people_ahead, rank.total_ranked, rank.next_rank), (2, 1, 3, Some(1)));
+        assert_eq!(
+            (
+                rank.rank,
+                rank.people_ahead,
+                rank.total_ranked,
+                rank.next_rank
+            ),
+            (2, 1, 3, Some(1))
+        );
         assert_eq!(rank.next_rank_value, Some(50.0));
         // 50 - (-5) = 55, plus the 0.01 needed to strictly overtake.
         assert!((rank.gap_to_next_rank.unwrap() - 55.01).abs() < 1e-9);
@@ -1824,7 +2159,12 @@ mod tests {
         let rank = lookup_rank(&slice, &find(A), "netPnl");
         assert!(rank.estimated);
         assert_eq!(
-            (rank.rank, rank.people_ahead, rank.total_ranked, rank.next_rank_value),
+            (
+                rank.rank,
+                rank.people_ahead,
+                rank.total_ranked,
+                rank.next_rank_value
+            ),
             (2, 1, 1, Some(50.0))
         );
 
@@ -1925,7 +2265,12 @@ mod tests {
             truncated: true,
             since_ms: None,
         };
-        let meta = meta_block(&snap, 1_000 + LB_CACHE_TTL_MS, false, vec![("limit".into(), js_i64(10))]);
+        let meta = meta_block(
+            &snap,
+            1_000 + LB_CACHE_TTL_MS,
+            false,
+            vec![("limit".into(), js_i64(10))],
+        );
         assert_eq!(meta["since"], Value::Null);
         assert_eq!(meta["scannedRows"], json!(5000));
         assert_eq!(meta["realRows"], json!(4999));
@@ -1936,7 +2281,10 @@ mod tests {
         assert_eq!(meta["limit"], json!(10));
         assert_eq!(meta["updatedAt"], json!(iso_ms(1_000)));
 
-        let bounded = Snapshot { since_ms: Some(1_769_904_000_000), ..snap.clone() };
+        let bounded = Snapshot {
+            since_ms: Some(1_769_904_000_000),
+            ..snap.clone()
+        };
         let meta = meta_block(&bounded, 2_000, true, vec![]);
         assert_eq!(meta["since"], json!("2026-02-01T00:00:00.000Z"));
         assert_eq!(meta["cached"], json!(true));
@@ -1969,7 +2317,10 @@ mod tests {
         assert_eq!(proof_num(Some(&json!("5"))), Some(5.0));
         assert_eq!(proof_num(Some(&json!(9.5))), Some(9.5));
         assert_eq!(proof_num(Some(&json!("12abc"))), None); // Number(), not parseFloat()
-        assert_eq!(proof_iso(Some(&json!("2023-11-14T22:13:40.000Z"))).as_deref(), Some("2023-11-14T22:13:40.000Z"));
+        assert_eq!(
+            proof_iso(Some(&json!("2023-11-14T22:13:40.000Z"))).as_deref(),
+            Some("2023-11-14T22:13:40.000Z")
+        );
         assert_eq!(proof_iso(Some(&json!("garbage"))), None);
         assert_eq!(proof_iso(Some(&json!(0))), None); // falsy
         assert_eq!(proof_iso(None), None);

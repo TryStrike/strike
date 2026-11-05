@@ -60,6 +60,7 @@ struct Hub {
     clients: HashMap<u64, Client>,
     last_sent: BTreeMap<String, f64>,
     pump: Option<tokio::task::JoinHandle<()>>,
+    closed: bool,
 }
 
 static HUB: OnceLock<Mutex<Hub>> = OnceLock::new();
@@ -69,7 +70,9 @@ fn hub() -> &'static Mutex<Hub> {
 }
 
 fn lock_hub() -> std::sync::MutexGuard<'static, Hub> {
-    hub().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    hub()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Live SSE subscriptions in this process (parity with
@@ -90,14 +93,28 @@ pub fn subscribe(assets: &[String]) -> Subscription {
     let mut hub = lock_hub();
     let id = hub.next_id;
     hub.next_id += 1;
-    hub.clients.insert(
-        id,
-        Client {
-            assets: assets.iter().cloned().collect(),
-            tx,
-        },
-    );
+    // After `close_all` the sender drops here, so the stream ends as it starts.
+    if !hub.closed {
+        hub.clients.insert(
+            id,
+            Client {
+                assets: assets.iter().cloned().collect(),
+                tx,
+            },
+        );
+    }
     Subscription { id, rx: Some(rx) }
+}
+
+/// Ends every SSE response, for good: this process is shutting down, and a stream
+/// never finishes by itself, so a graceful stop would otherwise wait on each one.
+pub fn close_all() {
+    let mut hub = lock_hub();
+    hub.closed = true;
+    hub.clients.clear();
+    if let Some(handle) = hub.pump.take() {
+        handle.abort();
+    }
 }
 
 /// Start the shared loop if it is not already running. Called by the SSE
@@ -263,8 +280,15 @@ mod tests {
 
     #[test]
     fn union_deduplicates_across_clients() {
-        let union = union_of(vec![set(&["BTC", "ETH"]), set(&["ETH", "SOL"]), set(&["BTC"])]);
-        assert_eq!(union, vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]);
+        let union = union_of(vec![
+            set(&["BTC", "ETH"]),
+            set(&["ETH", "SOL"]),
+            set(&["BTC"]),
+        ]);
+        assert_eq!(
+            union,
+            vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]
+        );
         assert!(union_of(Vec::<BTreeSet<String>>::new()).is_empty());
     }
 
@@ -279,7 +303,10 @@ mod tests {
         let unchanged = fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 100.0)]), 11);
         assert!(unchanged.is_empty(), "an identical quote is not a tick");
 
-        assert_eq!(fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 100.01)]), 12).len(), 2);
+        assert_eq!(
+            fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 100.01)]), 12).len(),
+            2
+        );
     }
 
     #[test]
@@ -299,7 +326,12 @@ mod tests {
         let frames = fan_out(
             &clients,
             &mut last_sent,
-            &quotes(&[("BTC", 0.0), ("ETH", -1.0), ("SOL", f64::NAN), ("XAU", f64::INFINITY)]),
+            &quotes(&[
+                ("BTC", 0.0),
+                ("ETH", -1.0),
+                ("SOL", f64::NAN),
+                ("XAU", f64::INFINITY),
+            ]),
             1,
         );
         assert!(frames.is_empty());
@@ -311,8 +343,12 @@ mod tests {
     fn tick_frame_matches_the_ts_data_line() {
         let clients = vec![(1u64, set(&["BTC"]))];
         let mut last_sent = BTreeMap::new();
-        let frames =
-            fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 67123.45)]), 1_700_000_000_000);
+        let frames = fan_out(
+            &clients,
+            &mut last_sent,
+            &quotes(&[("BTC", 67123.45)]),
+            1_700_000_000_000,
+        );
         assert_eq!(
             frames[0].1,
             "data: {\"asset\":\"BTC\",\"price\":67123.45,\"ts\":1700000000000}\n\n"
@@ -329,7 +365,10 @@ mod tests {
     #[test]
     fn tick_and_heartbeat_cadences_match_the_ts_constants() {
         assert_eq!(tick_interval(), std::time::Duration::from_millis(250));
-        assert_eq!(heartbeat_interval(), std::time::Duration::from_millis(15_000));
+        assert_eq!(
+            heartbeat_interval(),
+            std::time::Duration::from_millis(15_000)
+        );
     }
 
     /// The hub is process-wide and cargo runs tests on several threads, so the
@@ -342,18 +381,29 @@ mod tests {
 
         let mut first = subscribe(&["BTC".to_string()]);
         assert_eq!(active_client_count(), 1);
-        assert!(first.frames().is_some(), "the frame channel is handed out once");
+        assert!(
+            first.frames().is_some(),
+            "the frame channel is handed out once"
+        );
         assert!(first.frames().is_none(), "and cannot be taken twice");
 
         let second = subscribe(&["ETH".to_string()]);
         assert_eq!(active_client_count(), 2);
 
         drop(second);
-        assert_eq!(active_client_count(), 1, "one departure keeps the other alive");
+        assert_eq!(
+            active_client_count(),
+            1,
+            "one departure keeps the other alive"
+        );
 
         drop(first);
         assert_eq!(active_client_count(), 0, "the last client reaps the hub");
-        assert_eq!(deduped_asset_count(), 0, "and clears the dedupe map with it");
+        assert_eq!(
+            deduped_asset_count(),
+            0,
+            "and clears the dedupe map with it"
+        );
     }
 
     #[tokio::test]
@@ -364,9 +414,15 @@ mod tests {
         let id = sub.id();
         let mut rx = sub.frames().expect("receiver");
 
-        let sent = deliver(id, &["data: {\"asset\":\"SOL\",\"price\":1,\"ts\":1}\n\n".to_string()]);
+        let sent = deliver(
+            id,
+            &["data: {\"asset\":\"SOL\",\"price\":1,\"ts\":1}\n\n".to_string()],
+        );
         assert_eq!(sent, 1);
-        assert_eq!(rx.recv().await.unwrap(), "data: {\"asset\":\"SOL\",\"price\":1,\"ts\":1}\n\n");
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            "data: {\"asset\":\"SOL\",\"price\":1,\"ts\":1}\n\n"
+        );
 
         // A frame for a connection that never existed, or one already gone, is
         // dropped rather than queued.

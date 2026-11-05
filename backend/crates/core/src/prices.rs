@@ -15,9 +15,9 @@
 //! talks to Pyth either.
 //!
 //! Design notes carried through the whole module:
-//!   * Endpoints and timings are compile-time constants, exactly as the TS
-//!     hard-codes them — nothing here is env-configurable, so nothing reads
-//!     `crate::config`.
+//!   * Timings are compile-time constants, exactly as the TS hard-codes them.
+//!     The endpoints are constants too, overridable only through `crate::config`
+//!     so tests can stand in for the market.
 //!   * Every upstream error path is isolated per source and yields an empty
 //!     quote list, never an `Err`: `fetch_latest_prices` is infallible so a
 //!     dead upstream still returns whatever else succeeded (200), matching TS.
@@ -32,12 +32,12 @@
 //!     order and therefore already non-deterministic).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
+use crate::config::config;
 use crate::error::{ApiError, ApiResult};
 
 // ---------------------------------------------------------------------------
@@ -156,9 +156,12 @@ pub const VALID_ASSETS: &[&str] = &[
     "INTC", "TSM",
 ];
 
-static BINANCE_FWD: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| BINANCE_PAIRS.iter().copied().collect());
-static BINANCE_REV: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| BINANCE_PAIRS.iter().map(|(a, s)| (*s, *a)).collect());
-static YAHOO_FWD: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| YAHOO_PAIRS.iter().copied().collect());
+static BINANCE_FWD: Lazy<HashMap<&'static str, &'static str>> =
+    Lazy::new(|| BINANCE_PAIRS.iter().copied().collect());
+static BINANCE_REV: Lazy<HashMap<&'static str, &'static str>> =
+    Lazy::new(|| BINANCE_PAIRS.iter().map(|(a, s)| (*s, *a)).collect());
+static YAHOO_FWD: Lazy<HashMap<&'static str, &'static str>> =
+    Lazy::new(|| YAHOO_PAIRS.iter().copied().collect());
 
 /// The Binance symbol for an asset, if it is a Binance-backed (crypto) asset.
 pub fn binance_symbol(asset: &str) -> Option<&'static str> {
@@ -173,6 +176,11 @@ pub fn yahoo_symbol(asset: &str) -> Option<&'static str> {
 /// `BINANCE_SYMBOLS[asset]` truthiness — the crypto test.
 pub fn is_crypto(asset: &str) -> bool {
     BINANCE_FWD.contains_key(asset)
+}
+
+/// An asset some upstream quotes, which is what makes it tradable.
+pub fn is_quoted(asset: &str) -> bool {
+    is_crypto(asset) || yahoo_symbol(asset).is_some()
 }
 
 /// The cache window (ms) that applies to an asset: crypto is held briefly, the
@@ -293,7 +301,9 @@ pub fn parse_binance_rows(rows: &Value) -> Vec<(String, f64)> {
 /// in the spark series.
 pub fn yahoo_price_from_response(response: &Value) -> Option<f64> {
     let direct = js_number(
-        response.get("meta").and_then(|m| m.get("regularMarketPrice")),
+        response
+            .get("meta")
+            .and_then(|m| m.get("regularMarketPrice")),
     );
     if valid_price(direct) {
         return Some(direct);
@@ -364,19 +374,18 @@ struct CacheEntry {
     at: i64,
 }
 
-static CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
 fn cache_get(asset: &str) -> Option<CacheEntry> {
-    CACHE.lock().ok()?.get(asset).copied()
+    let tick = crate::ticks::buffer().latest(asset)?;
+    Some(CacheEntry {
+        price: tick.price,
+        at: tick.at_ms,
+    })
 }
 
-fn cache_set(asset: &str, price: f64, at: i64) {
-    if let Ok(mut map) = CACHE.lock() {
-        map.insert(asset.to_string(), CacheEntry { price, at });
-    }
+fn cache_set(asset: &str, price: f64, at: i64, source: &'static str) {
+    crate::ticks::buffer().record(asset, price, at, source);
 }
 
-/// `fresh()`: the cached price if still inside its window.
 fn fresh(asset: &str, now: i64) -> Option<f64> {
     let entry = cache_get(asset)?;
     if is_fresh(entry.at, now, cache_window_ms(asset)) {
@@ -426,11 +435,7 @@ fn describe_err(err: &ApiError) -> &'static str {
 /// (parsed as no quotes), matching how the TS returns `[]` on a bad status;
 /// transport/timeout/decode failures come back as `Err(ApiError::Http)`, which
 /// each caller swallows. `status_label` reproduces the TS warn text.
-async fn get_json(
-    url: &str,
-    status_label: &str,
-    user_agent: Option<&str>,
-) -> ApiResult<Value> {
+async fn get_json(url: &str, status_label: &str, user_agent: Option<&str>) -> ApiResult<Value> {
     let mut request = CLIENT
         .get(url)
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS));
@@ -459,7 +464,11 @@ async fn fetch_binance(crypto: &[String]) -> Vec<(String, f64)> {
         let list: Vec<&str> = crypto.iter().filter_map(|a| binance_symbol(a)).collect();
         Value::Array(list.into_iter().map(Value::from).collect()).to_string()
     };
-    let url = format!("{BINANCE_ENDPOINT}?symbols={}", encode_uri_component(&symbols_json));
+    let url = format!(
+        "{}?symbols={}",
+        config().binance_endpoint,
+        encode_uri_component(&symbols_json)
+    );
 
     let requested: HashSet<&str> = crypto.iter().map(|a| a.as_str()).collect();
     let rows = match get_json(&url, "binance", None).await {
@@ -475,7 +484,9 @@ async fn fetch_binance(crypto: &[String]) -> Vec<(String, f64)> {
         .into_iter()
         .filter_map(|(symbol, price)| {
             let asset = BINANCE_REV.get(symbol.as_str())?;
-            requested.contains(asset).then(|| (asset.to_string(), price))
+            requested
+                .contains(asset)
+                .then(|| (asset.to_string(), price))
         })
         .collect()
 }
@@ -489,7 +500,10 @@ async fn fetch_yahoo_batch(symbols: &[&str]) -> Vec<(String, f64)> {
         .map(|s| encode_uri_component(s))
         .collect::<Vec<_>>()
         .join(",");
-    let url = format!("{SPARK_ENDPOINT}?symbols={query}&interval=1d&range=1d");
+    let url = format!(
+        "{}?symbols={query}&interval=1d&range=1d",
+        config().yahoo_spark_endpoint
+    );
 
     let data = match get_json(&url, "upstream", Some(YAHOO_USER_AGENT)).await {
         Ok(data) => data,
@@ -541,7 +555,10 @@ async fn fetch_yahoo(assets: &[String]) -> Vec<(String, f64)> {
 /// already holds, quote crypto (Binance) and slow (Yahoo) concurrently, fall
 /// back to Yahoo for crypto Binance missed, then to the last price we ever saw.
 /// Infallible: a dead upstream yields fewer prices, never an error.
-pub async fn fetch_latest_prices(assets: &[String], bypass_crypto_cache: bool) -> BTreeMap<String, f64> {
+pub async fn fetch_latest_prices(
+    assets: &[String],
+    bypass_crypto_cache: bool,
+) -> BTreeMap<String, f64> {
     // Normalise: `Array.from(new Set(assets.filter(Boolean).map(upper)))`,
     // preserving first-seen order.
     let mut wanted: Vec<String> = Vec::new();
@@ -585,20 +602,21 @@ pub async fn fetch_latest_prices(assets: &[String], bypass_crypto_cache: bool) -
         return out;
     }
 
-    let record = |pairs: Vec<(String, f64)>, out: &mut BTreeMap<String, f64>| {
-        let stamp = now_millis();
-        for (asset, price) in pairs {
-            out.insert(asset.clone(), price);
-            cache_set(&asset, price, stamp);
-        }
-    };
+    let record =
+        |pairs: Vec<(String, f64)>, source: &'static str, out: &mut BTreeMap<String, f64>| {
+            let stamp = now_millis();
+            for (asset, price) in pairs {
+                out.insert(asset.clone(), price);
+                cache_set(&asset, price, stamp, source);
+            }
+        };
 
     // Binance and Yahoo run concurrently; each carries its own request timeout.
     let binance_fut = fetch_binance(&crypto);
     let yahoo_fut = fetch_yahoo(&slow);
     let (binance, yahoo) = futures::future::join(binance_fut, yahoo_fut).await;
-    record(binance, &mut out);
-    record(yahoo, &mut out);
+    record(binance, "binance", &mut out);
+    record(yahoo, "yahoo", &mut out);
 
     // Crypto Binance did not return still gets a Yahoo quote (just slower).
     let crypto_missing: Vec<String> = crypto
@@ -608,7 +626,7 @@ pub async fn fetch_latest_prices(assets: &[String], bypass_crypto_cache: bool) -
         .collect();
     if !crypto_missing.is_empty() {
         let fallback = fetch_yahoo(&crypto_missing).await;
-        record(fallback, &mut out);
+        record(fallback, "yahoo", &mut out);
     }
 
     // Anything still missing falls back to the last price we saw for it.
@@ -629,6 +647,24 @@ pub async fn fetch_latest_prices(assets: &[String], bypass_crypto_cache: bool) -
     }
 
     out
+}
+
+/// Samples every tradable asset for the life of the process, so a round's prices
+/// never depend on a client being connected. Crypto skips the cache to get a tick
+/// per sample; slow assets refresh on their own 15 s window. During an outage this
+/// records nothing, which is what the staleness and refund rules read.
+pub async fn run_sampler() {
+    let assets: Vec<String> = VALID_ASSETS
+        .iter()
+        .filter(|asset| is_quoted(asset))
+        .map(|asset| asset.to_string())
+        .collect();
+    let mut every = tokio::time::interval(Duration::from_millis(config().price_sample_ms.max(1)));
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        every.tick().await;
+        fetch_latest_prices(&assets, true).await;
+    }
 }
 
 /// Everything `/api/prices/latest` requests by default: `Object.keys(PRICE_FEED_IDS)`.
@@ -774,14 +810,22 @@ pub async fn latest_post(assets: &[String]) -> ApiResult<PricesResponse> {
 /// The snapshot the SSE route primes a connection with: one `data:` frame per
 /// requested asset that has a usable quote, stamped `now`.
 pub async fn snapshot_frames(assets: &[String]) -> Vec<String> {
-    snapshot_frames_at(assets, &fetch_latest_prices(assets, false).await, now_millis())
+    snapshot_frames_at(
+        assets,
+        &fetch_latest_prices(assets, false).await,
+        now_millis(),
+    )
 }
 
 /// The same priming with the quotes and the clock supplied, so the pairing is
 /// testable without a network. Zipping a filtered price list against the asset
 /// list would silently relabel every asset after the first missing quote, so the
 /// asset travels with its own price.
-pub fn snapshot_frames_at(assets: &[String], prices: &BTreeMap<String, f64>, ts_ms: i64) -> Vec<String> {
+pub fn snapshot_frames_at(
+    assets: &[String],
+    prices: &BTreeMap<String, f64>,
+    ts_ms: i64,
+) -> Vec<String> {
     assets
         .iter()
         .filter_map(|asset| {
@@ -875,7 +919,10 @@ mod tests {
 
     #[test]
     fn crypto_detection_drives_the_source_choice() {
-        for asset in ["BTC", "ETH", "SOL", "SUI", "TRX", "XRP", "DOGE", "ADA", "BCH", "BNB", "XLM", "XTZ", "NEAR", "APT"] {
+        for asset in [
+            "BTC", "ETH", "SOL", "SUI", "TRX", "XRP", "DOGE", "ADA", "BCH", "BNB", "XLM", "XTZ",
+            "NEAR", "APT",
+        ] {
             assert!(is_crypto(asset), "{asset} must be crypto-backed");
         }
         assert!(!is_crypto("AAPL"));
@@ -934,11 +981,18 @@ mod tests {
 
     #[test]
     fn binance_price_accepts_numeric_and_whitespace_string_forms() {
-        let rows: Value =
-            serde_json::from_str(r#"[{"symbol":"BTCUSDT","price":" 100.00000000 "},{"symbol":"ETHUSDT","price":50.25}]"#)
-                .unwrap();
+        let rows: Value = serde_json::from_str(
+            r#"[{"symbol":"BTCUSDT","price":" 100.00000000 "},{"symbol":"ETHUSDT","price":50.25}]"#,
+        )
+        .unwrap();
         let parsed = parse_binance_rows(&rows);
-        assert_eq!(parsed, vec![("BTCUSDT".to_string(), 100.0), ("ETHUSDT".to_string(), 50.25)]);
+        assert_eq!(
+            parsed,
+            vec![
+                ("BTCUSDT".to_string(), 100.0),
+                ("ETHUSDT".to_string(), 50.25)
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -966,9 +1020,11 @@ mod tests {
 
     #[test]
     fn yahoo_price_prefers_meta_then_last_positive_close() {
-        let with_meta: Value = serde_json::from_str(r#"{"meta":{"regularMarketPrice":10.5},"close":[9,12]}"#).unwrap();
+        let with_meta: Value =
+            serde_json::from_str(r#"{"meta":{"regularMarketPrice":10.5},"close":[9,12]}"#).unwrap();
         assert_eq!(yahoo_price_from_response(&with_meta), Some(10.5));
-        let close_only: Value = serde_json::from_str(r#"{"meta":{},"close":[5,0,null,7.25,1.0]}"#).unwrap();
+        let close_only: Value =
+            serde_json::from_str(r#"{"meta":{},"close":[5,0,null,7.25,1.0]}"#).unwrap();
         assert_eq!(yahoo_price_from_response(&close_only), Some(1.0)); // last non-null positive
     }
 
@@ -1063,7 +1119,7 @@ mod tests {
     #[test]
     fn cache_fresh_and_stale_fallback_semantics() {
         let asset = "AAPL";
-        cache_set(asset, 123.4, 500);
+        cache_set(asset, 123.4, 500, "yahoo");
         // Inside the window -> served from cache.
         assert_eq!(fresh(asset, 500 + 14_000), Some(123.4));
         // Past the window -> not fresh...
@@ -1096,7 +1152,10 @@ mod tests {
 
     #[test]
     fn selector_normalizes_and_defaults() {
-        assert_eq!(parse_asset_selector(Some("BTC,ETH")).unwrap(), vec!["BTC", "ETH"]);
+        assert_eq!(
+            parse_asset_selector(Some("BTC,ETH")).unwrap(),
+            vec!["BTC", "ETH"]
+        );
         // pair-style collapses to the bare code, case-insensitively
         assert_eq!(
             parse_asset_selector(Some("btc-usd, ETH-USD")).unwrap(),
@@ -1141,8 +1200,8 @@ mod tests {
         let last_sent: Option<f64> = Some(100.0);
         let unchanged = 100.0_f64;
         let moved = 100.01_f64;
-        assert_eq!(last_sent == Some(unchanged), true);
-        assert_eq!(last_sent == Some(moved), false);
+        assert!(last_sent == Some(unchanged));
+        assert!(!(last_sent == Some(moved)));
     }
 
     #[test]
@@ -1160,7 +1219,10 @@ mod tests {
     fn snapshot_frames_never_relabel_a_missing_asset() {
         // A gap in the middle of the requested list used to shift every later
         // price onto the next asset's name, which paints one market as another.
-        let assets: Vec<String> = ["BTC", "ETH", "SOL"].iter().map(|s| s.to_string()).collect();
+        let assets: Vec<String> = ["BTC", "ETH", "SOL"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut prices = BTreeMap::new();
         prices.insert("BTC".to_string(), 100_000.0_f64);
         prices.insert("SOL".to_string(), 150.0_f64);

@@ -27,10 +27,11 @@ uuid.workspace = true
 futures.workspace = true
 rand.workspace = true
 hex.workspace = true
-sqlx.workspace = true
 rust_decimal.workspace = true
 once_cell.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rusqlite.workspace = true
+k256.workspace = true

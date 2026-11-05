@@ -75,7 +75,12 @@ async fn handle(headers: HeaderMap, Query(raw): Query<HashMap<String, String>>) 
         }
     }
 
-    let opts = Opts { window, tf, asset, metric };
+    let opts = Opts {
+        window,
+        tf,
+        asset,
+        metric,
+    };
     let key = cache_key(opts.window, opts.tf, &opts.asset);
 
     let branch = match raw.get("wallet") {
@@ -151,19 +156,26 @@ async fn fetch_rows(
 
         if asset != "ALL" {
             let ty = column_type("bet_history", "asset").await.map_err(|_| ())?;
-            clauses.push(format!("asset = {}", binds.push(ty, Value::String(asset.to_string()))));
+            clauses.push(format!(
+                "asset = {}",
+                binds.push(ty, Value::String(asset.to_string()))
+            ));
         }
         if let Some(since) = &since_iso {
-            let ty = column_type("bet_history", "created_at").await.map_err(|_| ())?;
+            let ty = column_type("bet_history", "created_at")
+                .await
+                .map_err(|_| ())?;
             clauses.push(format!(
                 "created_at >= {}",
                 binds.push(ty, Value::String(since.clone()))
             ));
         }
         if let Some(wallet) = &wallet {
-            let ty = column_type("bet_history", "wallet_address").await.map_err(|_| ())?;
+            let ty = column_type("bet_history", "wallet_address")
+                .await
+                .map_err(|_| ())?;
             clauses.push(format!(
-                "wallet_address ILIKE {}",
+                "pg_ilike(wallet_address, {})",
                 binds.push(ty, Value::String(wallet.clone()))
             ));
         }
@@ -219,12 +231,12 @@ async fn fetch_usernames(addresses: &[String]) -> HashMap<String, Value> {
         }
     };
     let placeholders = sql::in_list(1, &ty, keys.len());
-    let statement =
-        format!("SELECT user_address, username FROM user_profiles WHERE user_address IN ({placeholders})");
+    let statement = format!(
+        "SELECT user_address, username FROM user_profiles WHERE user_address IN ({placeholders})"
+    );
 
     let bind_values: Vec<Value> = keys.iter().map(|k| Value::String(k.clone())).collect();
-    let bind_refs: Vec<(&str, &Value)> =
-        bind_values.iter().map(|v| (ty.as_str(), v)).collect();
+    let bind_refs: Vec<(&str, &Value)> = bind_values.iter().map(|v| (ty.as_str(), v)).collect();
 
     let rows = match sql::fetch(&statement, &bind_refs).await {
         Ok(rows) => rows,
@@ -235,8 +247,12 @@ async fn fetch_usernames(addresses: &[String]) -> HashMap<String, Value> {
     };
 
     for profile in rows {
-        let canonical =
-            canonical_address(&profile.get("user_address").map(value_of).unwrap_or_default());
+        let canonical = canonical_address(
+            &profile
+                .get("user_address")
+                .map(value_of)
+                .unwrap_or_default(),
+        );
         let username = profile.get("username").cloned().unwrap_or(Value::Null);
         // `if (map[canonical] == null || !map[canonical]) map[canonical] = p.username`:
         // an existing falsy slot is replaced, an existing truthy username wins.
@@ -274,16 +290,27 @@ async fn public_branch(opts: &Opts, limit: i64) -> Result<Response, ()> {
     let leaderboard: Vec<Value> = ranked
         .iter()
         .enumerate()
-        .map(|(i, entry)| entry.public_row((i + 1) as i64, username_for(&usernames, &entry.wallet_address)))
+        .map(|(i, entry)| {
+            entry.public_row(
+                (i + 1) as i64,
+                username_for(&usernames, &entry.wallet_address),
+            )
+        })
         .collect();
 
     let extras = vec![
         ("window".to_string(), opt_str(opts.window)),
-        ("timeframeHours".to_string(), opts.tf.map(js_num).unwrap_or(Value::Null)),
+        (
+            "timeframeHours".to_string(),
+            opts.tf.map(js_num).unwrap_or(Value::Null),
+        ),
         ("asset".to_string(), Value::String(opts.asset.clone())),
         ("metric".to_string(), Value::String(opts.metric.to_string())),
         ("limit".to_string(), Value::from(limit)),
-        ("walletsOnBoard".to_string(), Value::from(snapshot.entries.len() as i64)),
+        (
+            "walletsOnBoard".to_string(),
+            Value::from(snapshot.entries.len() as i64),
+        ),
         ("shown".to_string(), Value::from(leaderboard.len() as i64)),
     ];
     let meta = meta_block(&snapshot, now_ms(), cached, extras);
@@ -293,7 +320,11 @@ async fn public_branch(opts: &Opts, limit: i64) -> Result<Response, ()> {
     body.insert("cached".into(), Value::Bool(cached));
     body.insert("assets".into(), snapshot_assets_value(&snapshot.assets));
     body.insert("meta".into(), meta);
-    Ok(json_cached(StatusCode::OK, Value::Object(body), super::PUBLIC_BOARD_CACHE))
+    Ok(json_cached(
+        StatusCode::OK,
+        Value::Object(body),
+        super::PUBLIC_BOARD_CACHE,
+    ))
 }
 
 /// Wallet-scoped rank lookup. Guard/EVM failures answer directly; only the
@@ -335,13 +366,20 @@ async fn wallet_branch(headers: &HeaderMap, wallet_raw: &str, opts: &Opts) -> Re
             ("window".to_string(), opt_str(opts.window)),
             ("asset".to_string(), Value::String(opts.asset.clone())),
             ("metric".to_string(), Value::String(opts.metric.to_string())),
-            ("reason".to_string(), Value::String("no_settled_bets_in_window".to_string())),
+            (
+                "reason".to_string(),
+                Value::String("no_settled_bets_in_window".to_string()),
+            ),
         ];
         let meta = meta_block(&snapshot, now_ms(), cached, extras);
         let mut body = Map::new();
         body.insert("me".into(), Value::Null);
         body.insert("meta".into(), meta);
-        return Ok(json_cached(StatusCode::OK, Value::Object(body), super::PRIVATE_NO_STORE));
+        return Ok(json_cached(
+            StatusCode::OK,
+            Value::Object(body),
+            super::PRIVATE_NO_STORE,
+        ));
     };
 
     // Defence in depth: never serialise a row that is not the caller's own.
@@ -350,7 +388,7 @@ async fn wallet_branch(headers: &HeaderMap, wallet_raw: &str, opts: &Opts) -> Re
     }
 
     let rank = lookup_rank(&ranked, &own_entry, opts.metric);
-    let usernames = fetch_usernames(&[address.clone()]).await;
+    let usernames = fetch_usernames(std::slice::from_ref(&address)).await;
 
     let mut me = own_entry.public_row(rank.rank, username_for(&usernames, &address));
     if let Some(m) = me.as_object_mut() {
@@ -359,7 +397,7 @@ async fn wallet_branch(headers: &HeaderMap, wallet_raw: &str, opts: &Opts) -> Re
         m.insert("walletsOnBoard".into(), Value::from(rank.total_ranked));
         m.insert(
             "nextRank".into(),
-            rank.next_rank.map(|n| Value::from(n)).unwrap_or(Value::Null),
+            rank.next_rank.map(Value::from).unwrap_or(Value::Null),
         );
         m.insert(
             "nextRankValue".into(),
@@ -383,7 +421,11 @@ async fn wallet_branch(headers: &HeaderMap, wallet_raw: &str, opts: &Opts) -> Re
     let mut body = Map::new();
     body.insert("me".into(), me);
     body.insert("meta".into(), meta);
-    Ok(json_cached(StatusCode::OK, Value::Object(body), super::PRIVATE_NO_STORE))
+    Ok(json_cached(
+        StatusCode::OK,
+        Value::Object(body),
+        super::PRIVATE_NO_STORE,
+    ))
 }
 
 /// Serve the last known snapshot for this exact board variant (any age), or 503.
@@ -423,11 +465,16 @@ fn take_ranked(snapshot: &Snapshot, opts: &Opts, limit: i64) -> Vec<strike_core:
 }
 
 fn opt_str(value: Option<&str>) -> Value {
-    value.map(|v| Value::String(v.to_string())).unwrap_or(Value::Null)
+    value
+        .map(|v| Value::String(v.to_string()))
+        .unwrap_or(Value::Null)
 }
 
 fn error_json(status: u16, message: &str) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = Value::Object(Map::from_iter([("error".to_string(), Value::String(message.to_string()))]));
+    let body = Value::Object(Map::from_iter([(
+        "error".to_string(),
+        Value::String(message.to_string()),
+    )]));
     json_status(code, body)
 }

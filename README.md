@@ -94,7 +94,7 @@ Config lives in `lib/arc/config.ts` for compatibility with existing internal imp
 ```
 1. Connect a wallet on Arc
 2. Deposit USDC to StrikeTreasury
-3. House balance is credited (off-chain, Neon Postgres)
+3. House balance is credited (off-chain, in the SQLite ledger)
 4. Place bets — no wallet signature per round
 5. Live price at expiry settles the outcome
 6. Withdraw back to the same Arc address
@@ -107,12 +107,12 @@ flowchart LR
   subgraph Browser["Browser — Next.js 16 + wagmi/ConnectKit/Privy"]
     UI[Trade UI · Zustand store]
   end
-  subgraph Server["Next.js route handlers"]
+  subgraph Server["Rust backend, behind Next's /api proxy"]
     BAL["/api/balance/* — deposit · bet · win · withdraw"]
     ADM["/api/admin/* — review + payout"]
     PX["/api/prices/latest — Yahoo / Binance"]
   end
-  DB[("Neon Postgres<br/>user_balances · bet_history<br/>withdrawal_requests · audit log")]
+  DB[("SQLite ledger, one writer<br/>user_balances · bet_history<br/>withdrawal_requests · audit log")]
   subgraph Arc["Arc (USDC gas)"]
     USDC["USDC ERC-20 interface<br/>0x3600…0000"]
     T["StrikeTreasury<br/>depositToken · withdrawTokenTo<br/>pause · 2-step owner"]
@@ -193,10 +193,10 @@ Net amount is what is credited on deposit or sent on withdrawal. Blitz entry fee
 |-------|--------|
 | Frontend | Next.js 16 App Router, React 19, TypeScript, Tailwind v4, Zustand, TanStack Query |
 | Arc | wagmi 3 + viem 2 + ConnectKit, ethers 6, Privy |
-| Backend | Next.js Route Handlers, Supabase (Postgres + RPCs) |
+| Backend | Rust (axum) service in `backend/`, SQLite in WAL mode |
 | Oracle | live price feeds (Yahoo/Binance) |
 | Contracts | Solidity (`StrikeTreasury`) |
-| Tooling | Jest, ESLint, PostHog |
+| Tooling | cargo test, ESLint, PostHog |
 
 ---
 
@@ -222,7 +222,6 @@ Combined as `useStore` in `lib/store/index.ts`.
 | `config.ts` | Arc chain ID, RPC, explorer, USDC address, treasury, and assets |
 | `wagmi.ts` | Single-chain wagmi config (`arc`) |
 | `client.ts` | Browser deposits and balance reads (USDC) |
-| `backend-client.ts` | Server-only treasury transfers |
 
 ### Bet lifecycle
 
@@ -230,12 +229,13 @@ Combined as `useStore` in `lib/store/index.ts`.
 flowchart TD
   A[User picks target + amount in USDC] --> B[Zustand creates active bet]
   B --> C[POST /api/balance/bet]
-  C --> D[Supabase deduct_balance_for_bet]
-  D --> E[price feed until endTime]
-  E --> F{Won?}
-  F -- Yes --> G[POST /api/balance/win — dedup on betId]
-  F -- No --> H[No payout]
-  E --> I[POST /api/bets/save — real mode only]
+  C --> D[Server freezes strike, end and multiplier with the debit]
+  D --> E[Server sampler prices the asset until endTime]
+  E --> F{Server: outcome from its own end price}
+  F -- Win --> G[Payout from the frozen stake and multiplier]
+  F -- Loss --> H[No payout]
+  F -- Tie or no price --> I[Stake refunded]
+  G & H & I --> J[Client reads the result from POST /api/balance/win]
 ```
 
 ### Withdrawal flow
@@ -247,9 +247,9 @@ flowchart TD
   S -- fail --> Y[Reject]
   S -- pass --> P[withdrawal_requests: pending]
   P --> A[Admin dashboard: accept / reject]
-  A -- accept --> Z[Apply tier fee]
+  A -- accept --> Z[Claim the row and debit in one commit]
   Z --> T["StrikeTreasury.withdrawTokenTo (owner key)"]
-  T --> R[update_balance_for_withdrawal]
+  T --> R[Record the tx hash, or park the row for an operator]
 ```
 
 ---
@@ -269,17 +269,7 @@ flowchart TD
 
 Arc defaults `user_balances.currency` to `'USDC'`. See `db/arc.sql`.
 
-### RPCs
-
-| Function | Purpose |
-|----------|---------|
-| `update_balance_for_deposit` | Credit deposit + audit |
-| `deduct_balance_for_bet` | Deduct stake + audit |
-| `credit_balance_for_payout` | Credit win + audit |
-| `update_balance_for_withdrawal` | Deduct withdrawal + audit |
-| `increment_referral_count` | Referral counter |
-
-RLS is on; the app writes with the **service role** server-side. Migrations: `supabase/migrations/`.
+The schema is `db/schema.sqlite.sql`, and `PRAGMA user_version` tracks changes after it (`MIGRATIONS` in `backend/crates/core/src/db.rs`). Only the backend writes the file. `supabase/` and `db/arc.sql` are the old Postgres schema: only `db/migrate_pg_to_sqlite`'s test still uses them.
 
 ---
 
@@ -296,7 +286,7 @@ RLS is on; the app writes with the **service role** server-side. Migrations: `su
 | `POST` | `/api/balance/win` | Credit win (dedup on `betId`) |
 | `POST` | `/api/balance/session` | HttpOnly cookie for balance mutations |
 
-Deposits are verified with `verifyArcDepositTx` against Arc RPC.
+Deposits are verified against the Arc RPC (`verify_deposit` in `backend/crates/core/src/eth.rs`).
 
 ### Bets / public
 
@@ -313,7 +303,7 @@ Admin routes live under `/api/admin/*` (auth, stats, ledger, treasury balances, 
 
 ## Admin dashboard
 
-`/dashboard` — protected by `requireAdminAuth`.
+`/dashboard` — every `/api/admin/*` route requires the admin session cookie.
 
 Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Accept/Reject), Inventory, Referrals, Access Codes, Danger Zone. Treasury snapshots read USDC on Arc.
 
@@ -325,7 +315,6 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 ├── app/                        # Next.js App Router
 │   ├── trade/                  # Game UI
 │   ├── dashboard/              # Admin
-│   ├── api/                    # Route handlers
 │   └── providers.tsx           # wagmi + Privy (Arc only)
 │
 ├── components/
@@ -334,15 +323,16 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 │   └── balance/                # Deposit / withdraw (USDC)
 │
 ├── lib/
-│   ├── arc/               # config, wagmi, client, backend-client
+│   ├── arc/               # config, wagmi, client
 │   ├── store/                  # Zustand slices
-│   ├── balance/                # verifyArcDepositTx, reconciliation
-│   ├── fees/                   # Platform fee → Arc collector
-│   └── supabase/               # service + browser clients
+│   ├── balance/                # Client balance helpers
+│   └── supabase/               # Query client for the /api/db gateway
 │
+├── backend/                    # Rust API, token parity and concurrency harnesses
 ├── contracts/arc/         # StrikeTreasury.sol, deploy, e2e
-├── db/                         # arc.sql, check-arc.mjs
-├── supabase/migrations/
+├── db/                         # schema.sqlite.sql, migrate_pg_to_sqlite, check-arc.mjs
+├── scripts/deploy/             # oracle.sh, systemd units, backup and restore
+├── supabase/                   # Old Postgres schema, used by the migration tool's test
 └── docs/                       # ENVIRONMENT.md, CONTRIBUTING.md, SECURITY_REPORTING.md
 ```
 
@@ -379,10 +369,11 @@ NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=
 
 `ARC_TREASURY_SECRET_KEY` must match `NEXT_PUBLIC_TREASURY_ADDRESS`. Contract deploy/e2e also honor `ARC_RPC_URL`.
 
-### Database (Neon), Privy, admin, settlement
+### Backend, Privy, admin, settlement
 
 ```env
-DATABASE_URL=
+BACKEND_URL=http://127.0.0.1:8080        # required by next build
+SQLITE_PATH=./strike.sqlite
 
 NEXT_PUBLIC_PRIVY_APP_ID=
 PRIVY_APP_SECRET=
@@ -409,19 +400,22 @@ Do not commit secrets. See `docs/ENVIRONMENT.md`.
 ```bash
 npm install
 cp .env.example .env
-# Fill Arc + Supabase values
-npm run db:migrate
-yarn dev
+# Fill the Arc values and SQLITE_PATH
+npm run api:dev            # the Rust API on 127.0.0.1:8080
+npm run dev                # in another shell
 ```
 
-App: http://localhost:3000
+App: http://localhost:3000. Next proxies `/api/*` to the Rust service, so both must run. `next dev` assumes port 8080; `next build` requires `BACKEND_URL`.
 
 ```bash
-yarn build
-yarn lint
-yarn test
+BACKEND_URL=http://127.0.0.1:8080 npm run build
+npm run api:test
+npm run api:check          # fmt, clippy, build
+npm run api:parity         # tokens against the frozen JS algorithms
 npm run arc:check          # RPC + USDC sanity
 ```
+
+Running it in production: `docs/OPERATIONS.md`.
 
 `docs/CONTRIBUTING.md` covers PR expectations.
 
@@ -451,7 +445,7 @@ Set the Arc env vars in the project. `next.config.ts` applies CSP, `X-Frame-Opti
 - Signed withdrawal intents on Arc (replay protection)
 - Duplicate payout guard: `betId` checked in `balance_audit_log`
 - Treasury `pause()` and two-step ownership
-- Supabase RLS; anon key is read-only; writes use the service role
+- The browser has no database credentials: `/api/db` serves only an allow-list, and the backend is the only writer
 - Admin routes behind `requireAdminAuth`
 - Balance mutation routes gated by session cookie / `BALANCE_INTERNAL_SECRET`
 

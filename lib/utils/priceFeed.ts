@@ -94,7 +94,7 @@ export const PRICE_FEED_IDS = {
 
 export type AssetType = keyof typeof PRICE_FEED_IDS;
 
-// Prices are fetched through our backend route (lib/server/marketPrices).
+// Prices are fetched through our backend route (backend/crates/core/src/prices.rs).
 const PRICES_ENDPOINT = '/api/prices/latest';
 
 // Cache the last successful multi-asset snapshot so the UI can render even if the price API is slow.
@@ -116,6 +116,9 @@ interface PriceData {
   confidence: number;
   timestamp: number;
   expo: number;
+  /** True only on fallback ticks (last-known / cached price re-stamped as "now").
+   *  Optional so existing consumers that ignore it keep working unchanged. */
+  stale?: boolean;
 }
 
 class PythPriceFeed {
@@ -160,7 +163,8 @@ class PythPriceFeed {
           price: this.lastPrice,
           confidence: 0,
           timestamp: Date.now() / 1000,
-          expo: -8
+          expo: -8,
+          stale: true,
         };
       }
       // Fallback to last-known multi-asset cache if available.
@@ -170,7 +174,8 @@ class PythPriceFeed {
           price: cached,
           confidence: 0,
           timestamp: Date.now() / 1000,
-          expo: -8
+          expo: -8,
+          stale: true,
         };
       }
       throw error;

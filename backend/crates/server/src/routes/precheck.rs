@@ -114,18 +114,26 @@ impl Panel {
         map.insert("message".to_string(), json!(outcome.message()));
         map.insert("chainId".to_string(), json!(self.chain_id));
         map.insert("network".to_string(), json!(self.network));
-        map.insert("token".to_string(), match self.token {
-            Some(asset) => json!(asset),
-            None => Value::Null,
-        });
+        map.insert(
+            "token".to_string(),
+            match self.token {
+                Some(asset) => json!(asset),
+                None => Value::Null,
+            },
+        );
         map.insert("decimals".to_string(), decimals);
         map.insert("treasury".to_string(), json!(self.treasury));
-        map.insert("treasuryConfigured".to_string(), json!(self.treasury_configured));
+        map.insert(
+            "treasuryConfigured".to_string(),
+            json!(self.treasury_configured),
+        );
         map.insert("banned".to_string(), json!(self.banned));
         map.insert(
             "balance".to_string(),
             match self.balance {
-                Some(value) => Number::from_f64(value).map(Value::Number).unwrap_or(Value::Null),
+                Some(value) => Number::from_f64(value)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
                 _ => Value::Null,
             },
         );
@@ -248,7 +256,10 @@ mod tests {
             PreFlight::LedgerUnavailable.status(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(PreFlight::TreasuryNotConfigured.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            PreFlight::TreasuryNotConfigured.status(),
+            axum::http::StatusCode::OK
+        );
     }
 
     #[test]
@@ -279,7 +290,12 @@ mod tests {
             PreFlight::WalletBanned,
             PreFlight::LedgerUnavailable,
         ] {
-            assert_eq!(panel.json(outcome)["ready"], json!(false), "{}", outcome.code());
+            assert_eq!(
+                panel.json(outcome)["ready"],
+                json!(false),
+                "{}",
+                outcome.code()
+            );
         }
     }
 
@@ -301,10 +317,22 @@ mod tests {
     fn the_panel_always_names_the_destination_being_signed() {
         let body = Panel::base().json(PreFlight::AddressMissing);
         for key in [
-            "ready", "code", "message", "chainId", "network", "token", "decimals",
-            "treasury", "treasuryConfigured", "banned", "balance",
+            "ready",
+            "code",
+            "message",
+            "chainId",
+            "network",
+            "token",
+            "decimals",
+            "treasury",
+            "treasuryConfigured",
+            "banned",
+            "balance",
         ] {
-            assert!(body.get(key).is_some(), "{key} missing — the modal reads it unconditionally");
+            assert!(
+                body.get(key).is_some(),
+                "{key} missing — the modal reads it unconditionally"
+            );
         }
         assert_eq!(body["banned"], json!(false));
         assert_eq!(body["balance"], Value::Null);

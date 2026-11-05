@@ -4,6 +4,10 @@
 //! Deliberately avoids a full Ethereum SDK: the surface the backend needs is
 //! six RPC methods, one log topic, and one transaction type.
 
+use std::convert::Infallible;
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
@@ -105,6 +109,24 @@ pub fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
 // JSON-RPC
 // ---------------------------------------------------------------------------
 
+/// Node errors that mean this transaction is not in the mempool.
+const NOT_TAKEN: [&str; 5] = [
+    "nonce too low",
+    "insufficient funds",
+    "underpriced",
+    "gas too low",
+    "intrinsic gas",
+];
+
+#[derive(Debug, PartialEq)]
+pub enum Broadcast {
+    Accepted(String),
+    /// The node refused it; nothing was sent and the nonce is unused.
+    Refused(String),
+    /// It may have been sent. Never send it again.
+    Unknown(String),
+}
+
 #[derive(Clone)]
 pub struct Rpc {
     client: reqwest::Client,
@@ -113,16 +135,20 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    pub fn from_config() -> Self {
-        let cfg = config();
+    pub fn new(url: String, chain_id: u64) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(RPC_TIMEOUT)
                 .build()
                 .expect("reqwest client"),
-            url: cfg.arc_rpc.clone(),
-            chain_id: cfg.arc_chain_id,
+            url,
+            chain_id,
         }
+    }
+
+    pub fn from_config() -> Self {
+        let cfg = config();
+        Self::new(cfg.arc_rpc.clone(), cfg.arc_chain_id)
     }
 
     pub fn chain_id(&self) -> u64 {
@@ -158,26 +184,25 @@ impl Rpc {
 
     pub async fn transaction_count(&self, address: &str) -> ApiResult<u64> {
         Ok(self
-            .quantity("eth_getTransactionCount", json!([to_checksum(address), "pending"]))
+            .quantity(
+                "eth_getTransactionCount",
+                json!([to_checksum(address), "pending"]),
+            )
             .await? as u64)
     }
 
     /// `eth_getTransactionByHash` -> { from, input, to, value }
     pub async fn transaction(&self, hash: &str) -> ApiResult<Option<Value>> {
-        Ok(self
-            .call("eth_getTransactionByHash", json!([hash]))
-            .await
-            .ok()
-            .filter(|v| !v.is_null()))
+        let found = self.call("eth_getTransactionByHash", json!([hash])).await?;
+        Ok(Some(found).filter(|v| !v.is_null()))
     }
 
     /// `eth_getTransactionReceipt` -> { status, logs, blockNumber }
     pub async fn receipt(&self, hash: &str) -> ApiResult<Option<Value>> {
-        Ok(self
+        let found = self
             .call("eth_getTransactionReceipt", json!([hash]))
-            .await
-            .ok()
-            .filter(|v| !v.is_null()))
+            .await?;
+        Ok(Some(found).filter(|v| !v.is_null()))
     }
 
     /// `eth_getLogs` with an already-built filter object. An RPC that returns
@@ -187,8 +212,25 @@ impl Rpc {
         Ok(res.as_array().cloned().unwrap_or_default())
     }
 
-    pub async fn send_raw(&self, raw: &str) -> ApiResult<String> {        let res = self.call("eth_sendRawTransaction", json!([raw])).await?;
-        res.as_str().map(str::to_string).ok_or_else(|| ApiError::Other("unexpected sendRaw result".into()))
+    /// Broadcasts once. Only a refusal a node gives for a transaction it did not
+    /// take counts as refused: anything else, an unfamiliar error included, may
+    /// have reached the mempool.
+    pub async fn broadcast(&self, raw: &str) -> Broadcast {
+        match self.call("eth_sendRawTransaction", json!([raw])).await {
+            Ok(Value::String(hash)) => Broadcast::Accepted(hash),
+            Ok(other) => Broadcast::Unknown(format!("unexpected sendRaw result: {other}")),
+            Err(err) => {
+                let message = err.to_string();
+                let lower = message.to_lowercase();
+                if lower.starts_with("rpc error")
+                    && NOT_TAKEN.iter().any(|known| lower.contains(known))
+                {
+                    Broadcast::Refused(message)
+                } else {
+                    Broadcast::Unknown(message)
+                }
+            }
+        }
     }
 
     pub async fn eth_call(&self, to: &str, data: &str) -> ApiResult<String> {
@@ -203,8 +245,9 @@ impl Rpc {
 
     /// Reads a uint256 returned by an `eth_call`.
     pub async fn call_uint256(&self, to: &str, data: &str) -> ApiResult<u128> {
-        let hex = self.eth_call(to, data).await?;
-        parse_quantity(&hex).ok_or_else(|| ApiError::Other("eth_call did not return a quantity".into()))
+        let word = self.eth_call(to, data).await?;
+        parse_abi_uint256(&word)
+            .ok_or_else(|| ApiError::Other("eth_call did not return a uint256 word".into()))
     }
 
     /// Waits for `confirmations` blocks over the receipt, mirroring
@@ -212,9 +255,13 @@ impl Rpc {
     pub async fn wait_for_confirmations(&self, hash: &str, confirmations: u64) -> ApiResult<Value> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
         loop {
-            if let Some(receipt) = self.receipt(hash).await? {
+            // A failed read here says nothing about the transaction: keep waiting.
+            if let Ok(Some(receipt)) = self.receipt(hash).await {
                 let block_number = parse_quantity(
-                    receipt.get("blockNumber").and_then(Value::as_str).unwrap_or_default(),
+                    receipt
+                        .get("blockNumber")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
                 )
                 .unwrap_or(0) as u64;
                 let head = self.latest_block_number().await.unwrap_or(0);
@@ -232,8 +279,36 @@ impl Rpc {
     }
 }
 
+static PAYOUTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Keeps the process alive while it exists. A task is cancelled when `main`
+/// returns, so anything that can send money, or record that it did, runs under
+/// one of these and shutdown waits in [`payouts_drained`].
+pub struct PayoutHold(());
+
+impl Drop for PayoutHold {
+    fn drop(&mut self) {
+        PAYOUTS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub fn hold_payout() -> PayoutHold {
+    PAYOUTS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    PayoutHold(())
+}
+
+/// Returns once no [`PayoutHold`] is left.
+pub async fn payouts_drained() {
+    while PAYOUTS_IN_FLIGHT.load(Ordering::SeqCst) > 0 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 pub fn parse_quantity(raw: &str) -> Option<u128> {
-    let hex = raw.trim().strip_prefix("0x").or_else(|| raw.trim().strip_prefix("0X"))?;
+    let hex = raw
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| raw.trim().strip_prefix("0X"))?;
     if hex.is_empty() || hex.len() > 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -244,27 +319,54 @@ pub fn parse_quantity(raw: &str) -> Option<u128> {
 // decimals
 // ---------------------------------------------------------------------------
 
-/// `ethers.parseUnits(amount, decimals)` for a decimal string.
+/// A log's `data` field: a 32-byte left-padded word, not an `eth_getLogs`
+/// quantity. `parse_quantity` refuses 64 hex digits on purpose, so the leading
+/// zeros come off first; a word with more significant digits than a u128 cannot
+/// be a USDC amount and yields nothing.
+pub fn parse_data_word(raw: &str) -> Option<u128> {
+    let trimmed = raw.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))?
+        .trim_start_matches('0');
+    if hex.is_empty() {
+        return Some(0);
+    }
+    if hex.len() > 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u128::from_str_radix(hex, 16).ok()
+}
+
+/// An ABI-encoded `uint256`, as `eth_call` returns it: exactly 32 bytes. Anything
+/// else, such as the `0x` of an address with no contract, is not a balance.
+pub fn parse_abi_uint256(raw: &str) -> Option<u128> {
+    let word = raw.trim();
+    (word.len() == 66).then(|| parse_data_word(word)).flatten()
+}
+
+/// `ethers.parseUnits(amount, decimals)` for a decimal string, *including its
+/// throws*: excess non-zero decimals, commas and exponent notation are errors.
+/// Truncating here would move money the TS refused to move.
 pub fn parse_units(amount: &str, decimals: u32) -> ApiResult<u128> {
-    let trimmed = amount.trim().replace(',', "");
-    if trimmed.is_empty() {
+    if amount.is_empty() {
         return Err(ApiError::bad_request("Amount is required"));
     }
-    let (whole, frac) = match trimmed.split_once('.') {
+    let (whole, frac) = match amount.split_once('.') {
         Some((w, f)) => (w, f),
-        None => (trimmed.as_str(), ""),
+        None => (amount, ""),
     };
     if whole.is_empty() && frac.is_empty() {
         return Err(ApiError::bad_request("Amount is not a number"));
     }
-    if !whole.chars().all(|c| c.is_ascii_digit())
-        || !frac.chars().all(|c| c.is_ascii_digit())
-    {
+    if !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) {
         return Err(ApiError::bad_request("Amount is not a number"));
     }
-    // Precision beyond the token's decimals is dropped, as parseUnits truncates.
     let places = decimals as usize;
     let frac_truncated = &frac[..frac.len().min(places)];
+    if frac[frac_truncated.len()..].bytes().any(|b| b != b'0') {
+        return Err(ApiError::bad_request("Too many decimals for the token"));
+    }
     let frac_padded = format!("{:0<width$}", frac_truncated, width = places);
     let whole_clean = if whole.is_empty() { "0" } else { whole };
     let combined = format!("{whole_clean}{frac_padded}");
@@ -289,15 +391,20 @@ pub fn format_units(value: u128, decimals: u32) -> f64 {
 
 /// `ethers.verifyMessage(message, signature)` -> checksummed address.
 pub fn recover_personal_signer(message: &str, signature: &str) -> Option<String> {
-    let sig_bytes = hex_decode(signature.strip_prefix("0x").unwrap_or(signature))?;
+    let sig_bytes = hex_decode(signature.strip_prefix("0x")?)?;
     if sig_bytes.len() != 65 {
         return None;
     }
     let (r_s, v_byte) = sig_bytes.split_at(64);
+    // ethers refuses a high-S signature. Accepting one would let anyone holding
+    // a signature mint a second spelling past the exact-match replay check.
+    if r_s[32] & 0x80 != 0 {
+        return None;
+    }
     // Ledger-style 27/28 and EIP-1559 0/1 both appear in the wild.
     let parity = match v_byte[0] {
         27..=28 => v_byte[0] - 27,
-        0..=3 => v_byte[0],
+        0..=1 => v_byte[0],
         _ => return None,
     };
     // Ethereum hashes the personal_sign preframe, not the raw message.
@@ -346,7 +453,10 @@ impl DepositFailure {
     pub fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::RpcError | Self::ConfigMissing | Self::TxNotFound | Self::InsufficientConfirmations
+            Self::RpcError
+                | Self::ConfigMissing
+                | Self::TxNotFound
+                | Self::InsufficientConfirmations
         )
     }
 
@@ -355,13 +465,16 @@ impl DepositFailure {
             Self::RpcError => "Could not read the deposit transaction from Arc".to_string(),
             Self::ConfigMissing => "Arc RPC or treasury address is not configured".to_string(),
             Self::TxNotFound => "Deposit transaction is not visible on Arc yet".to_string(),
-            Self::InsufficientConfirmations => "Deposit does not have enough confirmations".to_string(),
+            Self::InsufficientConfirmations => {
+                "Deposit does not have enough confirmations".to_string()
+            }
             Self::TxReverted => "Deposit transaction reverted on Arc".to_string(),
             Self::AmountMismatch => {
                 "No USDC transfer of at least the claimed amount reached the treasury".to_string()
             }
             Self::SenderMismatch => {
-                "Claimed depositor is neither the transaction sender nor a transfer sender".to_string()
+                "Claimed depositor is neither the transaction sender nor a transfer sender"
+                    .to_string()
             }
         }
     }
@@ -384,8 +497,14 @@ pub async fn verify_deposit(
 ) -> Result<DepositOk, (DepositFailure, String)> {
     let cfg = config();
     let recipient = cfg.treasury_address.trim().to_string();
-    if cfg.arc_rpc.trim().is_empty() || !is_address_shape(&recipient) || !is_address_shape(&cfg.arc_usdc) {
-        return Err((DepositFailure::ConfigMissing, DepositFailure::ConfigMissing.message()));
+    if cfg.arc_rpc.trim().is_empty()
+        || !is_address_shape(&recipient)
+        || !is_address_shape(&cfg.arc_usdc)
+    {
+        return Err((
+            DepositFailure::ConfigMissing,
+            DepositFailure::ConfigMissing.message(),
+        ));
     }
     let claimed: u128 = match parse_units(amount, decimals) {
         Ok(v) if v > 0 => v,
@@ -402,23 +521,39 @@ pub async fn verify_deposit(
     let rpc = Rpc::from_config();
     let (tx, receipt) = match tokio::join!(rpc.transaction(tx_hash), rpc.receipt(tx_hash)) {
         (Ok(Some(t)), Ok(Some(r))) => (t, r),
-        (Ok(None), _) | (_, Ok(None)) | (Err(_), _) | (_, Err(_)) => {
+        (Err(_), _) | (_, Err(_)) => {
+            let f = DepositFailure::RpcError;
+            return Err((f, f.message()));
+        }
+        (Ok(None), _) | (_, Ok(None)) => {
             let f = DepositFailure::TxNotFound;
             return Err((f, f.message()));
         }
     };
 
-    let status = parse_quantity(receipt.get("status").and_then(Value::as_str).unwrap_or_default())
-        .unwrap_or(0);
+    let status = parse_quantity(
+        receipt
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
+    .unwrap_or(0);
     if status != 1 {
         let f = DepositFailure::TxReverted;
         return Err((f, f.message()));
     }
 
-    let block_number = parse_quantity(
-        receipt.get("blockNumber").and_then(Value::as_str).unwrap_or_default(),
-    )
-    .unwrap_or(0) as u64;
+    // A receipt we cannot place must not read as "deep under the head".
+    let Some(block_number) = parse_quantity(
+        receipt
+            .get("blockNumber")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    ) else {
+        let f = DepositFailure::RpcError;
+        return Err((f, f.message()));
+    };
+    let block_number = block_number as u64;
     let head = match rpc.latest_block_number().await {
         Ok(n) => n,
         Err(_) => {
@@ -439,7 +574,10 @@ pub async fn verify_deposit(
     let mut incoming: Vec<(String, u128)> = Vec::new();
     if let Some(logs) = receipt.get("logs").and_then(Value::as_array) {
         for log in logs {
-            let log_address = log.get("address").and_then(Value::as_str).unwrap_or_default();
+            let log_address = log
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if !canonical(log_address).eq(&canonical(&token)) {
                 continue;
             }
@@ -447,7 +585,12 @@ pub async fn verify_deposit(
                 Some(t) if t.len() >= 3 => t,
                 _ => continue,
             };
-            if topics[0].as_str().unwrap_or_default().strip_prefix("0x").unwrap_or("") != topic
+            if topics[0]
+                .as_str()
+                .unwrap_or_default()
+                .strip_prefix("0x")
+                .unwrap_or("")
+                != topic
                 && topics[0].as_str().unwrap_or_default() != format!("0x{topic}")
             {
                 continue;
@@ -457,7 +600,11 @@ pub async fn verify_deposit(
             if canonical(&to) != canonical(&recipient) {
                 continue;
             }
-            let value = match log.get("data").and_then(Value::as_str).and_then(parse_quantity) {
+            let value = match log
+                .get("data")
+                .and_then(Value::as_str)
+                .and_then(parse_data_word)
+            {
                 Some(v) => v,
                 None => continue,
             };
@@ -487,10 +634,11 @@ pub async fn verify_deposit(
     }
     let tx_from = tx.get("from").and_then(Value::as_str).unwrap_or_default();
     if canonical(tx_from) == canonical(user_address) {
-        let (payer, value) = &incoming[0];
+        let (_, value) = &incoming[0];
         return Ok(DepositOk {
-            // The sender is the claimant, not the log's contract.
-            payer_address: payer.clone(),
+            // The sender is the claimant, not the log's contract: the credit
+            // follows this address, so a router must never receive it.
+            payer_address: tx_from.to_string(),
             transferred_amount: format_units(*value, decimals),
             confirmations,
             transaction_hash: tx_hash.to_string(),
@@ -505,12 +653,53 @@ pub async fn verify_deposit(
 // treasury payouts (`lib/arc/backend-client.ts`)
 // ---------------------------------------------------------------------------
 
+/// One transfer out of the treasury, in token base units.
+#[derive(Clone)]
+pub struct Transfer {
+    pub to: String,
+    pub amount: u128,
+}
+
+/// A broadcast transfer: `Treasury::confirm` finishes it.
+#[derive(Debug)]
+pub struct Sent {
+    pub hash: String,
+    amount: u128,
+}
+
+#[derive(Debug)]
+pub enum PayError<R> {
+    /// A read failed. Nothing was committed or sent.
+    Preflight(String),
+    /// The commit step said no. Nothing was sent.
+    Refused(R),
+    /// Committed, then a broadcast failed or its outcome is unknown. `sent` holds
+    /// what did go out, and nothing here may be sent again.
+    Send { sent: Vec<Sent>, error: String },
+}
+
+/// What the send queue owns. The lock around it is tokio's, which is FIFO, so
+/// holding it is a turn in one queue.
+#[derive(Default)]
+struct SendQueue {
+    /// Nonce after the last broadcast that may have reached the node.
+    next_nonce: Option<u64>,
+    /// Broadcast and not yet confirmed: the on-chain balance still includes it.
+    in_flight: u128,
+}
+
+#[derive(Clone)]
 pub struct Treasury {
     rpc: Rpc,
     signer: SigningKey,
     address: String,
     contract: String,
+    usdc: String,
+    queue: Arc<tokio::sync::Mutex<SendQueue>>,
 }
+
+/// One treasury key means one queue, however many handles exist.
+static QUEUE: OnceLock<Arc<tokio::sync::Mutex<SendQueue>>> = OnceLock::new();
 
 impl Treasury {
     /// Requires ARC_TREASURY_SECRET_KEY (the contract owner) and
@@ -525,16 +714,32 @@ impl Treasury {
             .ok_or_else(|| ApiError::unavailable("ARC_TREASURY_SECRET_KEY is not valid hex"))?;
         let signer = SigningKey::from_slice(&key_bytes)
             .map_err(|_| ApiError::unavailable("ARC_TREASURY_SECRET_KEY is not a valid key"))?;
-        let address = address_from_signing_key(&signer);
         if !is_address_shape(&cfg.treasury_address) {
-            return Err(ApiError::unavailable("NEXT_PUBLIC_TREASURY_ADDRESS is not a valid address"));
+            return Err(ApiError::unavailable(
+                "NEXT_PUBLIC_TREASURY_ADDRESS is not a valid address",
+            ));
         }
-        Ok(Self {
-            rpc: Rpc::from_config(),
+        let mut treasury = Self::new(
+            Rpc::from_config(),
+            signer,
+            cfg.treasury_address.clone(),
+            cfg.arc_usdc.clone(),
+        );
+        treasury.queue = QUEUE.get_or_init(Default::default).clone();
+        Ok(treasury)
+    }
+
+    /// A treasury with its own send queue.
+    pub fn new(rpc: Rpc, signer: SigningKey, contract: String, usdc: String) -> Self {
+        let address = address_from_signing_key(&signer);
+        Self {
+            rpc,
             signer,
             address,
-            contract: cfg.treasury_address.clone(),
-        })
+            contract,
+            usdc,
+            queue: Default::default(),
+        }
     }
 
     pub fn signer_address(&self) -> &str {
@@ -545,12 +750,11 @@ impl Treasury {
         let mut data = Vec::with_capacity(68);
         data.extend_from_slice(&selector_bytes);
         // address argument: 32-byte left-padded word
-        let addr_hex = to
-            .strip_prefix("0x")
-            .unwrap_or(to)
-            .to_lowercase();
+        let addr_hex = to.strip_prefix("0x").unwrap_or(to).to_lowercase();
         data.extend_from_slice(&[0u8; 12]);
         data.extend_from_slice(&hex::decode(addr_hex).unwrap_or_default());
+        // uint256 argument: a u128 is 16 bytes, the ABI word is 32.
+        data.extend_from_slice(&[0u8; 16]);
         data.extend_from_slice(&amount.to_be_bytes());
         format!("0x{}", hex::encode(data))
     }
@@ -577,88 +781,230 @@ impl Treasury {
 
     /// `balanceOf(treasury)` on the USDC token, in base units.
     pub async fn treasury_token_balance(&self) -> ApiResult<u128> {
-        let cfg = config();
-        let addr_hex = self.contract.strip_prefix("0x").unwrap_or(&self.contract).to_lowercase();
+        let addr_hex = self
+            .contract
+            .strip_prefix("0x")
+            .unwrap_or(&self.contract)
+            .to_lowercase();
         let mut data = selector("balanceOf(address)").to_vec();
         data.extend_from_slice(&[0u8; 12]);
         data.extend_from_slice(&hex::decode(addr_hex).unwrap_or_default());
         self.rpc
-            .call_uint256(&cfg.arc_usdc, &format!("0x{}", hex::encode(data)))
+            .call_uint256(&self.usdc, &format!("0x{}", hex::encode(data)))
             .await
     }
 
-    /// Pays `amount` whole tokens out of the treasury via
-    /// `withdrawTokenTo(address,uint256)` and returns the mined tx hash.
-    /// A reverted payout must never come back as success: the caller debits the
-    /// player's house balance on the strength of this hash.
-    pub async fn withdraw_token_to(&self, to: &str, amount: u128) -> ApiResult<String> {
-        if !is_address_shape(to) {
-            return Err(ApiError::bad_request(format!("Invalid destination address: {to}")));
+    /// Pays `transfers` in order, one nonce each, in one turn of the send queue:
+    /// every read, then `commit` (which debits the ledger), then the broadcasts.
+    /// So a failed read costs a player nothing, parallel payouts cannot share a
+    /// nonce or spend the same treasury balance, and nothing is sent unless the
+    /// commit succeeded. Runs as its own task, so a dropped request cannot stop a
+    /// turn halfway. Nothing is ever retried: after the commit, a failure is
+    /// reported and the money waits for an operator.
+    pub async fn pay<T, R, C, F>(
+        &self,
+        transfers: Vec<Transfer>,
+        commit: C,
+    ) -> Result<(T, Vec<Sent>), PayError<R>>
+    where
+        T: Send + 'static,
+        R: Send + 'static,
+        C: FnOnce() -> F + Send + 'static,
+        F: Future<Output = Result<T, R>> + Send + 'static,
+    {
+        let this = self.clone();
+        let hold = hold_payout();
+        tokio::spawn(async move {
+            let _hold = hold;
+            this.take_turn(transfers, commit).await
+        })
+        .await
+        .unwrap_or_else(|panic| {
+            Err(PayError::Send {
+                sent: Vec::new(),
+                error: format!("treasury send task failed: {panic}"),
+            })
+        })
+    }
+
+    async fn take_turn<T, R, C, F>(
+        &self,
+        transfers: Vec<Transfer>,
+        commit: C,
+    ) -> Result<(T, Vec<Sent>), PayError<R>>
+    where
+        C: FnOnce() -> F,
+        F: Future<Output = Result<T, R>>,
+    {
+        let mut queue = self.queue.lock().await;
+        let (first_nonce, signed) = self
+            .prepare(&queue, &transfers)
+            .await
+            .map_err(|err| PayError::Preflight(err.to_string()))?;
+        let committed = commit().await.map_err(PayError::Refused)?;
+
+        let mut sent = Vec::with_capacity(signed.len());
+        for ((nonce, raw), transfer) in (first_nonce..).zip(&signed).zip(&transfers) {
+            let (hash, failure) = match self.rpc.broadcast(raw).await {
+                Broadcast::Accepted(hash) => (hash, None),
+                Broadcast::Refused(message) => {
+                    return Err(PayError::Send {
+                        sent,
+                        error: message,
+                    })
+                }
+                Broadcast::Unknown(message) => (raw_tx_hash(raw), Some(message)),
+            };
+            queue.next_nonce = Some(nonce + 1);
+            queue.in_flight += transfer.amount;
+            sent.push(Sent {
+                hash,
+                amount: transfer.amount,
+            });
+            if let Some(message) = failure {
+                return Err(PayError::Send {
+                    sent,
+                    error: format!("broadcast outcome unknown: {message}"),
+                });
+            }
         }
-        if amount == 0 {
-            return Err(ApiError::bad_request("Withdrawal amount must be greater than zero"));
+        Ok((committed, sent))
+    }
+
+    /// Everything that can fail without money moving: validation, the owner and
+    /// balance reads, the nonce, gas, and signing.
+    async fn prepare(
+        &self,
+        queue: &SendQueue,
+        transfers: &[Transfer],
+    ) -> ApiResult<(u64, Vec<String>)> {
+        let mut total = queue.in_flight;
+        for transfer in transfers {
+            if !is_address_shape(&transfer.to) {
+                return Err(ApiError::bad_request(format!(
+                    "Invalid destination address: {}",
+                    transfer.to
+                )));
+            }
+            if transfer.amount == 0 {
+                return Err(ApiError::bad_request(
+                    "Withdrawal amount must be greater than zero",
+                ));
+            }
+            total += transfer.amount;
         }
         self.assert_owner_matches().await?;
-        let balance = self.treasury_token_balance().await?;
-        if balance < amount {
+        if self.treasury_token_balance().await? < total {
             return Err(ApiError::unavailable(
                 "Treasury has insufficient USDC for this withdrawal",
             ));
         }
 
-        let data = Self::call_data_with_uint(selector("withdrawTokenTo(address,uint256)"), to, amount);
-        self.send_transaction(&self.contract.clone(), 0, &data).await
-    }
+        let chain = self.rpc.transaction_count(&self.address).await?;
+        let nonce = match queue.next_nonce {
+            // An earlier send never reached this node, or it is lagging. A nonce
+            // past the chain's would sit unmined, and reusing one could replace a
+            // send that is still out there, so wait. Restarting clears this once
+            // an operator knows what happened to that send.
+            Some(next) if chain < next => {
+                return Err(ApiError::unavailable(format!(
+                    "Treasury nonce {next} is ahead of the node's {chain}"
+                )))
+            }
+            Some(next) => next.max(chain),
+            None => chain,
+        };
 
-    /// Signs and broadcasts one EIP-1559 transaction, then waits for
-    /// `PAYOUT_CONFIRMATIONS` and checks the receipt status.
-    pub async fn send_transaction(&self, to: &str, value: u128, data: &str) -> ApiResult<String> {
-        let nonce = self.rpc.transaction_count(&self.address).await?;
-        let gas_price = self.rpc.quantity("eth_gasPrice", json!([])).await.unwrap_or(1_000_000_000);
+        let gas_price = self.rpc.quantity("eth_gasPrice", json!([])).await?;
         // Arc accepts an EIP-1559 transaction with priority fee folded into the
         // max fee; keeping max_fee at 2x base is the standard safe guess.
-        let max_fee = gas_price * 2;
-        let priority_fee = gas_price / 10;
+        let (max_fee, priority_fee) = (gas_price * 2, gas_price / 10);
 
-        let gas = {
+        let selector_bytes = selector("withdrawTokenTo(address,uint256)");
+        let mut signed = Vec::with_capacity(transfers.len());
+        for (tx_nonce, transfer) in (nonce..).zip(transfers) {
+            let data = Self::call_data_with_uint(selector_bytes, &transfer.to, transfer.amount);
             let estimate = json!([{
                 "from": self.address,
-                "to": to,
-                "value": format!("0x{:x}", value),
+                "to": self.contract,
+                "value": "0x0",
                 "data": data,
             }, "latest"]);
-            self.rpc
-                .quantity("eth_estimateGas", estimate)
-                .await
-                .unwrap_or(200_000) as u64
-        };
-        // Padding the estimate so a state-changing call is not under-gassed
-        // between estimation and inclusion.
-        let gas_limit = gas + gas / 5 + 21_000;
+            let gas = self.rpc.quantity("eth_estimateGas", estimate).await? as u64;
+            // Padding the estimate so a state-changing call is not under-gassed
+            // between estimation and inclusion.
+            let gas_limit = gas + gas / 5 + 21_000;
+            signed.push(build_eip1559_raw(
+                &self.signer,
+                self.rpc.chain_id(),
+                tx_nonce,
+                gas_limit,
+                max_fee,
+                priority_fee,
+                &self.contract,
+                0,
+                &hex_decode(data.strip_prefix("0x").unwrap_or(&data)).unwrap_or_default(),
+            )?);
+        }
+        Ok((nonce, signed))
+    }
 
-        let raw = build_eip1559_raw(
-            &self.signer,
-            self.rpc.chain_id(),
-            nonce,
-            gas_limit,
-            max_fee as u128,
-            priority_fee as u128,
-            to,
-            value,
-            &hex_decode(data.strip_prefix("0x").unwrap_or(data)).unwrap_or_default(),
-        )?;
-
-        let hash = self.rpc.send_raw(&raw).await?;
-        let receipt = self.rpc.wait_for_confirmations(&hash, PAYOUT_CONFIRMATIONS).await?;
-        let status = parse_quantity(receipt.get("status").and_then(Value::as_str).unwrap_or_default())
-            .unwrap_or(0);
+    /// Waits for `PAYOUT_CONFIRMATIONS` and checks the receipt status. A reverted
+    /// payout must never come back as success.
+    pub async fn confirm(&self, sent: &Sent) -> ApiResult<()> {
+        let receipt = self
+            .rpc
+            .wait_for_confirmations(&sent.hash, PAYOUT_CONFIRMATIONS)
+            .await;
+        {
+            let mut queue = self.queue.lock().await;
+            queue.in_flight = queue.in_flight.saturating_sub(sent.amount);
+        }
+        let receipt = receipt?;
+        let status = parse_quantity(
+            receipt
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+        .unwrap_or(0);
         if status != 1 {
             return Err(ApiError::Other(format!(
-                "Treasury payout {hash} reverted on-chain (status {status})"
+                "Treasury payout {} reverted on-chain (status {status})",
+                sent.hash
             )));
         }
-        Ok(hash)
+        Ok(())
     }
+
+    /// Pays `amount` base units out of the treasury via
+    /// `withdrawTokenTo(address,uint256)`, with no ledger step, and returns the
+    /// mined tx hash.
+    pub async fn withdraw_token_to(&self, to: &str, amount: u128) -> ApiResult<String> {
+        let transfer = Transfer {
+            to: to.to_string(),
+            amount,
+        };
+        let no_commit = || async { Ok::<(), Infallible>(()) };
+        let ((), mut sent) = self
+            .pay(vec![transfer], no_commit)
+            .await
+            .map_err(|failure| match failure {
+                PayError::Preflight(error) | PayError::Send { error, .. } => ApiError::Other(error),
+                PayError::Refused(never) => match never {},
+            })?;
+        let sent = sent
+            .pop()
+            .ok_or_else(|| ApiError::Other("treasury sent nothing".to_string()))?;
+        self.confirm(&sent).await?;
+        Ok(sent.hash)
+    }
+}
+
+/// The hash a transaction has whether or not the node ever answered.
+fn raw_tx_hash(raw: &str) -> String {
+    let bytes = hex_decode(raw.strip_prefix("0x").unwrap_or(raw)).unwrap_or_default();
+    format!("0x{}", hex::encode(keccak256(&bytes)))
 }
 
 fn address_from_signing_key(signer: &SigningKey) -> String {
@@ -680,6 +1026,7 @@ pub fn normalize_low_s(signature: Signature, recovery_id: RecoveryId) -> (Signat
 }
 
 /// Assembles a signed EIP-1559 transaction.
+#[allow(clippy::too_many_arguments)]
 pub fn build_eip1559_raw(
     signer: &SigningKey,
     chain_id: u64,
@@ -750,16 +1097,39 @@ mod tests {
     }
 
     #[test]
+    fn payout_calldata_is_two_full_abi_words() {
+        let data = Treasury::call_data_with_uint(
+            selector("withdrawTokenTo(address,uint256)"),
+            "0xb46b14d5da2438a7821b141722cd25cd7ff1e225",
+            450_000,
+        );
+        assert_eq!(data.len(), 2 + 2 * (4 + 32 + 32));
+        assert!(data.ends_with(
+            "000000000000000000000000b46b14d5da2438a7821b141722cd25cd7ff1e225\
+             000000000000000000000000000000000000000000000000000000000006ddd0"
+        ));
+    }
+
+    #[test]
     fn selectors_match_erc20_abi() {
-        assert_eq!(hex::encode(selector("transfer(address,uint256)")), "a9059cbb");
+        assert_eq!(
+            hex::encode(selector("transfer(address,uint256)")),
+            "a9059cbb"
+        );
         assert_eq!(hex::encode(selector("balanceOf(address)")), "70a08231");
-        assert_eq!(hex::encode(selector("approve(address,uint256)")), "095ea7b3");
+        assert_eq!(
+            hex::encode(selector("approve(address,uint256)")),
+            "095ea7b3"
+        );
     }
 
     #[test]
     fn indexed_topics_decode_to_checksummed_addresses() {
         let topic = "0x0000000000000000000000005aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
-        assert_eq!(topic_to_address(topic), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+        assert_eq!(
+            topic_to_address(topic),
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+        );
         assert_eq!(topic_to_address("0xdeadbeef"), "");
     }
 
@@ -770,7 +1140,10 @@ mod tests {
         assert_eq!(rlp_bytes(b""), vec![0x80]);
         assert_eq!(rlp_bytes(&[0x0f]), vec![0x0f]);
         let list = rlp_list(&[rlp_bytes(b"cat"), rlp_bytes(b"dog")]);
-        assert_eq!(list, vec![0xc8, 0x83, b'c', b'a', b't', 0x83, b'd', b'o', b'g']);
+        assert_eq!(
+            list,
+            vec![0xc8, 0x83, b'c', b'a', b't', 0x83, b'd', b'o', b'g']
+        );
         assert_eq!(rlp_bytes(&be_min(1024)), vec![0x82, 0x04, 0x00]);
         assert_eq!(rlp_bytes(&be_min(0)), vec![0x80]);
         // 56-byte payloads switch to the long form: 0xb7 plus however many
@@ -792,14 +1165,46 @@ mod tests {
     }
 
     #[test]
+    fn abi_words_are_exactly_32_bytes() {
+        // What a node answers to `balanceOf`: 10^15 as a full word.
+        let word = format!("0x{:064x}", 1_000_000_000_000_000u128);
+        assert_eq!(parse_abi_uint256(&word), Some(1_000_000_000_000_000));
+        assert_eq!(parse_abi_uint256(&format!("0x{}", "0".repeat(64))), Some(0));
+        // No contract at the address, and the short form no node sends.
+        assert_eq!(parse_abi_uint256("0x"), None);
+        assert_eq!(parse_abi_uint256("0x38d7ea4c68000"), None);
+        // More than a u128 is refused, never truncated.
+        assert_eq!(parse_abi_uint256(&format!("0x1{}", "0".repeat(63))), None);
+        assert_eq!(parse_abi_uint256(&format!("0x{}", "z".repeat(64))), None);
+    }
+
+    #[test]
+    fn transfer_log_data_is_a_full_word_not_a_quantity() {
+        // 1 USDC exactly as eth_getTransactionReceipt returns it. A quantity
+        // parse refuses 64 digits, which silently rejected every deposit.
+        let word = format!("0x{:064x}", 1_000_000);
+        assert_eq!(parse_quantity(&word), None);
+        assert_eq!(parse_data_word(&word), Some(1_000_000));
+        assert_eq!(parse_data_word(&format!("0x{:064x}", 0)), Some(0));
+        assert_eq!(parse_data_word(&format!("0x{}", "f".repeat(64))), None);
+        assert_eq!(parse_data_word("1000"), None);
+    }
+
+    #[test]
     fn parse_units_handles_token_precision() {
         assert_eq!(parse_units("1", 6).unwrap(), 1_000_000);
         assert_eq!(parse_units("1.5", 6).unwrap(), 1_500_000);
         assert_eq!(parse_units("0.000001", 6).unwrap(), 1);
         assert_eq!(parse_units(".5", 6).unwrap(), 500_000);
         // Extra precision truncates rather than rounding up.
-        assert_eq!(parse_units("1.0000009", 6).unwrap(), 1_000_000);
-        assert_eq!(parse_units("1,000", 6).unwrap(), 1_000_000_000);
+        // Pinned from node against ethers.parseUnits: these throw, and a
+        // payout built on a truncated value is money the TS never moved.
+        assert!(parse_units("1.0000009", 6).is_err());
+        assert!(parse_units("0.89999999", 6).is_err());
+        assert!(parse_units("1,000", 6).is_err());
+        assert!(parse_units("1e-7", 6).is_err());
+        assert!(parse_units("-1", 6).is_err());
+        assert_eq!(parse_units("1.2300000", 6).unwrap(), 1_230_000);
         assert!(parse_units("abc", 6).is_err());
         assert!(parse_units("", 6).is_err());
         assert_eq!(format_units(1_500_000, 6), 1.5);
@@ -830,6 +1235,23 @@ mod tests {
             Some(address_from_signing_key(&key))
         );
         assert_eq!(recover_personal_signer(message, "0xdead"), None);
+        // What ethers.Signature.from refuses: no 0x, v of 2/3, high S.
+        assert_eq!(
+            recover_personal_signer(message, hex_sig.trim_start_matches("0x")),
+            None
+        );
+        let mut bytes = hex_decode(hex_sig.trim_start_matches("0x")).unwrap();
+        bytes[64] = 2;
+        assert_eq!(
+            recover_personal_signer(message, &format!("0x{}", hex::encode(&bytes))),
+            None
+        );
+        bytes[64] = 0;
+        bytes[32] |= 0x80;
+        assert_eq!(
+            recover_personal_signer(message, &format!("0x{}", hex::encode(&bytes))),
+            None
+        );
     }
 
     #[test]
@@ -837,17 +1259,49 @@ mod tests {
         let key = SigningKey::from_slice(&[0x22u8; 32]).unwrap();
         let to = "0x3600000000000000000000000000000000000000";
         let data = selector("transfer(address,uint256)").to_vec();
-        let raw = build_eip1559_raw(&key, 5042002, 7, 120_000, 2_000_000_000, 100_000_000, to, 0, &data)
-            .unwrap();
+        let raw = build_eip1559_raw(
+            &key,
+            5042002,
+            7,
+            120_000,
+            2_000_000_000,
+            100_000_000,
+            to,
+            0,
+            &data,
+        )
+        .unwrap();
         let bytes = hex::decode(&raw[2..]).unwrap();
         assert_eq!(bytes[0], 0x02, "typed-transaction prefix");
         // Same inputs sign to the same bytes (RFC 6979 deterministic k).
-        let again = build_eip1559_raw(&key, 5042002, 7, 120_000, 2_000_000_000, 100_000_000, to, 0, &data).unwrap();
+        let again = build_eip1559_raw(
+            &key,
+            5042002,
+            7,
+            120_000,
+            2_000_000_000,
+            100_000_000,
+            to,
+            0,
+            &data,
+        )
+        .unwrap();
         assert_eq!(raw, again);
         // A changed nonce changes the signature.
         assert_ne!(
             raw,
-            build_eip1559_raw(&key, 5042002, 8, 120_000, 2_000_000_000, 100_000_000, to, 0, &data).unwrap()
+            build_eip1559_raw(
+                &key,
+                5042002,
+                8,
+                120_000,
+                2_000_000_000,
+                100_000_000,
+                to,
+                0,
+                &data
+            )
+            .unwrap()
         );
         assert!(build_eip1559_raw(&key, 1, 0, 21_000, 1, 1, "not-an-address", 0, &[]).is_err());
     }
@@ -876,7 +1330,8 @@ mod tests {
     }
 
     #[test]
-    fn failure_retryability_matches_ts() {        assert!(DepositFailure::RpcError.retryable());
+    fn failure_retryability_matches_ts() {
+        assert!(DepositFailure::RpcError.retryable());
         assert!(DepositFailure::TxNotFound.retryable());
         assert!(DepositFailure::InsufficientConfirmations.retryable());
         assert!(DepositFailure::ConfigMissing.retryable());

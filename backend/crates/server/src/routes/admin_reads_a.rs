@@ -30,12 +30,14 @@ use serde_json::{Map, Number, Value};
 use strike_core::address::search_variants;
 use strike_core::admin_reads_a::{
     canonical_of, json_number, load_admin_stats, load_mode_analytics, load_transactions,
-    parse_list_params, resolve_house_ledger_currency, url_query_pairs, ListOptions,
-    TRANSACTION_STATUS_VALUES,
+    matches_list_filters_on, parse_list_params, resolve_house_ledger_currency, url_query_pairs,
+    ListOptions, ListParams, TRANSACTION_STATUS_VALUES,
 };
 use strike_core::bets::value_to_string;
 use strike_core::error::{ApiError, ApiResult};
-use strike_core::platform_stats::{is_demo_bet, is_demo_wallet, number_or_zero, parse_epoch_ms, truthy};
+use strike_core::platform_stats::{
+    is_demo_bet, is_demo_wallet, number_or_zero, parse_epoch_ms, truthy,
+};
 
 use crate::bans::is_globally_banned;
 use crate::http::require_admin;
@@ -73,7 +75,11 @@ fn str_or(value: Option<&Value>, default: &str) -> String {
 /// fallback baked in; accumulators are plain `f64` maps, rendered through
 /// [`json_number`] at the end.
 fn add_to(map: &mut HashMap<String, f64>, currency: &str, amount: f64) {
-    let key = if currency.is_empty() { "UNKNOWN".to_string() } else { currency.to_string() };
+    let key = if currency.is_empty() {
+        "UNKNOWN".to_string()
+    } else {
+        currency.to_string()
+    };
     *map.entry(key).or_default() += amount;
 }
 
@@ -129,7 +135,7 @@ async fn stats(headers: HeaderMap) -> Response {
 async fn run_stats(headers: &HeaderMap) -> ApiResult<Value> {
     require_admin(headers)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    Ok(load_admin_stats(now_ms).await?)
+    load_admin_stats(now_ms).await
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +153,7 @@ async fn mode_analytics(headers: HeaderMap) -> Response {
 
 async fn run_mode_analytics(headers: &HeaderMap) -> ApiResult<Value> {
     require_admin(headers)?;
-    Ok(load_mode_analytics().await?)
+    load_mode_analytics().await
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +186,6 @@ async fn transactions(headers: HeaderMap, uri: Uri) -> Response {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // GET /api/admin/player-ledger
 // ---------------------------------------------------------------------------
@@ -188,28 +193,42 @@ async fn transactions(headers: HeaderMap, uri: Uri) -> Response {
 /// `PAGE` from the route: the window the bet scan walks past the 1 000 cap.
 const LEDGER_PAGE: i64 = 1_000;
 
-async fn player_ledger(headers: HeaderMap) -> Response {
-    match run_player_ledger(&headers).await {
+async fn player_ledger(headers: HeaderMap, uri: Uri) -> Response {
+    if let Err(err) = require_admin(&headers) {
+        return err.into_response();
+    }
+    let params = url_query_pairs(uri.query().unwrap_or(""));
+    let parsed = match parse_list_params(&params, &ListOptions::default()) {
+        Ok(parsed) => parsed,
+        Err(message) => return ApiError::bad_request(message).into_response(),
+    };
+    match run_player_ledger(&parsed).await {
         Ok(body) => axum::Json(body).into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => {
+            tracing::error!("[admin/player-ledger] {err}");
+            ApiError::internal("Failed to load player ledger").into_response()
+        }
     }
 }
 
-async fn run_player_ledger(headers: &HeaderMap) -> ApiResult<Value> {
-    require_admin(headers)?;
-
+async fn run_player_ledger(params: &ListParams) -> ApiResult<Value> {
     // Every deposit / withdrawal / fee event, no filter beyond the operation set.
+    // In insertion order, as Postgres read them: it decides ties in the sort below,
+    // and SQLite would otherwise walk the operation_type index.
     let audit = fetch(
         "SELECT user_address, currency, operation_type, amount, created_at \
          FROM balance_audit_log \
-         WHERE operation_type IN ('deposit', 'withdrawal', 'platform_fee')",
+         WHERE operation_type IN ('deposit', 'withdrawal', 'platform_fee') ORDER BY id",
         &[],
     )
     .await?;
 
     // Current spendable balance per (wallet, currency).
-    let balances =
-        fetch("SELECT user_address, currency, balance FROM user_balances", &[]).await?;
+    let balances = fetch(
+        "SELECT user_address, currency, balance FROM user_balances ORDER BY rowid",
+        &[],
+    )
+    .await?;
 
     // Real bet stats, paginated to walk past the old row cap.
     let bets = scan_bets().await?;
@@ -219,14 +238,28 @@ async fn run_player_ledger(headers: &HeaderMap) -> ApiResult<Value> {
     let profiles = match fetch("SELECT user_address, username FROM user_profiles", &[]).await {
         Ok(rows) => rows,
         Err(err) => {
-            tracing::warn!("[admin/player-ledger] user_profiles read failed, usernames dropped: {err}");
+            tracing::warn!(
+                "[admin/player-ledger] user_profiles read failed, usernames dropped: {err}"
+            );
             Vec::new()
         }
     };
 
-    let players = build_players(&audit, &balances, &bets, &profiles);
+    let mut players = build_players(&audit, &balances, &bets, &profiles);
+    // The range is over the first deposit, so a wallet with none drops out of it.
+    players.retain(|row| matches_list_filters_on(row, params, "first_deposit_at"));
+    let total = players.len();
+    let page: Vec<Value> = players
+        .into_iter()
+        .skip(params.offset as usize)
+        .take(params.limit as usize)
+        .collect();
+
     let mut body = Map::new();
-    body.insert("players".into(), Value::Array(players));
+    body.insert("players".into(), Value::Array(page));
+    body.insert("total".into(), Value::from(total));
+    body.insert("limit".into(), Value::from(params.limit));
+    body.insert("offset".into(), Value::from(params.offset));
     Ok(Value::Object(body))
 }
 
@@ -263,6 +296,8 @@ struct LedgerRow {
     total_wagered: f64,
     total_payout: f64,
     total_fees_paid: f64,
+    /// True when `platform_fee` rows exist; otherwise fees are estimated.
+    has_explicit_fee: bool,
     username: Value,
     first_deposit_at: Option<String>,
 }
@@ -280,6 +315,7 @@ impl LedgerRow {
             total_wagered: 0.0,
             total_payout: 0.0,
             total_fees_paid: 0.0,
+            has_explicit_fee: false,
             username,
             first_deposit_at: None,
         }
@@ -290,7 +326,12 @@ impl LedgerRow {
 /// balances fill `current_balance`, real bets add the wagering columns, a
 /// back-calculation estimates historical fees, then each row gains its P&L and
 /// the list is sorted by earliest deposit.
-fn build_players(audit: &[Value], balances: &[Value], bets: &[Value], profiles: &[Value]) -> Vec<Value> {
+fn build_players(
+    audit: &[Value],
+    balances: &[Value],
+    bets: &[Value],
+    profiles: &[Value],
+) -> Vec<Value> {
     // profileMap[canonical(addr)] = username — last row wins, as the TS forEach.
     let mut profile_map: HashMap<String, Value> = HashMap::new();
     for row in profiles {
@@ -319,18 +360,29 @@ fn build_players(audit: &[Value], balances: &[Value], bets: &[Value], profiles: 
         });
 
         let amount = number_or_zero(row.get("amount"));
-        match row.get("operation_type").and_then(Value::as_str).unwrap_or("") {
+        match row
+            .get("operation_type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
             "deposit" => {
                 entry.total_deposited += amount;
                 // Earliest deposit timestamp across the row's own deposits.
                 if let Some(created) = row.get("created_at").and_then(Value::as_str) {
-                    if entry.first_deposit_at.as_deref().map_or(true, |prev| created < prev) {
+                    if entry
+                        .first_deposit_at
+                        .as_deref()
+                        .is_none_or(|prev| created < prev)
+                    {
                         entry.first_deposit_at = Some(created.to_string());
                     }
                 }
             }
             "withdrawal" => entry.total_withdrawn += amount,
-            "platform_fee" => entry.total_fees_paid += amount,
+            "platform_fee" => {
+                entry.total_fees_paid += amount;
+                entry.has_explicit_fee = true;
+            }
             _ => {}
         }
     }
@@ -360,12 +412,17 @@ fn build_players(audit: &[Value], balances: &[Value], bets: &[Value], profiles: 
         }
         // Arc settles in native USDC; `resolve_house_ledger_currency` folds any
         // asset onto the one playable ticker.
-        let currency = resolve_house_ledger_currency(row.get("asset")).unwrap_or_else(|_| "USDC".to_string());
+        let currency =
+            resolve_house_ledger_currency(row.get("asset")).unwrap_or_else(|_| "USDC".to_string());
         let key = format!("{wallet}::{currency}");
         let username = profile_map.get(&wallet).cloned().unwrap_or(Value::Null);
         let entry = map.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
-            LedgerRow::new(Value::String(wallet.clone()), Value::String(currency.clone()), username)
+            LedgerRow::new(
+                Value::String(wallet.clone()),
+                Value::String(currency.clone()),
+                username,
+            )
         });
         entry.total_bets += 1;
         entry.total_wagered += number_or_zero(row.get("amount"));
@@ -379,7 +436,7 @@ fn build_players(audit: &[Value], balances: &[Value], bets: &[Value], profiles: 
     // deposit RPC stored the net (post-10%) amount, so gross = net / 0.9 and the
     // fee is net / 9; withdrawals are a flat 10%.
     for row in map.values_mut() {
-        if row.total_fees_paid == 0.0 && row.total_deposited > 0.0 {
+        if row.total_fees_paid == 0.0 && !row.has_explicit_fee && row.total_deposited > 0.0 {
             row.total_fees_paid = row.total_deposited / 9.0 + row.total_withdrawn * 0.10;
         }
     }
@@ -426,6 +483,10 @@ fn build_players(audit: &[Value], balances: &[Value], bets: &[Value], profiles: 
             obj.insert("total_wagered".into(), json_number(row.total_wagered));
             obj.insert("total_payout".into(), json_number(row.total_payout));
             obj.insert("total_fees_paid".into(), json_number(row.total_fees_paid));
+            obj.insert(
+                "_has_explicit_fee".into(),
+                Value::Bool(row.has_explicit_fee),
+            );
             obj.insert("username".into(), row.username);
             obj.insert("first_deposit_at".into(), first_deposit_at);
             obj.insert("net_pnl".into(), json_number(net_pnl));
@@ -445,19 +506,32 @@ const BETS_CAP: usize = 25_000;
 /// A session is never counted above 4 h; stale unclosed rows cannot inflate it.
 const SESSION_CAP_SECONDS: i64 = 4 * 3600;
 
-async fn wallet_insights(headers: HeaderMap, Query(params): Query<HashMap<String, String>>) -> Response {
+async fn wallet_insights(
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
     match run_wallet_insights(&headers, &params).await {
         Ok(body) => axum::Json(body).into_response(),
         Err(err) => err.into_response(),
     }
 }
 
-async fn run_wallet_insights(headers: &HeaderMap, params: &HashMap<String, String>) -> ApiResult<Value> {
+async fn run_wallet_insights(
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> ApiResult<Value> {
     require_admin(headers)?;
 
-    let address = params.get("address").map(String::as_str).unwrap_or("").trim().to_string();
+    let address = params
+        .get("address")
+        .map(String::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if address.chars().count() < 3 {
-        return Err(ApiError::bad_request("Query param address is required (min 3 chars)."));
+        return Err(ApiError::bad_request(
+            "Query param address is required (min 3 chars).",
+        ));
     }
     if address.chars().count() > 256 {
         return Err(ApiError::bad_request("Address too long."));
@@ -584,15 +658,31 @@ async fn run_wallet_insights(headers: &HeaderMap, params: &HashMap<String, Strin
         let row = &bal_map[key];
         let balance = number_or_zero(row.get("balance"));
         let is_active = row.get("status").and_then(Value::as_str) == Some("active");
-        let can = if !banned_globally && is_active { balance } else { 0.0 };
+        let can = if !banned_globally && is_active {
+            balance
+        } else {
+            0.0
+        };
         *withdrawable_by_currency.entry(key.clone()).or_default() += can;
 
         let mut obj = Map::new();
-        obj.insert("currency".into(), row.get("currency").cloned().unwrap_or(Value::Null));
+        obj.insert(
+            "currency".into(),
+            row.get("currency").cloned().unwrap_or(Value::Null),
+        );
         obj.insert("balance".into(), json_number(balance));
-        obj.insert("status".into(), row.get("status").cloned().unwrap_or(Value::Null));
-        obj.insert("user_tier".into(), Value::String(str_or(row.get("user_tier"), "free")));
-        obj.insert("updated_at".into(), row.get("updated_at").cloned().unwrap_or(Value::Null));
+        obj.insert(
+            "status".into(),
+            row.get("status").cloned().unwrap_or(Value::Null),
+        );
+        obj.insert(
+            "user_tier".into(),
+            Value::String(str_or(row.get("user_tier"), "free")),
+        );
+        obj.insert(
+            "updated_at".into(),
+            row.get("updated_at").cloned().unwrap_or(Value::Null),
+        );
         obj.insert("withdrawableNow".into(), json_number(can));
         balance_rows_out.push(Value::Object(obj));
     }
@@ -607,7 +697,11 @@ async fn run_wallet_insights(headers: &HeaderMap, params: &HashMap<String, Strin
     for row in &audit {
         let amount = number_or_zero(row.get("amount"));
         let currency = str_or(row.get("currency"), "USDC");
-        match row.get("operation_type").and_then(Value::as_str).unwrap_or("") {
+        match row
+            .get("operation_type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
             "deposit" => {
                 add_to(&mut total_deposits, &currency, amount);
                 deposit_count += 1;
@@ -623,17 +717,42 @@ async fn run_wallet_insights(headers: &HeaderMap, params: &HashMap<String, Strin
     }
 
     // --- betting aggregates (all / real / demo, wallet-address demo test) ----
-    let real_bets: Vec<Value> = bets.iter().filter(|b| !is_demo_wallet(b.get("wallet_address"))).cloned().collect();
-    let demo_bets: Vec<Value> = bets.iter().filter(|b| is_demo_wallet(b.get("wallet_address"))).cloned().collect();
+    let real_bets: Vec<Value> = bets
+        .iter()
+        .filter(|b| !is_demo_wallet(b.get("wallet_address")))
+        .cloned()
+        .collect();
+    let demo_bets: Vec<Value> = bets
+        .iter()
+        .filter(|b| is_demo_wallet(b.get("wallet_address")))
+        .cloned()
+        .collect();
     let betting_all = aggregate_bets(&bets);
     let betting_real = aggregate_bets(&real_bets);
     let betting_demo = aggregate_bets(&demo_bets);
 
     // --- withdrawals by status ---------------------------------------------
-    let status_of = |row: &Value| row.get("status").and_then(Value::as_str).unwrap_or("").to_string();
-    let pending: Vec<Value> = withdrawals.iter().filter(|w| status_of(w) == "pending").cloned().collect();
-    let accepted: Vec<Value> = withdrawals.iter().filter(|w| status_of(w) == "accepted").cloned().collect();
-    let rejected: Vec<Value> = withdrawals.iter().filter(|w| status_of(w) == "rejected").cloned().collect();
+    let status_of = |row: &Value| {
+        row.get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let pending: Vec<Value> = withdrawals
+        .iter()
+        .filter(|w| status_of(w) == "pending")
+        .cloned()
+        .collect();
+    let accepted: Vec<Value> = withdrawals
+        .iter()
+        .filter(|w| status_of(w) == "accepted")
+        .cloned()
+        .collect();
+    let rejected: Vec<Value> = withdrawals
+        .iter()
+        .filter(|w| status_of(w) == "rejected")
+        .cloned()
+        .collect();
     let mut pending_total: HashMap<String, f64> = HashMap::new();
     for row in &pending {
         let amount = number_or_zero(row.get("amount"));
@@ -648,15 +767,24 @@ async fn run_wallet_insights(headers: &HeaderMap, params: &HashMap<String, Strin
     let bets_rows = bets.len();
 
     let mut audit_agg = Map::new();
-    audit_agg.insert("totalDepositsByCurrency".into(), money_object(&total_deposits));
-    audit_agg.insert("totalWithdrawalsByCurrency".into(), money_object(&total_withdrawals));
+    audit_agg.insert(
+        "totalDepositsByCurrency".into(),
+        money_object(&total_deposits),
+    );
+    audit_agg.insert(
+        "totalWithdrawalsByCurrency".into(),
+        money_object(&total_withdrawals),
+    );
     audit_agg.insert("depositCount".into(), icount(deposit_count));
     audit_agg.insert("withdrawalCount".into(), icount(withdrawal_count));
     audit_agg.insert("betPlacedAuditCount".into(), icount(bet_placed_count));
     audit_agg.insert("payoutAuditCount".into(), icount(payout_count));
     audit_agg.insert("rowsReturned".into(), icount(audit_rows as i64));
     audit_agg.insert("cappedAt".into(), icount(AUDIT_CAP as i64));
-    audit_agg.insert("auditTruncated".into(), Value::Bool(audit_rows >= AUDIT_CAP));
+    audit_agg.insert(
+        "auditTruncated".into(),
+        Value::Bool(audit_rows >= AUDIT_CAP),
+    );
 
     let mut betting_agg = Map::new();
     betting_agg.insert("all".into(), bet_agg_value(&betting_all));
@@ -670,46 +798,91 @@ async fn run_wallet_insights(headers: &HeaderMap, params: &HashMap<String, Strin
     withdrawal_agg.insert("pending".into(), Value::Array(pending));
     withdrawal_agg.insert("accepted".into(), Value::Array(accepted));
     withdrawal_agg.insert("rejected".into(), Value::Array(rejected));
-    withdrawal_agg.insert("pendingTotalByCurrency".into(), money_object(&pending_total));
+    withdrawal_agg.insert(
+        "pendingTotalByCurrency".into(),
+        money_object(&pending_total),
+    );
 
     let mut summary = Map::new();
-    summary.insert("netBettingProfitLoss".into(), json_number(betting_all.net_pl));
-    summary.insert("houseEdgeFromBets".into(), json_number(betting_all.wagered - betting_all.payout));
+    summary.insert(
+        "netBettingProfitLoss".into(),
+        json_number(betting_all.net_pl),
+    );
+    summary.insert(
+        "houseEdgeFromBets".into(),
+        json_number(betting_all.wagered - betting_all.payout),
+    );
 
     let mut aggregates = Map::new();
     aggregates.insert("audit".into(), Value::Object(audit_agg));
     aggregates.insert("betting".into(), Value::Object(betting_agg));
     aggregates.insert("withdrawals".into(), Value::Object(withdrawal_agg));
-    aggregates.insert("withdrawableByCurrency".into(), money_object(&withdrawable_by_currency));
+    aggregates.insert(
+        "withdrawableByCurrency".into(),
+        money_object(&withdrawable_by_currency),
+    );
     aggregates.insert("summary".into(), Value::Object(summary));
 
     // --- profile / referral projections (three / three fields) --------------
-    let profile = profile_rows.first().map(|row| {
-        let mut obj = Map::new();
-        obj.insert("username".into(), row.get("username").cloned().unwrap_or(Value::Null));
-        obj.insert("access_code".into(), row.get("access_code").cloned().unwrap_or(Value::Null));
-        obj.insert("updated_at".into(), row.get("updated_at").cloned().unwrap_or(Value::Null));
-        Value::Object(obj)
-    }).unwrap_or(Value::Null);
+    let profile = profile_rows
+        .first()
+        .map(|row| {
+            let mut obj = Map::new();
+            obj.insert(
+                "username".into(),
+                row.get("username").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "access_code".into(),
+                row.get("access_code").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "updated_at".into(),
+                row.get("updated_at").cloned().unwrap_or(Value::Null),
+            );
+            Value::Object(obj)
+        })
+        .unwrap_or(Value::Null);
 
-    let referral = referral_rows.first().map(|row| {
-        let mut obj = Map::new();
-        obj.insert("referral_code".into(), row.get("referral_code").cloned().unwrap_or(Value::Null));
-        obj.insert("referral_count".into(), row.get("referral_count").cloned().unwrap_or(Value::Null));
-        obj.insert("referred_by".into(), row.get("referred_by").cloned().unwrap_or(Value::Null));
-        Value::Object(obj)
-    }).unwrap_or(Value::Null);
+    let referral = referral_rows
+        .first()
+        .map(|row| {
+            let mut obj = Map::new();
+            obj.insert(
+                "referral_code".into(),
+                row.get("referral_code").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "referral_count".into(),
+                row.get("referral_count").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "referred_by".into(),
+                row.get("referred_by").cloned().unwrap_or(Value::Null),
+            );
+            Value::Object(obj)
+        })
+        .unwrap_or(Value::Null);
 
     let mut body = Map::new();
     body.insert("query".into(), Value::String(address));
-    body.insert("variantsUsed".into(), Value::Array(variants.into_iter().map(Value::String).collect()));
+    body.insert(
+        "variantsUsed".into(),
+        Value::Array(variants.into_iter().map(Value::String).collect()),
+    );
     body.insert("bannedGlobally".into(), Value::Bool(banned_globally));
     body.insert("balances".into(), Value::Array(balance_rows_out));
     body.insert("aggregates".into(), Value::Object(aggregates));
     body.insert("profile".into(), profile);
     body.insert("referral".into(), referral);
-    body.insert("recentAudit".into(), Value::Array(audit.into_iter().take(80).collect()));
-    body.insert("recentBets".into(), Value::Array(bets.into_iter().take(80).collect()));
+    body.insert(
+        "recentAudit".into(),
+        Value::Array(audit.into_iter().take(80).collect()),
+    );
+    body.insert(
+        "recentBets".into(),
+        Value::Array(bets.into_iter().take(80).collect()),
+    );
     body.insert("withdrawalHistory".into(), Value::Array(withdrawals));
     body.insert("timeOnPlatform".into(), time_on_platform);
     Ok(Value::Object(body))
@@ -729,7 +902,14 @@ struct NetAgg {
 
 impl Default for NetAgg {
     fn default() -> Self {
-        Self { bets: 0, wins: 0, losses: 0, wagered: 0.0, payout: 0.0, net: 0.0 }
+        Self {
+            bets: 0,
+            wins: 0,
+            losses: 0,
+            wagered: 0.0,
+            payout: 0.0,
+            net: 0.0,
+        }
     }
 }
 
@@ -785,7 +965,11 @@ fn aggregate_bets(rows: &[Value]) -> BetAgg {
         wagered,
         payout,
         net_pl: payout - wagered,
-        win_rate: if total_bets > 0 { wins as f64 / total_bets as f64 } else { 0.0 },
+        win_rate: if total_bets > 0 {
+            wins as f64 / total_bets as f64
+        } else {
+            0.0
+        },
         by_network,
     }
 }
@@ -849,13 +1033,31 @@ fn compute_time_on_platform(sessions: &[Value]) -> Value {
                 Some(value) => value.clone(),
             };
             let mut obj = Map::new();
-            obj.insert("id".into(), session.get("id").cloned().unwrap_or(Value::Null));
-            obj.insert("network".into(), session.get("network").cloned().unwrap_or(Value::Null));
-            obj.insert("started_at".into(), session.get("started_at").cloned().unwrap_or(Value::Null));
-            obj.insert("last_ping_at".into(), session.get("last_ping_at").cloned().unwrap_or(Value::Null));
+            obj.insert(
+                "id".into(),
+                session.get("id").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "network".into(),
+                session.get("network").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "started_at".into(),
+                session.get("started_at").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "last_ping_at".into(),
+                session.get("last_ping_at").cloned().unwrap_or(Value::Null),
+            );
             obj.insert("ended_at".into(), ended_at);
-            obj.insert("durationSeconds".into(), icount(raw.min(SESSION_CAP_SECONDS as f64) as i64));
-            obj.insert("capped".into(), Value::Bool(raw > SESSION_CAP_SECONDS as f64));
+            obj.insert(
+                "durationSeconds".into(),
+                icount(raw.min(SESSION_CAP_SECONDS as f64) as i64),
+            );
+            obj.insert(
+                "capped".into(),
+                Value::Bool(raw > SESSION_CAP_SECONDS as f64),
+            );
             Value::Object(obj)
         })
         .collect();
@@ -863,7 +1065,10 @@ fn compute_time_on_platform(sessions: &[Value]) -> Value {
     let mut obj = Map::new();
     obj.insert("totalSessions".into(), icount(sessions.len() as i64));
     obj.insert("totalSeconds".into(), icount(total_seconds));
-    obj.insert("formatted".into(), Value::String(fmt_duration(total_seconds)));
+    obj.insert(
+        "formatted".into(),
+        Value::String(fmt_duration(total_seconds)),
+    );
     obj.insert("lastSeen".into(), last_seen);
     obj.insert("firstSeen".into(), first_seen);
     obj.insert("recentSessions".into(), Value::Array(recent));

@@ -447,6 +447,8 @@ const GridScan = ({
         window.addEventListener('resize', onResize);
 
         let last = performance.now();
+        // Reduced motion → render one static frame and stop the RAF loop.
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
         const tick = () => {
             const now = performance.now();
             const dt = Math.max(0, Math.min(0.1, (now - last) / 1000));
@@ -466,12 +468,28 @@ const GridScan = ({
             } else {
                 renderer.render(scene, camera);
             }
-            rafRef.current = requestAnimationFrame(tick);
+            // Idle frames are redundant under reduced motion: one frame only.
+            rafRef.current = reducedMotion.matches ? null : requestAnimationFrame(tick);
         };
         rafRef.current = requestAnimationFrame(tick);
 
+        // Battery: no frames at all while the tab is hidden.
+        const onVisibility = () => {
+            if (document.hidden) {
+                if (rafRef.current !== null) {
+                    cancelAnimationFrame(rafRef.current);
+                    rafRef.current = null;
+                }
+            } else {
+                last = performance.now();
+                tick(); // reduced motion: refreshes the single static frame
+            }
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+
         return () => {
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
+            document.removeEventListener('visibilitychange', onVisibility);
             window.removeEventListener('resize', onResize);
             material.dispose();
             quad.geometry.dispose();

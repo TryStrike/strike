@@ -21,9 +21,13 @@ A plain wallet means one leaked key drains everything. This contract adds:
 ## Commands
 
 Both scripts read `.env.local` then `.env` (`ARC_TREASURY_SECRET_KEY`,
-`NEXT_PUBLIC_ARC_CHAIN_ID`, `NEXT_PUBLIC_ARC_RPC_ENDPOINT`, `NEXT_PUBLIC_ARC_EXPLORER`).
-Mainnet is the default; set `NEXT_PUBLIC_ARC_CHAIN_ID=5042002` and the testnet
-RPC for Arc Testnet.
+`NEXT_PUBLIC_ARC_CHAIN_ID`, `NEXT_PUBLIC_ARC_RPC_ENDPOINT`, `NEXT_PUBLIC_ARC_EXPLORER`). `NEXT_PUBLIC_ARC_CHAIN_ID`
+is required — there is no implicit default, so a script can never quietly act on
+mainnet (`5042`) when the testnet (`5042002`) was meant.
+
+`deploy.mjs` refuses to overwrite an existing `deployments/arc-<chainId>.json`
+unless `--force` is given: redeploying orphans the previous treasury and the
+funds tracked against it.
 
 ```bash
 node contracts/arc/deploy.mjs   # writes deployments/arc-<chainId>.json + ABI

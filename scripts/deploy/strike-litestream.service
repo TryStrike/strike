@@ -1,0 +1,35 @@
+[Unit]
+Description=Strike ledger replication (Litestream)
+After=network-online.target strike-backend.service
+Wants=network-online.target
+
+[Service]
+# Same user as the backend: Litestream needs the file, its -wal and its -shm.
+User=strike
+Group=strike
+WorkingDirectory=/var/lib/strike
+EnvironmentFile=-/etc/strike/litestream.env
+# With no replica configured this logs a warning and exits 0.
+ExecStart=/opt/strike/bin/strike-data replicate
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/strike
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

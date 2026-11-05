@@ -1,6 +1,6 @@
 /**
  * Browser transport: forwards a query descriptor to /api/db, which re-checks it
- * against the allow-list before touching Neon. No credentials reach the client.
+ * against the allow-list before touching the database. No credentials reach the client.
  */
 import type { Executor, QueryDescriptor } from './query';
 

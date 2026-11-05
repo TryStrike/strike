@@ -23,10 +23,8 @@ use crate::bets::{
 /// Postgres `unique_violation`: the row we tried to insert already exists.
 pub const UNIQUE_VIOLATION: &str = "23505";
 
-/// 32 symbols, and 256 is a multiple of 32, so 5 random bits per char is
-/// unbiased (`b & 31` never favours a symbol). Note the alphabet has no `I`,
-/// `L`, `O`, `U`, `0`, `1` — `U` and `0`/`1` are excluded on purpose so a code
-/// cannot be misread.
+/// 30 symbols, no `I`, `O`, `0` or `1`, so a code cannot be misread. The TS
+/// comment claims 32 and indexes with `b & 31`; see `random_code_suffix`.
 pub const CODE_ALPHABET: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ234567";
 
 /// One page of referees. `totals.joined` is the DB count, not this cap.
@@ -86,15 +84,23 @@ pub fn code_tail(addr_key: &str) -> String {
     tail_utf16(addr_key, 4).to_uppercase()
 }
 
-/// `randomCodeSuffix()`: five unbiased bits per character out of a CSPRNG,
-/// which is what `crypto.getRandomValues` gave the TS.
+/// `randomCodeSuffix()`: five random bits per character out of a CSPRNG.
+///
+/// Deliberate deviation: the alphabet has 30 symbols, so `b & 31` lands past
+/// its end 1 time in 16 and the TS appends the literal text `undefined`. The
+/// 30 and 31 draws are rejected here instead, which keeps the suffix the
+/// documented length and alphabet without biasing any symbol.
 pub fn random_code_suffix(length: usize) -> String {
-    let mut bytes = vec![0u8; length];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes
-        .iter()
-        .filter_map(|b| CODE_ALPHABET.chars().nth(usize::from(*b & 31)))
-        .collect()
+    let alphabet = CODE_ALPHABET.as_bytes();
+    let mut out = String::with_capacity(length);
+    while out.len() < length {
+        let mut byte = [0u8; 1];
+        rand::rngs::OsRng.fill_bytes(&mut byte);
+        if let Some(symbol) = alphabet.get(usize::from(byte[0] & 31)) {
+            out.push(char::from(*symbol));
+        }
+    }
+    out
 }
 
 /// `strike-${addrKey.slice(-4).toUpperCase()}${randomCodeSuffix(4)}`.
@@ -160,7 +166,10 @@ pub struct RealBetSignal {
 
 impl RealBetSignal {
     fn new() -> Self {
-        Self { real_bets: 0, first_real_bet_at: None }
+        Self {
+            real_bets: 0,
+            first_real_bet_at: None,
+        }
     }
 }
 
@@ -206,7 +215,11 @@ pub fn real_bet_signals(rows: &[Value]) -> (Vec<(String, RealBetSignal)>, usize)
         if is_demo_bet_row(row) {
             continue;
         }
-        let key = canonical_address(&row.get("wallet_address").map(value_to_string).unwrap_or_default());
+        let key = canonical_address(
+            &row.get("wallet_address")
+                .map(value_to_string)
+                .unwrap_or_default(),
+        );
         let entry = match signals.iter_mut().find(|(k, _)| *k == key) {
             Some((_, signal)) => signal,
             None => {
@@ -225,7 +238,10 @@ pub fn real_bet_signals(rows: &[Value]) -> (Vec<(String, RealBetSignal)>, usize)
 }
 
 /// Look a referee up by their ledger key.
-pub fn find_signal<'a>(signals: &'a [(String, RealBetSignal)], key: &str) -> Option<&'a RealBetSignal> {
+pub fn find_signal<'a>(
+    signals: &'a [(String, RealBetSignal)],
+    key: &str,
+) -> Option<&'a RealBetSignal> {
     signals.iter().find(|(k, _)| k == key).map(|(_, s)| s)
 }
 
@@ -249,11 +265,24 @@ pub fn split_demo_rows(rows: &[Value]) -> (Vec<Value>, usize) {
 pub fn friend_row(row: &Value, signal: Option<&RealBetSignal>) -> Value {
     let real_bets = signal.map(|s| s.real_bets).unwrap_or(0);
     json_like(&[
-        ("address", row.get("user_address").cloned().unwrap_or(Value::Null)),
-        ("joinedAt", row.get("created_at").cloned().unwrap_or(Value::Null)),
+        (
+            "address",
+            row.get("user_address").cloned().unwrap_or(Value::Null),
+        ),
+        (
+            "joinedAt",
+            row.get("created_at").cloned().unwrap_or(Value::Null),
+        ),
         (
             "status",
-            Value::String(if real_bets > 0 { "qualified" } else { "pending" }.to_string()),
+            Value::String(
+                if real_bets > 0 {
+                    "qualified"
+                } else {
+                    "pending"
+                }
+                .to_string(),
+            ),
         ),
         ("realBets", Value::Number(real_bets.into())),
         (
@@ -271,7 +300,10 @@ pub fn friends_json(page_rows: &[Value], signals: &[(String, RealBetSignal)]) ->
     page_rows
         .iter()
         .map(|row| {
-            let address = row.get("user_address").map(value_to_string).unwrap_or_default();
+            let address = row
+                .get("user_address")
+                .map(value_to_string)
+                .unwrap_or_default();
             friend_row(row, find_signal(signals, &canonical_address(&address)))
         })
         .collect()
@@ -310,16 +342,16 @@ pub fn friends_totals(
             Value::Number((page_len as i64 - qualified as i64).into()),
         ),
         ("truncated", Value::Bool(joined > page_len as i64)),
-        ("qualifiedExact", Value::Bool((scanned as i64) < BET_SCAN_CAP)),
+        (
+            "qualifiedExact",
+            Value::Bool((scanned as i64) < BET_SCAN_CAP),
+        ),
     ])
 }
 
 /// `Response.json({ friends, totals })`.
 pub fn friends_response(friends: Vec<Value>, totals: Value) -> Value {
-    json_like(&[
-        ("friends", Value::Array(friends)),
-        ("totals", totals),
-    ])
+    json_like(&[("friends", Value::Array(friends)), ("totals", totals)])
 }
 
 // ── Public leaderboard ──────────────────────────────────────────────────────
@@ -333,7 +365,10 @@ pub fn leaderboard_json(rows: &[Value], visible: usize) -> Value {
         .filter(|row| !is_demo_wallet_address(row.get("user_address")))
         .take(visible)
         .map(|row| {
-            let address = row.get("user_address").map(value_to_string).unwrap_or_default();
+            let address = row
+                .get("user_address")
+                .map(value_to_string)
+                .unwrap_or_default();
             json_like(&[
                 ("user_address", Value::String(truncate_address(&address))),
                 (
@@ -355,9 +390,18 @@ pub fn single_referral_json(row: Option<&Value>) -> Value {
     let referral = match row {
         None => Value::Null,
         Some(row) => json_like(&[
-            ("referral_code", row.get("referral_code").cloned().unwrap_or(Value::Null)),
-            ("referral_count", row.get("referral_count").cloned().unwrap_or(Value::Null)),
-            ("referred_by", row.get("referred_by").cloned().unwrap_or(Value::Null)),
+            (
+                "referral_code",
+                row.get("referral_code").cloned().unwrap_or(Value::Null),
+            ),
+            (
+                "referral_count",
+                row.get("referral_count").cloned().unwrap_or(Value::Null),
+            ),
+            (
+                "referred_by",
+                row.get("referred_by").cloned().unwrap_or(Value::Null),
+            ),
         ]),
     };
     json_like(&[("referral", referral)])
@@ -401,7 +445,9 @@ mod tests {
         assert!(is_referral_address(&ADDR.to_lowercase()));
         // 42 characters but not 40 hex digits.
         assert!(!is_referral_address("0x123"));
-        assert!(!is_referral_address("5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"));
+        assert!(!is_referral_address(
+            "5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+        ));
         // A capital `0X` prefix is outside `/^0x[0-9a-fA-F]{40}$/`.
         assert!(!is_referral_address(&ADDR.replacen("0x", "0X", 1)));
         assert!(!is_referral_address(""));
@@ -413,7 +459,10 @@ mod tests {
         // address is the same 42 code points JS counted.
         assert_eq!(truncate_address(ADDR), "0x5aAe…eAed");
         // The tail comes from the *end* of the string, not from the 12th char.
-        assert_eq!(truncate_address("0x1111111111111111111111111111111111111111"), "0x1111…1111");
+        assert_eq!(
+            truncate_address("0x1111111111111111111111111111111111111111"),
+            "0x1111…1111"
+        );
     }
 
     #[test]
@@ -423,12 +472,16 @@ mod tests {
         assert!(code.starts_with("strike-EAED"), "{code}");
         // `strike-` (7) + the 4-char tail + the 4-char suffix.
         assert_eq!(code.chars().count(), 15);
-        // Suffix alphabet: no I/L/O/U/0/1 look-alikes.
+        // Suffix alphabet: no I/O/0/1 look-alikes.
         for ch in code["strike-EAED".len()..].chars() {
             assert!(CODE_ALPHABET.contains(ch), "unexpected {ch} in {code}");
             assert!(!ch.is_ascii_digit() || matches!(ch, '2'..='7'), "{ch}");
         }
-        assert_ne!(referral_code(&lower), referral_code(&lower), "the suffix is random");
+        assert_ne!(
+            referral_code(&lower),
+            referral_code(&lower),
+            "the suffix is random"
+        );
         // A short key cannot be padded out of its own tail.
         assert_eq!(code_tail("0xab"), "0XAB");
     }
@@ -438,14 +491,24 @@ mod tests {
         for _ in 0..200 {
             let suffix = random_code_suffix(4);
             assert_eq!(suffix.chars().count(), 4);
-            assert!(suffix.chars().all(|c| CODE_ALPHABET.contains(c)), "{suffix}");
+            assert!(
+                suffix.chars().all(|c| CODE_ALPHABET.contains(c)),
+                "{suffix}"
+            );
         }
     }
 
     #[test]
     fn only_string_codes_are_even_considered() {
-        assert_eq!(clean_referral_code(Some(&json!(" strike-ABCD1234 "))).as_deref(), Some("strike-ABCD1234"));
-        assert_eq!(clean_referral_code(Some(&json!(""))), None, "empty trims away");
+        assert_eq!(
+            clean_referral_code(Some(&json!(" strike-ABCD1234 "))).as_deref(),
+            Some("strike-ABCD1234")
+        );
+        assert_eq!(
+            clean_referral_code(Some(&json!(""))),
+            None,
+            "empty trims away"
+        );
         assert_eq!(clean_referral_code(Some(&json!("   "))), None);
         assert_eq!(clean_referral_code(Some(&json!(123))), None, "not a string");
         assert_eq!(clean_referral_code(Some(&json!(null))), None);
@@ -464,7 +527,10 @@ mod tests {
         let code = Some(json!("strike-ABCD12"));
 
         // Unknown code (no row) or a row with a blank/null address.
-        assert_eq!(resolve_referrer_target(code.as_ref(), &self_key, None), None);
+        assert_eq!(
+            resolve_referrer_target(code.as_ref(), &self_key, None),
+            None
+        );
         assert_eq!(
             resolve_referrer_target(code.as_ref(), &self_key, Some(&json!(""))),
             None,
@@ -491,12 +557,16 @@ mod tests {
         let referrer = ADDR.replacen("5aAe", "ffff", 1);
         assert_ne!(canonical_address(&referrer), self_key);
         assert_eq!(
-            resolve_referrer_target(code.as_ref(), &self_key, Some(&json!(referrer.clone()))).as_deref(),
+            resolve_referrer_target(code.as_ref(), &self_key, Some(&json!(referrer.clone())))
+                .as_deref(),
             Some(referrer.as_str()),
             "spelling preserved verbatim"
         );
         // No code at all means no lookup was even attempted.
-        assert_eq!(resolve_referrer_target(None, &self_key, Some(&json!(ADDR))), None);
+        assert_eq!(
+            resolve_referrer_target(None, &self_key, Some(&json!(ADDR))),
+            None
+        );
     }
 
     #[test]
@@ -520,8 +590,15 @@ mod tests {
             json!({"id": "bet-3", "wallet_address": "0xDEMO1111111111111111111111111111111111", "created_at": "2026-01-04T00:00:00.000Z"}),
         ];
         let (signals, scanned) = real_bet_signals(&rows);
-        assert_eq!(scanned, 4, "the cap compares against rows READ, demo rows included");
-        assert_eq!(signals.len(), 1, "both spellings fold into one canonical key");
+        assert_eq!(
+            scanned, 4,
+            "the cap compares against rows READ, demo rows included"
+        );
+        assert_eq!(
+            signals.len(),
+            1,
+            "both spellings fold into one canonical key"
+        );
         let signal = find_signal(&signals, &canonical_address(ADDR)).expect("keyed canonically");
         assert_eq!(signal.real_bets, 2);
         assert_eq!(
@@ -542,7 +619,10 @@ mod tests {
         let (signals, _) = real_bet_signals(&rows);
         let signal = &signals[0].1;
         assert_eq!(signal.real_bets, 3);
-        assert_eq!(signal.first_real_bet_at.as_deref(), Some("2026-02-02T00:00:00.000Z"));
+        assert_eq!(
+            signal.first_real_bet_at.as_deref(),
+            Some("2026-02-02T00:00:00.000Z")
+        );
 
         // Only falsy timestamps: `firstRealBetAt` stays null, never "".
         let (only_nulls, _) = real_bet_signals(&[json!({"id": "b1", "wallet_address": ADDR})]);
@@ -568,20 +648,36 @@ mod tests {
         let pending = friend_row(&row, None);
         assert_eq!(
             keys(&pending),
-            vec!["address", "joinedAt", "status", "realBets", "firstRealBetAt"]
+            vec![
+                "address",
+                "joinedAt",
+                "status",
+                "realBets",
+                "firstRealBetAt"
+            ]
         );
         assert_eq!(pending["status"], json!("pending"));
         assert_eq!(pending["realBets"], json!(0));
-        assert_eq!(pending["joinedAt"], Value::Null, "a null joinedAt stays present, not absent");
+        assert_eq!(
+            pending["joinedAt"],
+            Value::Null,
+            "a null joinedAt stays present, not absent"
+        );
         assert_eq!(pending["firstRealBetAt"], Value::Null);
 
         let qualified = friend_row(
             &row,
-            Some(&RealBetSignal { real_bets: 3, first_real_bet_at: Some("2026-01-05T00:00:00.000Z".into()) }),
+            Some(&RealBetSignal {
+                real_bets: 3,
+                first_real_bet_at: Some("2026-01-05T00:00:00.000Z".into()),
+            }),
         );
         assert_eq!(qualified["status"], json!("qualified"));
         assert_eq!(qualified["realBets"], json!(3));
-        assert_eq!(qualified["firstRealBetAt"], json!("2026-01-05T00:00:00.000Z"));
+        assert_eq!(
+            qualified["firstRealBetAt"],
+            json!("2026-01-05T00:00:00.000Z")
+        );
     }
 
     #[test]
@@ -590,12 +686,23 @@ mod tests {
         let totals = friends_totals(Some(7), 2, 5, 2, 30);
         assert_eq!(
             keys(&totals),
-            vec!["joined", "pageJoined", "qualified", "pending", "truncated", "qualifiedExact"]
+            vec![
+                "joined",
+                "pageJoined",
+                "qualified",
+                "pending",
+                "truncated",
+                "qualifiedExact"
+            ]
         );
         assert_eq!(totals["joined"], json!(5), "7 - 2 demo rows");
         assert_eq!(totals["pageJoined"], json!(5));
         assert_eq!(totals["qualified"], json!(2));
-        assert_eq!(totals["pending"], json!(3), "the page denominators always sum");
+        assert_eq!(
+            totals["pending"],
+            json!(3),
+            "the page denominators always sum"
+        );
         assert_eq!(totals["truncated"], json!(false));
         assert_eq!(totals["qualifiedExact"], json!(true));
 
@@ -616,7 +723,7 @@ mod tests {
         );
         // PostgREST clamps a `.limit(2000)` to MAX_ROWS_PER_QUERY rows, so a real
         // scan can never reach the cap: `qualifiedExact` is true by construction.
-        assert!(MAX_ROWS_PER_QUERY < BET_SCAN_CAP);
+        const _: () = assert!(MAX_ROWS_PER_QUERY < BET_SCAN_CAP);
     }
 
     #[test]
@@ -633,16 +740,36 @@ mod tests {
 
         let body = leaderboard_json(&rows, 20);
         let board = body["leaderboard"].as_array().unwrap();
-        assert_eq!(board.len(), 20, "the scan cap is 60, the visible slice is 20");
+        assert_eq!(
+            board.len(),
+            20,
+            "the scan cap is 60, the visible slice is 20"
+        );
         assert_eq!(keys(&board[0]), vec!["user_address", "referral_count"]);
-        assert_eq!(board[0]["referral_count"], json!(60), "order is the DB's, desc");
+        assert_eq!(
+            board[0]["referral_count"],
+            json!(60),
+            "order is the DB's, desc"
+        );
         assert_eq!(board[0]["user_address"], json!("0x0000…0001"));
         let serialized = body.to_string();
-        assert!(!serialized.contains("SECRET"), "no referral code may reach the public board");
-        assert!(!serialized.contains("0xDEMO"), "demo wallets cannot crowd the board out");
+        assert!(
+            !serialized.contains("SECRET"),
+            "no referral code may reach the public board"
+        );
+        assert!(
+            !serialized.contains("0xDEMO"),
+            "demo wallets cannot crowd the board out"
+        );
 
         // Fewer rows than the visible window, and an all-demo scan page.
-        assert_eq!(leaderboard_json(&rows[..3], 20)["leaderboard"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            leaderboard_json(&rows[..3], 20)["leaderboard"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(
             leaderboard_json(&[json!({"user_address": "0xDEMO4444444444444444444444444444444444", "referral_count": 1})], 20)["leaderboard"]
                 .as_array()
@@ -661,17 +788,28 @@ mod tests {
         });
         let body = single_referral_json(Some(&row));
         let referral = &body["referral"];
-        assert_eq!(keys(referral), vec!["referral_code", "referral_count", "referred_by"]);
+        assert_eq!(
+            keys(referral),
+            vec!["referral_code", "referral_count", "referred_by"]
+        );
         assert_eq!(referral["referral_count"], json!(3));
-        assert_eq!(referral["referred_by"], Value::Null, "an unattributed record says so");
+        assert_eq!(
+            referral["referred_by"],
+            Value::Null,
+            "an unattributed record says so"
+        );
         let serialized = referral.to_string();
-        assert!(!serialized.contains(ADDR), "the row's own address is not echoed here");
+        assert!(
+            !serialized.contains(ADDR),
+            "the row's own address is not echoed here"
+        );
         assert!(!serialized.contains("created_at"));
 
         assert_eq!(single_referral_json(None), json!({"referral": null}));
         // A row missing a column projects null rather than dropping the key.
         assert_eq!(
-            single_referral_json(Some(&json!({"referral_code": "x"})))["referral"]["referral_count"],
+            single_referral_json(Some(&json!({"referral_code": "x"})))["referral"]
+                ["referral_count"],
             Value::Null
         );
     }
@@ -680,9 +818,15 @@ mod tests {
     fn registration_responses_carry_only_the_two_public_fields() {
         let body = register_response(json!("strike-ABCD1234"), json!(0));
         assert_eq!(keys(&body), vec!["referral_code", "referral_count"]);
-        assert_eq!(body, json!({"referral_code": "strike-ABCD1234", "referral_count": 0}));
         assert_eq!(
-            keys(&friends_response(vec![json!({})], friends_totals(Some(1), 0, 1, 0, 0))),
+            body,
+            json!({"referral_code": "strike-ABCD1234", "referral_count": 0})
+        );
+        assert_eq!(
+            keys(&friends_response(
+                vec![json!({})],
+                friends_totals(Some(1), 0, 1, 0, 0)
+            )),
             vec!["friends", "totals"]
         );
     }
@@ -694,23 +838,55 @@ mod tests {
         let claimed = json!({"referral_code": "c", "referral_count": 2, "referred_by": referrer});
 
         assert!(should_attempt_bind(Some(referrer), Some(&unclaimed)));
-        assert!(!should_attempt_bind(Some(referrer), Some(&claimed)), "already attributed: never re-bound");
-        assert!(!should_attempt_bind(Some(referrer), Some(&json!({"referred_by": ""}))), "empty is falsy in the TS");
-        assert!(!should_attempt_bind(None, Some(&unclaimed)), "no referrer named");
-        assert!(!should_attempt_bind(Some(referrer), None), "the insert race lost and no row exists yet");
+        assert!(
+            !should_attempt_bind(Some(referrer), Some(&claimed)),
+            "already attributed: never re-bound"
+        );
+        // `!existing.referred_by`: "" is falsy, so the row reads as unclaimed. The
+        // `referred_by IS NULL` guard on the UPDATE still stops it being bound.
+        assert!(
+            should_attempt_bind(Some(referrer), Some(&json!({"referred_by": ""}))),
+            "empty is falsy in the TS"
+        );
+        assert!(
+            !should_attempt_bind(None, Some(&unclaimed)),
+            "no referrer named"
+        );
+        assert!(
+            !should_attempt_bind(Some(referrer), None),
+            "the insert race lost and no row exists yet"
+        );
 
         assert_eq!(bumped_referral_count(&unclaimed), js_num(3.0));
-        assert_eq!(bumped_referral_count(&json!({"referral_count": null})), json!(1));
-        assert_eq!(bumped_referral_count(&json!({})), json!(1), "missing column counts as 0");
-        assert_eq!(bumped_referral_count(&json!({"referral_count": "4"})), json!(5));
+        assert_eq!(
+            bumped_referral_count(&json!({"referral_count": null})),
+            json!(1)
+        );
+        assert_eq!(
+            bumped_referral_count(&json!({})),
+            json!(1),
+            "missing column counts as 0"
+        );
+        assert_eq!(
+            bumped_referral_count(&json!({"referral_count": "4"})),
+            json!(5)
+        );
     }
 
     #[test]
     fn short_addresses_survive_truncation_untouched() {
         assert_eq!(truncate_address(""), "");
         assert_eq!(truncate_address("0xabc"), "0xabc");
-        assert_eq!(truncate_address("d1234567890"), "d1234567890", "11 units is below the gate");
-        assert_eq!(truncate_address("d12345678901"), "d12345…8901", "12 units is exactly one full window");
+        assert_eq!(
+            truncate_address("d1234567890"),
+            "d1234567890",
+            "11 units is below the gate"
+        );
+        assert_eq!(
+            truncate_address("d12345678901"),
+            "d12345…8901",
+            "12 units is exactly one full window"
+        );
     }
 
     fn keys(value: &Value) -> Vec<String> {

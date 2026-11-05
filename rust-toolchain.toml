@@ -1,0 +1,6 @@
+# One toolchain for local runs, CI and the Oracle deploy script.
+# rustup installs this automatically on first `cargo` invocation.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
