@@ -238,6 +238,8 @@ async fn fetch_usernames(addresses: &[String]) -> HashMap<String, Value> {
         let canonical =
             canonical_address(&profile.get("user_address").map(value_of).unwrap_or_default());
         let username = profile.get("username").cloned().unwrap_or(Value::Null);
+        // `if (map[canonical] == null || !map[canonical]) map[canonical] = p.username`:
+        // an existing falsy slot is replaced, an existing truthy username wins.
         let replace = match map.get(&canonical) {
             None => true,
             Some(existing) => !strike_core::bets::is_truthy(Some(existing)),
@@ -253,8 +255,13 @@ fn value_of(v: &Value) -> String {
     strike_core::bets::value_to_string(v)
 }
 
+/// `usernameMap[address] || null` — JS truthiness, so a blank username is null
+/// on the wire rather than `""`.
 fn username_for(map: &HashMap<String, Value>, address: &str) -> Option<String> {
-    map.get(address).and_then(Value::as_str).map(str::to_string)
+    map.get(address)
+        .filter(|v| strike_core::bets::is_truthy(Some(v)))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Public board: top `limit` slice, usernames, back-compat keys and meta.

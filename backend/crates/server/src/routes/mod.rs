@@ -4,11 +4,17 @@
 
 pub mod access_code;
 pub mod admin;
+pub mod admin_reads_a;
+pub mod admin_reads_b;
+pub mod admin_writes;
 pub mod arc;
 pub mod balance;
+pub mod balance_mutations;
+pub mod bets;
 pub mod db_gateway;
 pub mod precheck;
 pub mod prices;
+pub mod referral;
 pub mod session;
 pub mod stats;
 pub mod stream;
@@ -26,11 +32,17 @@ pub fn router() -> Router {
         .route("/api/health", get(health))
         .merge(access_code::routes())
         .merge(admin::routes())
+        .merge(admin_reads_a::routes())
+        .merge(admin_reads_b::routes())
+        .merge(admin_writes::routes())
         .merge(arc::routes())
         .merge(balance::routes())
+        .merge(balance_mutations::routes())
+        .merge(bets::routes())
         .merge(db_gateway::routes())
         .merge(precheck::routes())
         .merge(prices::routes())
+        .merge(referral::routes())
         .merge(session::routes())
         .merge(stats::routes())
         .merge(stream::routes())

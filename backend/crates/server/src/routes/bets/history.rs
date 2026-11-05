@@ -64,19 +64,19 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     // catalog via `column_type`, never from the client.
     clauses.push(format!(
         "wallet_address = {}",
-        binds.push(column_type("bet_history", "wallet_address").await?, Value::String(q.address.clone()))
+        binds.push(bind_type("wallet_address").await?, Value::String(q.address.clone()))
     ));
     if let Some(asset) = &q.asset {
         clauses.push(format!(
             "asset = {}",
-            binds.push(column_type("bet_history", "asset").await?, Value::String(asset.clone()))
+            binds.push(bind_type("asset").await?, Value::String(asset.clone()))
         ));
     }
     if let Some(outcome) = &q.outcome {
         clauses.push(format!(
             "won = {}",
             binds.push(
-                column_type("bet_history", "won").await?,
+                bind_type("won").await?,
                 Value::Bool(outcome == "won"),
             )
         ));
@@ -84,19 +84,19 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     if let Some(direction) = &q.direction {
         clauses.push(format!(
             "direction = {}",
-            binds.push(column_type("bet_history", "direction").await?, Value::String(direction.clone()))
+            binds.push(bind_type("direction").await?, Value::String(direction.clone()))
         ));
     }
     if let Some(from) = &q.from {
         clauses.push(format!(
             "resolved_at >= {}",
-            binds.push(column_type("bet_history", "resolved_at").await?, Value::String(from.clone()))
+            binds.push(bind_type("resolved_at").await?, Value::String(from.clone()))
         ));
     }
     if let Some(to) = &q.to {
         clauses.push(format!(
             "resolved_at <= {}",
-            binds.push(column_type("bet_history", "resolved_at").await?, Value::String(to.clone()))
+            binds.push(bind_type("resolved_at").await?, Value::String(to.clone()))
         ));
     }
 
@@ -155,6 +155,12 @@ async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
 
 fn optional(value: &Option<String>) -> Value {
     value.clone().map(Value::String).unwrap_or(Value::Null)
+}
+
+/// A catalog lookup is part of the read for the browser's sake: the TS route
+/// had no schema step, so a miss can only surface as its query failure.
+async fn bind_type(column: &str) -> Result<String, ApiError> {
+    column_type("bet_history", column).await.map_err(query_failure)
 }
 
 fn query_failure(err: ApiError) -> ApiError {

@@ -97,7 +97,12 @@ async fn run(body: &Value) -> Result<Value, ApiError> {
     let mut cols: Vec<String> = Vec::new();
     let mut placeholders: Vec<String> = Vec::new();
     for (name, value) in values {
-        let ty = column_type("bet_history", name).await?;
+        // The TS route had no schema step: every read/write failure, including
+        // an unexpected column, surfaced as its `Failed to save bet` 500.
+        let ty = column_type("bet_history", name).await.map_err(|err| {
+            tracing::error!("Supabase bet save error: {err}");
+            ApiError::internal("Failed to save bet")
+        })?;
         placeholders.push(binds.push(ty, value));
         cols.push(format!("\"{name}\""));
     }

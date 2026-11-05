@@ -66,11 +66,16 @@ async fn read_balance(
     let variants = address::search_variants(&address_param);
     // $1 is the currency, $2.. the address variants.
     let placeholders = sql::in_list(2, "text", variants.len());
+    // `NULLS LAST`: the TS route chose its newest row with
+    // `new Date(r.updated_at) > new Date(best.updated_at)`, and `new Date(null)`
+    // is the epoch - a row with no `updated_at` can never be the latest one
+    // unless every row is missing it. Plain `DESC` puts NULLs first in
+    // Postgres, which would have answered `updatedAt: null`.
     let statement = format!(
         "SELECT balance, updated_at, user_address, user_tier \
          FROM user_balances \
          WHERE user_address IN ({placeholders}) AND currency = CAST($1 AS text) \
-         ORDER BY updated_at DESC"
+         ORDER BY updated_at DESC NULLS LAST"
     );
     let mut binds: Vec<(&str, Value)> = Vec::with_capacity(variants.len() + 1);
     binds.push(("text", Value::String(currency.clone())));

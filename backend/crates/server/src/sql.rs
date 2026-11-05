@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use strike_core::db;
 
-pub use db::{execute, fetch, fetch_one};
+pub use db::{execute, fetch, fetch_one, fetch_scalar};
 
 /// `CAST($start AS text), CAST($start+1 AS text), ...` for an `IN (...)` list.
 /// The caller binds one value per entry, in the same order. A count of zero is

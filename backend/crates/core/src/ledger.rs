@@ -896,7 +896,7 @@ pub struct WinRequest<'a> {
     pub win_amount: &'a Value,
     pub currency: Value,
     pub bet_id: &'a Value,
-    pub settlement_token: &'a Value,
+    pub settlement_token: Value,
 }
 
 pub fn win_head(body: &Value, allow_test_bypass: bool) -> Result<WinRequest<'_>, Rejection> {
@@ -1156,9 +1156,10 @@ pub fn withdraw_cap_check(
     normalized_currency: &str,
 ) -> Result<(), Rejection> {
     let amount_base = amount_to_base_units(amount, USDC_DECIMALS);
-    let deposited = sum_amounts_to_base_units(deposits.iter().map(|r| r.get("amount").cloned().unwrap_or(Value::Null)), USDC_DECIMALS);
-    let withdrawn_sum = sum_amounts_to_base_units(withdrawn.iter().map(|r| r.get("amount").cloned().unwrap_or(Value::Null)), USDC_DECIMALS);
-    let pending_sum = sum_amounts_to_base_units(pending.iter().map(|r| r.get("amount").cloned().unwrap_or(Value::Null)), USDC_DECIMALS);
+    let null = Value::Null;
+    let deposited = sum_amounts_to_base_units(deposits.iter().map(|r| r.get("amount").unwrap_or(&null)), USDC_DECIMALS);
+    let withdrawn_sum = sum_amounts_to_base_units(withdrawn.iter().map(|r| r.get("amount").unwrap_or(&null)), USDC_DECIMALS);
+    let pending_sum = sum_amounts_to_base_units(pending.iter().map(|r| r.get("amount").unwrap_or(&null)), USDC_DECIMALS);
     let (amount_base, deposited, withdrawn_sum, pending_sum) = match (amount_base, deposited, withdrawn_sum, pending_sum) {
         (Some(a), Some(d), Some(w), Some(p)) => (a, d, w, p),
         // An unparseable row disables the comparison: fail closed, 503.
