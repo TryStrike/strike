@@ -1186,3 +1186,256 @@ async fn another_wallet_cannot_approve_or_reject_a_proposal() {
     }
     assert_eq!(s.balance_of(&address_of(&alice)), 100 * UNIT);
 }
+
+// -- copilot -----------------------------------------------------------------
+
+const CLAUDE_KEY: &str = "test-anthropic-key";
+
+/// Every request body the fake Messages API received.
+type Claude = Arc<Mutex<Vec<Value>>>;
+
+fn sse(events: &[Value]) -> String {
+    events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+        .collect()
+}
+
+fn block(index: usize, start: Value, deltas: &[Value]) -> Vec<Value> {
+    let mut events =
+        vec![json!({ "type": "content_block_start", "index": index, "content_block": start })];
+    for delta in deltas {
+        events.push(json!({ "type": "content_block_delta", "index": index, "delta": delta }));
+    }
+    events.push(json!({ "type": "content_block_stop", "index": index }));
+    events
+}
+
+/// A thinking block, then both tools in parallel, the way Haiku answered the
+/// smoke test. "loop" questions ask for movers forever.
+fn tool_turn(looping: bool) -> String {
+    let mut events = vec![
+        json!({ "type": "message_start", "message": { "id": "msg_1", "type": "message", "role": "assistant", "content": [] } }),
+    ];
+    events.extend(block(
+        0,
+        json!({ "type": "thinking", "thinking": "", "signature": "" }),
+        &[json!({ "type": "signature_delta", "signature": "sig-1" })],
+    ));
+    events.extend(block(
+        1,
+        json!({ "type": "tool_use", "id": "toolu_1", "name": "get_market_movers", "input": {} }),
+        &[json!({ "type": "input_json_delta", "partial_json": "" })],
+    ));
+    if !looping {
+        events.extend(block(
+            2,
+            json!({ "type": "tool_use", "id": "toolu_2", "name": "show_table", "input": {} }),
+            &[
+                json!({ "type": "input_json_delta", "partial_json": "{\"source\": \"market_" }),
+                json!({ "type": "input_json_delta", "partial_json": "movers\", \"title\": \"Movers\"}" }),
+            ],
+        ));
+    }
+    events.push(json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 9 } }));
+    events.push(json!({ "type": "message_stop" }));
+    sse(&events)
+}
+
+fn text_turn() -> String {
+    let mut events = vec![
+        json!({ "type": "message_start", "message": { "id": "msg_2", "type": "message", "role": "assistant", "content": [] } }),
+    ];
+    events.extend(block(
+        0,
+        json!({ "type": "text", "text": "" }),
+        &[
+            json!({ "type": "text_delta", "text": "BTC leads, up 1.00% " }),
+            json!({ "type": "text_delta", "text": "over the last 15 minutes." }),
+        ],
+    ));
+    events.push(json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 9 } }));
+    events.push(json!({ "type": "message_stop" }));
+    sse(&events)
+}
+
+async fn messages_api(
+    State(claude): State<Claude>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    claude.lock().unwrap().push(body.clone());
+    if headers.get("x-api-key").and_then(|v| v.to_str().ok()) != Some(CLAUDE_KEY) {
+        return AxumStatus::UNAUTHORIZED.into_response();
+    }
+    let messages = body["messages"].as_array().unwrap();
+    let question = messages[0]["content"].as_str().unwrap_or_default();
+    let after_tools = messages.last().unwrap()["content"]
+        .as_array()
+        .is_some_and(|c| c.iter().any(|b| b["type"] == "tool_result"));
+    let stream = if after_tools && !question.contains("loop") {
+        text_turn()
+    } else {
+        tool_turn(question.contains("loop"))
+    };
+    ([("content-type", "text/event-stream")], stream).into_response()
+}
+
+async fn spawn_claude() -> (Claude, String) {
+    let claude: Claude = Arc::default();
+    let app = Router::new()
+        .route("/v1/messages", axum::routing::post(messages_api))
+        .with_state(claude.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (claude, url)
+}
+
+async fn copilot_server(btc: f64) -> (Server, Feed, Claude) {
+    let (claude, url) = spawn_claude().await;
+    let url: &'static str = Box::leak(url.into_boxed_str());
+    let env = [
+        ("ANTHROPIC_API_KEY", CLAUDE_KEY),
+        ("ANTHROPIC_BASE_URL", url),
+    ];
+    let (s, feed, _) = Server::start_with(btc, &env).await;
+    (s, feed, claude)
+}
+
+impl Server {
+    /// `(status, frames)`: the whole SSE answer, or a JSON error as one frame.
+    async fn ask(&self, question: &str) -> (StatusCode, Vec<(String, Value)>) {
+        let res = self
+            .http
+            .post(format!("{}/api/copilot", self.url))
+            .json(&json!({ "messages": [{ "role": "user", "content": question }] }))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status();
+        if status != StatusCode::OK {
+            return (status, vec![("json".into(), res.json().await.unwrap())]);
+        }
+        let mut feed = SseFeed {
+            res,
+            buffer: String::new(),
+        };
+        let mut frames = Vec::new();
+        while let Some(frame) = feed.next().await {
+            frames.push(frame);
+        }
+        (status, frames)
+    }
+}
+
+fn of<'a>(frames: &'a [(String, Value)], event: &str) -> Vec<&'a Value> {
+    frames
+        .iter()
+        .filter(|(e, _)| e == event)
+        .map(|(_, d)| d)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whats_moving_streams_an_answer_and_opens_a_table_of_real_movers() {
+    let (s, feed, claude) = copilot_server(100.0).await;
+    tokio::time::sleep(Duration::from_millis(6_000)).await;
+    set_price(&feed, 101.0);
+    after_the_next_sample().await;
+
+    let (status, frames) = s.ask("what's moving?").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let text: String = of(&frames, "text")
+        .iter()
+        .map(|d| d["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(text, "BTC leads, up 1.00% over the last 15 minutes.");
+    let actions = of(&frames, "action");
+    assert_eq!(actions.len(), 1, "{frames:?}");
+    let table = actions[0];
+    assert_eq!(table["type"], "show_table");
+    assert_eq!(table["title"], "Movers");
+    let btc = &table["rows"][0];
+    assert_eq!(btc["asset"], "BTC", "{table}");
+    assert_eq!(btc["changePct"], json!(1.0), "{table}");
+    assert_eq!(btc["price"], json!(101.0), "{table}");
+    assert_eq!(frames.last().unwrap().0, "done", "{frames:?}");
+
+    let bodies = claude.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["model"], "claude-haiku-5-5");
+    assert_eq!(bodies[0]["output_config"]["effort"], "low");
+    assert!(bodies[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["strict"] == true));
+    let replay = &bodies[1]["messages"];
+    let assistant = &replay[1]["content"];
+    assert_eq!(assistant[0]["type"], "thinking", "{replay}");
+    assert_eq!(
+        assistant[0]["signature"], "sig-1",
+        "the thinking block goes back unchanged"
+    );
+    assert_eq!(
+        assistant[2]["input"],
+        json!({ "source": "market_movers", "title": "Movers" })
+    );
+    let results = replay[2]["content"].as_array().unwrap();
+    let ids: Vec<&str> = results
+        .iter()
+        .map(|r| r["tool_use_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["toolu_1", "toolu_2"], "both results in one message");
+    assert!(
+        results[0]["content"].as_str().unwrap().contains("BTC"),
+        "{results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_copilot_stops_after_four_tool_turns() {
+    let (s, _feed, claude) = copilot_server(100.0).await;
+
+    let (status, frames) = s.ask("loop on movers").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let errors = of(&frames, "error");
+    assert_eq!(errors.len(), 1, "{frames:?}");
+    assert_eq!(
+        errors[0]["error"],
+        "The copilot stopped after 4 tool calls without an answer"
+    );
+    assert_eq!(
+        claude.lock().unwrap().len(),
+        5,
+        "four tool turns, then one more answer it didn't give"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_copilot_takes_ten_questions_a_minute() {
+    let (s, _feed, _claude) = copilot_server(100.0).await;
+
+    let res = s
+        .http
+        .post(format!("{}/api/copilot", s.url))
+        .json(&json!({ "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    for _ in 0..10 {
+        let (status, _) = s.ask("what's moving?").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, frames) = s.ask("what's moving?").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        frames[0].1["error"],
+        "Copilot limit is 10 questions a minute. Try again shortly."
+    );
+}

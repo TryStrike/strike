@@ -9,6 +9,7 @@ pub mod address;
 pub mod agent;
 pub mod bets;
 pub mod config;
+pub mod copilot;
 pub mod crypto;
 pub mod db;
 pub mod eth;

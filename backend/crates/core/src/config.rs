@@ -84,6 +84,10 @@ pub struct Config {
     pub agent_max_per_trade: rust_decimal::Decimal,
     pub agent_max_budget: rust_decimal::Decimal,
     pub agent_max_minutes: i64,
+    /// Backend only. The copilot answers 503 without it.
+    pub anthropic_api_key: Option<String>,
+    /// Overridable so a test decides what the model says.
+    pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
     pub agent_max_open_stake: rust_decimal::Decimal,
     /// `NODE_ENV === 'production'` equivalent: strict guard behaviour.
@@ -155,6 +159,9 @@ impl Config {
             agent_max_budget: parse_num("AGENT_MAX_BUDGET")
                 .unwrap_or(rust_decimal::Decimal::from(100)),
             agent_max_minutes: parse_num("AGENT_MAX_MINUTES").unwrap_or(30),
+            anthropic_api_key: str_var("ANTHROPIC_API_KEY"),
+            anthropic_base_url: str_var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
                 .unwrap_or(rust_decimal::Decimal::from(200)),
             production,

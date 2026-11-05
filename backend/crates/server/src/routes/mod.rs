@@ -11,6 +11,7 @@ pub mod arc;
 pub mod balance;
 pub mod balance_mutations;
 pub mod bets;
+pub mod copilot;
 pub mod precheck;
 pub mod prices;
 pub mod referral;
@@ -37,6 +38,7 @@ pub fn router() -> Router {
         .merge(balance::routes())
         .merge(balance_mutations::routes())
         .merge(bets::routes())
+        .merge(copilot::routes())
         .merge(precheck::routes())
         .merge(prices::routes())
         .merge(referral::routes())

@@ -5,6 +5,7 @@ import { Providers } from "./providers";
 import { BRAND } from "@/lib/brand";
 import { Header } from "@/components/Header";
 import { AI_ROUTE } from "@/lib/theme";
+import { CopilotLauncher } from "@/components/copilot/CopilotLauncher";
 
 const interTight = Inter_Tight({ variable: "--font-inter-tight", subsets: ["latin"] });
 const instrumentSerif = Instrument_Serif({ variable: "--font-instrument-serif", subsets: ["latin"], weight: "400", style: ["normal", "italic"] });
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <Providers>
           <Header />
           <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">{children}</main>
+          <CopilotLauncher />
         </Providers>
       </body>
     </html>
