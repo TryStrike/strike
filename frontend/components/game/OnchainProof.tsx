@@ -2,8 +2,10 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight } from '@phosphor-icons/react';
-import { concat, keccak256, type Hex } from 'viem';
-import { explorerTxUrl } from '@/lib/arc/config';
+import type { Hex } from 'viem';
+import { explorerAddressUrl, explorerTxUrl, getArcConfig } from '@/lib/arc/config';
+import { arcPublicClient } from '@/lib/arc/client';
+import { roundLeaf, type RoundFields } from '@/lib/proofs/leaf';
 import { Badge } from '@/components/ui/kit';
 
 const RETRY_MIN_MS = 5_000;
@@ -13,6 +15,7 @@ interface BetProof {
   epoch: number;
   end_ms: number;
   leaf: Hex | null;
+  round: RoundFields | null;
   proof: Hex[] | null;
   house_root: Hex | null;
   commit_tx: Hex | null;
@@ -21,11 +24,53 @@ interface BetProof {
 
 type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; data: BetProof; at: number };
 
-const foldsToRoot = (leaf: Hex, proof: Hex[], root: Hex): boolean =>
-  proof.reduce<Hex>((node, sib) => {
-    const [a, b] = node.toLowerCase() < sib.toLowerCase() ? [node, sib] : [sib, node];
-    return keccak256(concat([a, b]));
-  }, leaf).toLowerCase() === root.toLowerCase();
+const VERIFY_ROUND_ABI = [
+  {
+    type: 'function',
+    name: 'verifyRound',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'epoch', type: 'uint256' },
+      { name: 'leaf', type: 'bytes32' },
+      { name: 'proof', type: 'bytes32[]' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
+] as const;
+
+type Verdict = { kind: 'checking' } | { kind: 'done'; leafOk: boolean; onchain: boolean } | { kind: 'error'; reason: string };
+type Keyed = Verdict & { key: string };
+
+/**
+ * Rebuilds the leaf from the round's own fields, then asks StrikeTreasury on Arc
+ * whether it is in the committed root. Neither step takes our server's word for it.
+ */
+function useArcVerdict(data: BetProof): Verdict {
+  const key = `${data.epoch}:${data.leaf}:${data.proof?.join(',')}`;
+  const [verdict, setVerdict] = useState<Keyed>({ kind: 'checking', key: '' });
+  useEffect(() => {
+    if (data.status !== 'committed' || !data.round || !data.proof) return;
+    let cancelled = false;
+    (async () => {
+      const leaf = roundLeaf(data.round as RoundFields);
+      const onchain = await arcPublicClient().readContract({
+        address: getArcConfig().treasuryAddress as Hex,
+        abi: VERIFY_ROUND_ABI,
+        functionName: 'verifyRound',
+        args: [BigInt(data.epoch), leaf, data.proof as Hex[]],
+      });
+      if (!cancelled) setVerdict({ kind: 'done', leafOk: leaf === data.leaf, onchain, key });
+    })().catch((err: Error) => {
+      console.error('[proof] verifyRound on Arc failed', err);
+      if (!cancelled) setVerdict({ kind: 'error', reason: err.message, key });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, data.status]);
+  return verdict.key === key ? verdict : { kind: 'checking' };
+}
 
 export const TxLink: React.FC<{ hash: string; label: string }> = ({ hash, label }) => (
   <a
@@ -102,7 +147,7 @@ export default function OnchainProof({ betId }: { betId: string }) {
 }
 
 const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
-  const { epoch, status, commit_tx, house_root } = data;
+  const { epoch, status, commit_tx } = data;
   const epochLine = <span className="font-jet text-subtle">epoch {epoch}</span>;
 
   if (status === 'pending' && at >= data.end_ms) {
@@ -118,20 +163,44 @@ const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
     );
   }
 
-  const included =
-    house_root && data.leaf && data.proof ? foldsToRoot(data.leaf, data.proof, house_root) : false;
   return (
     <>
-      <p className={`mt-1.5 text-[11px] leading-relaxed ${included ? 'text-muted' : 'text-down'}`}>
-        {included
-          ? <>Your bet is in the house root for {epochLine}: the Merkle proof folds to the committed root.</>
-          : <>The Merkle proof for this bet does not fold to the root committed for {epochLine}.</>}
-      </p>
+      <ArcVerdict data={data} />
       {commit_tx && (
         <div className="mt-2 text-xs">
           <TxLink hash={commit_tx} label="House commit" />
         </div>
       )}
     </>
+  );
+};
+
+const ArcVerdict: React.FC<{ data: BetProof }> = ({ data }) => {
+  const verdict = useArcVerdict(data);
+  const treasury = getArcConfig().treasuryAddress;
+  const epochLine = <span className="font-jet text-subtle">epoch {data.epoch}</span>;
+  if (verdict.kind === 'checking') {
+    return <p className="mt-1.5 text-[11px] text-muted">Asking StrikeTreasury on Arc to verify this round…</p>;
+  }
+  if (verdict.kind === 'error') {
+    return <p className="mt-1.5 text-[11px] text-down">Could not reach Arc to verify: {verdict.reason}</p>;
+  }
+  const ok = verdict.leafOk && verdict.onchain;
+  return (
+    <p className={`mt-1.5 text-[11px] leading-relaxed ${ok ? 'text-up' : 'text-down'}`}>
+      {ok ? (
+        <>
+          Verified on Arc: your browser rebuilt this round&apos;s leaf and{' '}
+          <a href={explorerAddressUrl(treasury)} target="_blank" rel="noopener noreferrer" className="underline">
+            StrikeTreasury.verifyRound
+          </a>{' '}
+          returned true for {epochLine}.
+        </>
+      ) : !verdict.leafOk ? (
+        <>This round&apos;s fields do not hash to the leaf the server sent. Do not trust this record.</>
+      ) : (
+        <>StrikeTreasury on Arc says this round is not in the root committed for {epochLine}.</>
+      )}
+    </p>
   );
 };

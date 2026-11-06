@@ -4,13 +4,14 @@ import {
   custom,
   defineChain,
   erc20Abi,
+  fallback,
   formatUnits,
   http,
   type Chain,
   type EIP1193Provider,
   type PublicClient,
 } from 'viem';
-import { getArcConfig, getAssetConfig, type ArcAsset } from './config';
+import { arcRpcUrls, getArcConfig, getAssetConfig, type ArcAsset } from './config';
 
 let chain: Chain | null = null;
 let client: PublicClient | null = null;
@@ -29,7 +30,7 @@ function arcChain(): Chain {
 }
 
 export function arcPublicClient(): PublicClient {
-  client ??= createPublicClient({ chain: arcChain(), transport: http(getArcConfig().rpcEndpoint) });
+  client ??= createPublicClient({ chain: arcChain(), transport: fallback(arcRpcUrls().map((url) => http(url))) });
   return client;
 }
 

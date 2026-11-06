@@ -160,6 +160,15 @@ const MIGRATIONS: &[&str] = &[
        outcome      TEXT CHECK (outcome IN ('win', 'loss', 'tie'))
      ) STRICT;
      CREATE INDEX signal_shadow_by_asset ON signal_shadow(asset, signal_at);",
+    // 12: browser keys a wallet delegated to write its own bets on Arkiv, and the gas we sent them.
+    "CREATE TABLE arkiv_keys (
+       key        TEXT PRIMARY KEY,
+       wallet     TEXT NOT NULL,
+       expires_ms INTEGER NOT NULL,
+       fund_tx    TEXT NOT NULL,
+       created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
+     ) STRICT;
+     CREATE INDEX arkiv_keys_by_wallet ON arkiv_keys(wallet, created_at);",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

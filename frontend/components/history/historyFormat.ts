@@ -120,6 +120,7 @@ export interface HistorySummary {
 
 export function summarizeHistoryRows(rows: BetHistoryRow[]): HistorySummary {
   let wins = 0;
+  let losses = 0;
   let wagered = 0;
   let credited = 0;
   let net = 0;
@@ -129,18 +130,22 @@ export function summarizeHistoryRows(rows: BetHistoryRow[]): HistorySummary {
     wagered += stake;
     credited += asNumber(row.payout);
     net += netOf(row);
-    if (row.won) wins += 1;
+    const result = netOf(row);
+    if (result > 0) wins += 1;
+    else if (result < 0) losses += 1;
   }
 
+  // A tie refunds the stake: it is neither a win nor a loss.
   const rounds = rows.length;
+  const decided = wins + losses;
   return {
     rounds,
     wins,
-    losses: rounds - wins,
+    losses,
     wagered,
     credited,
     net,
-    winRate: rounds > 0 ? (wins / rounds) * 100 : 0,
+    winRate: decided > 0 ? (wins / decided) * 100 : 0,
   };
 }
 

@@ -5,6 +5,8 @@ import { ArrowUpRight, ChartLineUp, ShareNetwork } from '@phosphor-icons/react';
 import { shareWinUrl } from '@/components/game/WinBurst';
 import { formatMoney } from '@/components/ui/MoneyText';
 import { useStore } from '@/lib/store';
+import { isRealWin } from '@/lib/types/bet';
+import { MyBetEntityLink } from '@/components/arkiv/ArkivOwnBets';
 import { Badge, Label, cx } from '@/components/ui/kit';
 import { entityUrl, isWin, settledAtMs, useArkivTape } from '@/lib/arkiv';
 
@@ -38,6 +40,17 @@ export const MiniHistory: React.FC = () => {
   );
 };
 
+/** Net result of a round: profit on a win, the stake on a loss, zero on a refund. */
+const RoundPnl: React.FC<{ stake: number | string; payout: number | string }> = ({ stake, payout }) => {
+  const net = (Number(payout) || 0) - (Number(stake) || 0);
+  if (Math.abs(net) < 1e-9) return <span className="font-jet font-medium text-faint">refund</span>;
+  return (
+    <span className={cx('font-jet font-medium', net > 0 ? 'text-up' : 'text-down')}>
+      {net > 0 ? formatMoney(net, 2, { sign: true }) : `−${formatMoney(-net, 2)}`}
+    </span>
+  );
+};
+
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 /** Every player's settled rounds on the asset on screen, read from Arkiv, not from our server. */
@@ -61,7 +74,6 @@ const EveryoneRounds: React.FC = () => {
       ) : (
         <ul className="divide-y divide-line">
           {rounds.slice(0, 10).map((r) => {
-            const win = isWin(r);
             return (
               <li key={r.key} className="flex items-center justify-between py-2.5 text-sm">
                 <div className="min-w-0">
@@ -71,9 +83,7 @@ const EveryoneRounds: React.FC = () => {
                   <div className="font-jet text-xs text-faint">{time(settledAtMs(r))}</div>
                 </div>
                 <span className="flex items-center gap-2">
-                  <span className={cx('font-jet font-medium', win ? 'text-up' : 'text-down')}>
-                    {win ? formatMoney(r.payout ?? '0', 2, { sign: true }) : `−${formatMoney(r.stake ?? '0', 2)}`}
-                  </span>
+                  <RoundPnl stake={r.stake ?? '0'} payout={r.payout ?? '0'} />
                   <a
                     href={entityUrl(r.key)}
                     target="_blank"
@@ -116,10 +126,9 @@ const MyRounds: React.FC = () => {
                 </div>
               </div>
               <span className="flex items-center gap-2">
-                <span className={cx('font-jet font-medium', bet.won ? 'text-up' : 'text-down')}>
-                  {bet.won ? formatMoney(bet.payout, 2, { sign: true }) : `−${formatMoney(bet.amount, 2)}`}
-                </span>
-                {bet.won && (
+                <MyBetEntityLink betId={bet.id} />
+                <RoundPnl stake={bet.amount} payout={bet.won ? bet.payout : 0} />
+                {isRealWin(bet) && (
                   <a
                     href={shareWinUrl(parseFloat(bet.payout) || 0, bet.target.label)}
                     target="_blank"

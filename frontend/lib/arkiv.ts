@@ -51,12 +51,20 @@ function flatten(raw: RawEntity): ArkivEntity {
 }
 
 async function arkiv<T>(method: string, params: unknown[], signal?: AbortSignal): Promise<T> {
-  const res = await fetch(ARKIV_RPC, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    signal,
-  });
+  const call = () =>
+    fetch(ARKIV_RPC, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      signal,
+    });
+  let res = await call();
+  // The public node rate-limits bursts; back off twice before giving up.
+  for (let wait = 1_000; res.status === 429 && wait <= 2_000; wait *= 2) {
+    await new Promise((r) => setTimeout(r, wait));
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    res = await call();
+  }
   if (!res.ok) throw new Error(`Arkiv RPC HTTP ${res.status}`);
   const body = (await res.json()) as { result?: T; error?: { message: string } };
   if (body.error) throw new Error(`Arkiv RPC: ${body.error.message}`);

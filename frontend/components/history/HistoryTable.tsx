@@ -151,7 +151,11 @@ const HistoryRow: React.FC<{ row: BetHistoryRow; wallet: string; seals: ArkivSea
       </td>
 
       <td className="px-4 py-3.5">
-        <Badge tone={row.won ? 'up' : 'down'}>{row.won ? 'Won' : 'Lost'}</Badge>
+        {net === 0 ? (
+          <Badge tone="neutral">Refund</Badge>
+        ) : (
+          <Badge tone={net > 0 ? 'up' : 'down'}>{net > 0 ? 'Won' : 'Lost'}</Badge>
+        )}
       </td>
 
       <td className="whitespace-nowrap px-4 py-3.5 text-right">

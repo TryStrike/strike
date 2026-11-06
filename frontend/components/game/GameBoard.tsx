@@ -22,6 +22,7 @@ import {
   MiniHistory,
 } from "@/components/history/MiniHistory";
 import { WinBurst } from "./WinBurst";
+import { ArkivOwnBets } from "@/components/arkiv/ArkivOwnBets";
 import {
   SettlementProof,
   matchSettledRound,
@@ -365,7 +366,7 @@ export const GameBoard: React.FC = () => {
   return (
     <div className="flex h-full min-h-0 w-full flex-col lg:flex-row">
       <div className="relative min-h-[420px] flex-1 lg:min-h-0">
-        <LiveChart betAmount={betAmount} />
+        <LiveChart betAmount={betAmount} showFeedState={false} />
         <WinBurst />
         <div className="absolute left-1/2 top-2 z-[45] -translate-x-1/2">
           <div
@@ -540,6 +541,8 @@ export const GameBoard: React.FC = () => {
                 : "Drag a box on the chart, then confirm to bet the price lands inside it."}
             </p>
           )}
+
+          {isWalletConnected && address && <ArkivOwnBets wallet={address} />}
 
           {error && (
             <div
