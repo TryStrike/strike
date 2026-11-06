@@ -54,9 +54,17 @@ async fn spawn_feed(btc: f64) -> (Feed, String) {
     let feed: Feed = Arc::default();
     set_price(&feed, btc);
     let spark = || async { Json(json!({ "spark": { "result": [] } })) };
+    // Arc as seen by a plain wallet: the signature validator reverts. Keeps the
+    // tests off the public RPC, whose rate limit turned a 401 into a 500.
+    let rpc = || async {
+        Json(
+            json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 3, "message": "execution reverted" } }),
+        )
+    };
     let app = Router::new()
         .route("/ticker", get(binance))
         .route("/spark", get(spark))
+        .route("/rpc", axum::routing::post(rpc))
         .with_state(feed.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -102,6 +110,7 @@ fn spawn_server(dir: &Path, feed_url: &str, port: u16, env: &[(&str, &str)]) -> 
         .env("BALANCE_INTERNAL_SECRET", SECRET)
         .env("BALANCE_SETTLEMENT_SECRET", SETTLEMENT_SECRET)
         .env("STRIKE_DEV_NO_WORLD", "1")
+        .env("NEXT_PUBLIC_ARC_RPC_ENDPOINT", format!("{feed_url}/rpc"))
         .env("BINANCE_ENDPOINT", format!("{feed_url}/ticker"))
         .env("YAHOO_SPARK_ENDPOINT", format!("{feed_url}/spark"))
         .env("BINANCE_PERP_ENDPOINT", format!("{feed_url}/perp"))
