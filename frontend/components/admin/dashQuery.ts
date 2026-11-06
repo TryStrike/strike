@@ -17,19 +17,6 @@ export interface DashFilters {
     address: string;
 }
 
-export const DEFAULT_DASH_FILTERS: DashFilters = {
-    tab: 'wallet_intel',
-    q: '',
-    status: '',
-    currency: '',
-    from: '',
-    to: '',
-    account: 'all',
-    limit: LIST_DEFAULT_LIMIT,
-    offset: 0,
-    address: '',
-};
-
 function whole(raw: string | null, def: number, min: number, max: number): number {
     const v = (raw ?? '').trim();
     if (!/^\d+$/.test(v)) return def;

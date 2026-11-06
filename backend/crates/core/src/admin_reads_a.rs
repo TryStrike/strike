@@ -337,11 +337,6 @@ pub fn like_pattern(sanitized_q: &str) -> String {
     format!("%{sanitized_q}%")
 }
 
-/// `listRange` — `[offset, offset + limit - 1]`, i.e. the LIMIT/OFFSET window.
-pub fn list_range(p: &ListParams) -> (i64, i64) {
-    (p.offset, p.offset + p.limit - 1)
-}
-
 /// `parseListParams`. `Err(message)` is the 400 body text — client-safe by
 /// construction, which is why the routes echo it verbatim.
 pub fn parse_list_params(
@@ -1334,33 +1329,6 @@ pub const MISSING_ADDRESS_OR_STATUS: &str = "Missing userAddress or status";
 pub const ADDRESS_TOO_LONG: &str = "userAddress is too long";
 pub const INVALID_STATUS: &str = "Invalid status";
 pub const INVALID_ADDRESS: &str = "Invalid wallet address";
-
-/// Validates the JSON body and yields `(variants, status)` to apply.
-///
-/// `userAddress` must be a *string* (a number is a 400, not a coercion) and is
-/// measured after trimming; the enum check runs before any DB round-trip so an
-/// unknown status is a 400 and never a 500.
-pub fn validate_status_request(body: &Value) -> Result<(Vec<String>, String), &'static str> {
-    let address = match body.get("userAddress") {
-        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
-        _ => return Err(MISSING_ADDRESS_OR_STATUS),
-    };
-    if utf16_len(address.trim()) > 128 {
-        return Err(ADDRESS_TOO_LONG);
-    }
-    let status = match body.get("status") {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        _ => return Err(MISSING_ADDRESS_OR_STATUS),
-    };
-    if !ALLOWED_USER_STATUSES.contains(&status.as_str()) {
-        return Err(INVALID_STATUS);
-    }
-    let variants = address::search_variants(&address);
-    if variants.is_empty() {
-        return Err(INVALID_ADDRESS);
-    }
-    Ok((variants, status))
-}
 
 /// `UPDATE user_balances SET status = … WHERE user_address IN (…)` — the shape
 /// the TS's `.update({status}).in('user_address', variants)` compiled to.

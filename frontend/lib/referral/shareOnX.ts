@@ -20,10 +20,6 @@ function getPublicAppOrigin(): string {
   return '';
 }
 
-export function getReferralBaseUrl(): string {
-  return getPublicAppOrigin();
-}
-
 const EVM_ADDRESS_IN_TEXT = /0x[a-fA-F0-9]{40}/;
 const PARAMS_WITHDRAWN_FROM_SHARES = ['address', 'wallet', 'access_code', 'accesscode', 'code', 'secret', 'token'];
 

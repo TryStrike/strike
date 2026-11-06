@@ -77,17 +77,6 @@ export function clampToasts<T>(toasts: T[], max: number = MAX_TOASTS): T[] {
   return toasts.length <= max ? toasts : toasts.slice(toasts.length - max);
 }
 
-export function splitToastStack<T>(
-  toasts: T[],
-  maxVisible: number = MAX_VISIBLE_TOASTS
-): { collapsed: T[]; visible: T[] } {
-  if (toasts.length <= maxVisible) return { collapsed: [], visible: toasts };
-  return {
-    collapsed: toasts.slice(0, toasts.length - maxVisible),
-    visible: toasts.slice(toasts.length - maxVisible),
-  };
-}
-
 export function hasToastWithKey<T extends { dedupeKey?: string }>(toasts: T[], key: string): boolean {
   return toasts.some((toast) => toast.dedupeKey === key);
 }

@@ -16,8 +16,4 @@ export const useStore = create<Store>()((...args) => ({
   ...createReferralSlice(...args),
 }));
 
-export const useWalletAddress = () => useStore(state => state.address);
-export const useIsConnected = () => useStore(state => state.isConnected);
 export const useHouseBalance = () => useStore(state => state.houseBalance);
-export const useUserTier = () => useStore(state => state.userTier);
-

@@ -647,19 +647,3 @@ export function useOnboardingTour(options?: { autoStartDelayMs?: number }) {
     };
 }
 
-export const TourLauncher: React.FC<{ className?: string }> = ({ className = '' }) => {
-    const tour = useOnboardingTour();
-    return (
-        <>
-            <button
-                type="button"
-                onClick={tour.open}
-                aria-label="Open the how-to-play tour"
-                className={`h-9 rounded-full px-3.5 text-sm font-medium text-muted transition-colors hover:bg-surface hover:text-ink ${className}`}
-            >
-                How to play
-            </button>
-            <QuickTour isOpen={tour.isOpen} onClose={tour.close} />
-        </>
-    );
-};

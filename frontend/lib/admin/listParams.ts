@@ -141,19 +141,6 @@ export function parseListParams(
     return { ok: true, params };
 }
 
-export function listParamsToQuery(params: ParsedListParams): string {
-    const sp = new URLSearchParams();
-    sp.set('limit', String(params.limit));
-    if (params.offset > 0) sp.set('offset', String(params.offset));
-    if (params.q) sp.set('q', params.q);
-    if (params.status) sp.set('status', params.status);
-    if (params.currency) sp.set('currency', params.currency);
-    if (params.from) sp.set('from', params.from);
-    if (params.to) sp.set('to', params.to);
-    for (const [k, v] of Object.entries(params.extras)) sp.set(k, v);
-    return sp.toString();
-}
-
 export function listRange(params: ParsedListParams): { from: number; to: number } {
     return { from: params.offset, to: params.offset + params.limit - 1 };
 }

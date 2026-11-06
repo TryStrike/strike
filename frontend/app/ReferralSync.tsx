@@ -68,6 +68,3 @@ export function ReferralSync() {
     );
 }
 
-export function __resetReferralSyncInFlightForTests(): void {
-    syncInFlight.clear();
-}

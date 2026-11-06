@@ -4,12 +4,6 @@ export const MAX_CLOCK_SKEW_MS = 60 * 1000;
 
 export const MAX_ACCEPT_INTENT_AGE_MS = 10 * 60 * 1000;
 
-export function isAuthorizationFresh(signedAt: unknown, now: number = Date.now()): boolean {
-  const ageMs = now - Number(signedAt);
-  if (!Number.isFinite(ageMs)) return false;
-  return ageMs >= -MAX_CLOCK_SKEW_MS && ageMs <= MAX_INTENT_AGE_MS;
-}
-
 export function isAuthorizationWithinAcceptWindow(
   signedAt: unknown,
   now: number = Date.now(),

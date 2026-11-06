@@ -25,12 +25,3 @@ export function calculateFeeAmount(amount: number, tier?: string | null): number
   return Math.floor(fee * 1e8) / 1e8;
 }
 
-function getEnvOptional(key: string): string | null {
-  const val = process.env[key];
-  return val && val.trim() ? val.trim() : null;
-}
-
-export function getPlatformFeeWalletAddress(normalizedCurrency: string): string | null {
-  return normalizedCurrency === 'USDC' ? getEnvOptional('NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC') : null;
-}
-

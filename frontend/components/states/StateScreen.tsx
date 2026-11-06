@@ -1,7 +1,7 @@
 'use client';
 
 
-import React, { useEffect, useState, type ReactNode } from 'react';
+import React, { type ReactNode } from 'react';
 import {
   Archive,
   WarningOctagon,
@@ -161,21 +161,5 @@ export const StateScreen: React.FC<StateScreenProps> = ({
     </div>
   );
 };
-
-export function useOnlineStatus(): boolean {
-  const [online, setOnline] = useState(true);
-  useEffect(() => {
-    setOnline(navigator.onLine);
-    const on = () => setOnline(true);
-    const off = () => setOnline(false);
-    window.addEventListener('online', on);
-    window.addEventListener('offline', off);
-    return () => {
-      window.removeEventListener('online', on);
-      window.removeEventListener('offline', off);
-    };
-  }, []);
-  return online;
-}
 
 export default StateScreen;

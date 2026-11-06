@@ -1,9 +1,3 @@
-import { ethers } from 'ethers';
-
-export const isValidAddress = async (address: string): Promise<boolean> => {
-  if (!address) return false;
-  return ethers.isAddress(address);
-};
 
 export const shortenAddress = (address?: string | null, chars = 4): string => {
   const value = (address || '').trim();

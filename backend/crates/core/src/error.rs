@@ -62,12 +62,6 @@ impl ApiError {
         }
         self
     }
-
-    /// The TS routes log the real cause and answer with this string.
-    pub fn leak_safe(context: &str, err: &impl std::fmt::Display) -> Self {
-        tracing::error!("{context}: {err}");
-        Self::internal("Internal error")
-    }
 }
 
 impl IntoResponse for ApiError {

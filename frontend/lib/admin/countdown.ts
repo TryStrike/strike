@@ -21,12 +21,6 @@ export function intentRemainingMs(
     return expires + graceMs - now;
 }
 
-export function isIntentExpired(signedAt: unknown, now: number = Date.now()): boolean {
-    const remaining = intentRemainingMs(signedAt, now);
-    if (remaining === null) return true;
-    return remaining <= 0;
-}
-
 export function formatCountdown(remainingMs: number | null | undefined): string {
     if (remainingMs === null || remainingMs === undefined || !Number.isFinite(remainingMs)) {
         return '—';

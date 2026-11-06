@@ -1,6 +1,5 @@
-//! Route families. Each module owns one area of the Next.js `app/api` tree and
-//! exposes `routes()`; `router()` merges them under the same `/api/...` paths so
-//! the frontend proxy is a 1:1 rewrite with no path translation.
+//! Route families. Each module owns one area of `/api/...` and exposes
+//! `routes()`; `router()` merges them so the Next proxy is a 1:1 rewrite.
 
 pub mod admin;
 pub mod admin_reads_a;

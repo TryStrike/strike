@@ -176,15 +176,6 @@ pub fn round(n: f64) -> f64 {
     round6(n)
 }
 
-/// leaderboardCore `round`: NaN/Infinity collapse to 0 instead of poisoning JSON.
-pub fn round_finite(n: f64) -> f64 {
-    if n.is_finite() {
-        round6(n)
-    } else {
-        0.0
-    }
-}
-
 /// JSON number with `JSON.stringify` semantics: integral floats print without
 /// a fractional part; non-finite values print as `null`.
 pub fn js_num(n: f64) -> Value {
