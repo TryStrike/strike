@@ -17,6 +17,7 @@ pub mod ledger; // TEMP-REGISTRATION ledger
 pub mod money;
 pub mod platform_stats;
 pub mod prices;
+pub mod proofs;
 pub mod read_auth;
 pub mod rpc;
 pub mod schema;

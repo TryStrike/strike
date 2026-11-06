@@ -43,6 +43,9 @@ async fn main() -> anyhow::Result<()> {
     );
     supervise("price sampler", strike_core::prices::run_sampler());
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    if config().treasury_secret_key.is_some() {
+        supervise("round committer", strike_core::proofs::run_committer());
+    }
 
     let bind = config().bind_addr.clone();
     let listener = tokio::net::TcpListener::bind(&bind).await?;

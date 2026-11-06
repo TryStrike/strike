@@ -14,6 +14,7 @@ pub mod bets;
 pub mod copilot;
 pub mod precheck;
 pub mod prices;
+pub mod proofs;
 pub mod referral;
 pub mod session;
 pub mod stream;
@@ -42,6 +43,7 @@ pub fn router() -> Router {
         .merge(copilot::routes())
         .merge(precheck::routes())
         .merge(prices::routes())
+        .merge(proofs::routes())
         .merge(referral::routes())
         .merge(session::routes())
         .merge(stream::routes())

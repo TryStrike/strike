@@ -944,7 +944,17 @@ impl Treasury {
                 "Treasury has insufficient USDC for this withdrawal",
             ));
         }
+        // One transaction however many recipients, on one nonce.
+        let (nonce, raw) = self
+            .sign_call(queue, &payout_call_data(&self.usdc, transfers))
+            .await?;
+        let amount = transfers.iter().map(|t| t.amount).sum();
+        Ok((nonce, vec![(raw, amount)]))
+    }
 
+    /// The nonce, gas and signature of one call to the treasury contract. Payouts
+    /// and round commits share it, so they share one nonce sequence.
+    async fn sign_call(&self, queue: &SendQueue, data: &str) -> ApiResult<(u64, String)> {
         let chain = self.rpc.transaction_count(&self.address).await?;
         let nonce = match queue.next_nonce {
             // An earlier send never reached this node, or it is lagging. A nonce
@@ -965,8 +975,6 @@ impl Treasury {
         // max fee; keeping max_fee at 2x base is the standard safe guess.
         let (max_fee, priority_fee) = (gas_price * 2, gas_price / 10);
 
-        // One transaction however many recipients, on one nonce.
-        let data = payout_call_data(&self.usdc, transfers);
         let estimate = json!([{
             "from": self.address,
             "to": self.contract,
@@ -986,10 +994,66 @@ impl Treasury {
             priority_fee,
             &self.contract,
             0,
-            &hex_decode(data.strip_prefix("0x").unwrap_or(&data)).unwrap_or_default(),
+            &hex_decode(data.strip_prefix("0x").unwrap_or(data)).unwrap_or_default(),
         )?;
-        let amount = transfers.iter().map(|t| t.amount).sum();
-        Ok((nonce, vec![(raw, amount)]))
+        Ok((nonce, raw))
+    }
+
+    /// `commitRounds(epoch, root, rounds)` in its own turn of the send queue, then
+    /// waits for the receipt outside it. Like a payout, a broadcast is never
+    /// retried here: the committer reads `roundRoots` before it sends again.
+    pub async fn commit_rounds(
+        &self,
+        epoch: u64,
+        root: [u8; 32],
+        rounds: u64,
+    ) -> ApiResult<String> {
+        let this = self.clone();
+        let hold = hold_payout();
+        tokio::spawn(async move {
+            let _hold = hold;
+            let hash = this.send_commit(epoch, root, rounds).await?;
+            let receipt = this
+                .rpc
+                .wait_for_confirmations(&hash, PAYOUT_CONFIRMATIONS)
+                .await?;
+            if !succeeded(&receipt) {
+                return Err(ApiError::Other(format!(
+                    "commitRounds for epoch {epoch} reverted on-chain: {hash}"
+                )));
+            }
+            Ok(hash)
+        })
+        .await
+        .map_err(|panic| ApiError::Other(format!("round commit task failed: {panic}")))?
+    }
+
+    async fn send_commit(&self, epoch: u64, root: [u8; 32], rounds: u64) -> ApiResult<String> {
+        let mut data = selector("commitRounds(uint256,bytes32,uint256)").to_vec();
+        data.extend_from_slice(&word_u128(epoch as u128));
+        data.extend_from_slice(&root);
+        data.extend_from_slice(&word_u128(rounds as u128));
+        let data = format!("0x{}", hex::encode(data));
+
+        let mut queue = self.queue.lock().await;
+        self.assert_operator_matches().await?;
+        let (nonce, raw) = self.sign_call(&queue, &data).await?;
+        match self.rpc.broadcast(&raw).await {
+            Broadcast::Accepted(hash) => {
+                queue.next_nonce = Some(nonce + 1);
+                Ok(hash)
+            }
+            Broadcast::Refused(message) => Err(ApiError::Other(format!(
+                "commitRounds for epoch {epoch} refused: {message}"
+            ))),
+            Broadcast::Unknown(message) => {
+                queue.next_nonce = Some(nonce + 1);
+                Err(ApiError::Other(format!(
+                    "commitRounds for epoch {epoch} outcome unknown ({}): {message}",
+                    raw_tx_hash(&raw)
+                )))
+            }
+        }
     }
 
     /// Waits for `PAYOUT_CONFIRMATIONS` and checks the receipt status. A reverted
@@ -1003,22 +1067,116 @@ impl Treasury {
             let mut queue = self.queue.lock().await;
             queue.in_flight = queue.in_flight.saturating_sub(sent.amount);
         }
-        let receipt = receipt?;
-        let status = parse_quantity(
-            receipt
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )
-        .unwrap_or(0);
-        if status != 1 {
+        if !succeeded(&receipt?) {
             return Err(ApiError::Other(format!(
-                "Treasury payout {} reverted on-chain (status {status})",
+                "Treasury payout {} reverted on-chain",
                 sent.hash
             )));
         }
         Ok(())
     }
+}
+
+fn succeeded(receipt: &Value) -> bool {
+    receipt
+        .get("status")
+        .and_then(Value::as_str)
+        .and_then(parse_quantity)
+        == Some(1)
+}
+
+fn epoch_call(signature: &str, epoch: u64) -> String {
+    let mut data = selector(signature).to_vec();
+    data.extend_from_slice(&word_u128(epoch as u128));
+    format!("0x{}", hex::encode(data))
+}
+
+/// The 32-byte words of an `eth_call` result. `0x` from an address with no
+/// contract is an error, never a zero.
+fn call_words(raw: &str, words: usize, what: &str) -> ApiResult<Vec<[u8; 32]>> {
+    let bytes = hex_decode(raw.strip_prefix("0x").unwrap_or(raw)).unwrap_or_default();
+    if bytes.len() != words * 32 {
+        return Err(ApiError::Other(format!(
+            "{what} returned {} bytes, expected {}",
+            bytes.len(),
+            words * 32
+        )));
+    }
+    Ok(bytes
+        .chunks(32)
+        .map(|chunk| chunk.try_into().expect("32-byte chunk"))
+        .collect())
+}
+
+fn word_to_u128(word: &[u8; 32]) -> u128 {
+    u128::from_be_bytes(word[16..].try_into().expect("16 bytes"))
+}
+
+/// `StrikeTreasury.roundRoots(epoch)`: zero when nothing is committed.
+pub async fn round_root(rpc: &Rpc, treasury: &str, epoch: u64) -> ApiResult<[u8; 32]> {
+    let raw = rpc
+        .eth_call(treasury, &epoch_call("roundRoots(uint256)", epoch))
+        .await?;
+    Ok(call_words(&raw, 1, "roundRoots")?[0])
+}
+
+/// One `RoundAttestor` verdict. USDC amounts have 6 decimals.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attestation {
+    pub root: [u8; 32],
+    pub checked: u32,
+    pub mismatches: u32,
+    pub skipped: u32,
+    pub usdc_balance: u128,
+    pub liabilities: u128,
+    pub attested_at: u64,
+}
+
+/// `RoundAttestor.attestations(epoch)`, `None` until Chainlink has written one.
+pub async fn attestation(rpc: &Rpc, attestor: &str, epoch: u64) -> ApiResult<Option<Attestation>> {
+    let raw = rpc
+        .eth_call(attestor, &epoch_call("attestations(uint256)", epoch))
+        .await?;
+    let words = call_words(&raw, 7, "attestations")?;
+    let small = |i: usize| word_to_u128(&words[i]) as u32;
+    let attested_at = word_to_u128(&words[6]) as u64;
+    Ok((attested_at != 0).then(|| Attestation {
+        root: words[0],
+        checked: small(1),
+        mismatches: small(2),
+        skipped: small(3),
+        usdc_balance: word_to_u128(&words[4]),
+        liabilities: word_to_u128(&words[5]),
+        attested_at,
+    }))
+}
+
+/// The transaction that emitted `event` with `epoch` as its first indexed topic.
+///
+/// ponytail: Arc caps `eth_getLogs` at 5,000 blocks, so only about the last hour
+/// is searched. Index by block from `attestedAt` if older lookups matter.
+pub async fn epoch_event_tx(
+    rpc: &Rpc,
+    contract: &str,
+    event: &str,
+    epoch: u64,
+) -> ApiResult<Option<String>> {
+    let head = rpc.latest_block_number().await?;
+    let (from, to) = crate::treasury_view::block_range(head);
+    let logs = rpc
+        .get_logs(json!({
+            "address": to_checksum(contract),
+            "fromBlock": format!("0x{from:x}"),
+            "toBlock": format!("0x{to:x}"),
+            "topics": [
+                format!("0x{}", hex::encode(keccak256(event.as_bytes()))),
+                format!("0x{}", hex::encode(word_u128(epoch as u128))),
+            ],
+        }))
+        .await?;
+    Ok(logs
+        .iter()
+        .find_map(|log| log.get("transactionHash")?.as_str().map(str::to_string)))
 }
 
 /// The hash a transaction has whether or not the node ever answered.

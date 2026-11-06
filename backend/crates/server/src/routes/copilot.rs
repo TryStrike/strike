@@ -238,9 +238,23 @@ async fn read_personal(tool: &ToolUse, claims: &AgentClaims) -> Result<Value, St
             if !crate::routes::bets::bet_id::bet_id_ok(bet_id) {
                 return Err("That is not a bet id".into());
             }
-            crate::routes::bets::bet_id::run(bet_id, &canonical_address(&claims.wallet))
-                .await
-                .map_err(|_| "No settled bet with that id for this wallet".to_string())
+            let mut proof =
+                crate::routes::bets::bet_id::run(bet_id, &canonical_address(&claims.wallet))
+                    .await
+                    .map_err(|_| "No settled bet with that id for this wallet".to_string())?;
+            proof["onchain"] = match strike_core::proofs::bet_proof(database, bet_id).await {
+                Ok(Some(onchain)) => json!({
+                    "epoch": onchain["epoch"],
+                    "status": onchain["status"],
+                    "commit_tx": onchain["commit_tx"],
+                    "attestation": onchain["attestation"],
+                }),
+                Ok(None) => json!({ "status": "not_a_round" }),
+                Err(err) => {
+                    json!({ "error": format!("The onchain proof could not be read: {err}") })
+                }
+            };
+            Ok(proof)
         }
         other => Err(format!("There is no tool called {other}")),
     }
