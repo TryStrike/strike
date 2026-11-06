@@ -15,8 +15,4 @@ npm-debug.log*
 CLAUDE.md
 AGENTS.md
 
-# docs, managed outside the repo for now, except the World docs
-/docs/*
-!/docs/world.md
-!/docs/world-debrief.md
 *.tsbuildinfo
