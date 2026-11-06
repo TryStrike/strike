@@ -12,8 +12,6 @@ concurrency:
   group: deploy-backend
   cancel-in-progress: false
 
-# Deploy only. Every check runs locally (scripts/check.sh, enforced by the pre-push hook).
-# Secrets: ORACLE_HOST (ubuntu@<ip>), ORACLE_SSH_KEY (private key), ENV_LOCAL (the prod .env.local).
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -23,26 +21,30 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Write deploy credentials
         env:
-          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
           ENV_LOCAL: ${{ secrets.ENV_LOCAL }}
         run: |
-          install -m 600 /dev/null ~/oracle_key
-          printf '%s\n' "$ORACLE_SSH_KEY" > ~/oracle_key
+          install -m 600 /dev/null ~/vm_key
+          printf '%s\n' "$VM_SSH_KEY" > ~/vm_key
           install -m 600 /dev/null .env.local
           printf '%s\n' "$ENV_LOCAL" > .env.local
 
-      - name: Deploy with oracle.sh
-        run: backend/deploy/oracle.sh "${{ secrets.ORACLE_HOST }}" ~/oracle_key
+      - name: Deploy with vm.sh
+        env:
+          DOMAIN: ${{ vars.DOMAIN }}
+        run: backend/deploy/vm.sh "${{ secrets.VM_HOST }}" ~/vm_key
 
       - name: Health check through Caddy
         env:
-          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          VM_HOST: ${{ secrets.VM_HOST }}
+          DOMAIN: ${{ vars.DOMAIN }}
         run: |
-          url="https://${ORACLE_HOST#*@}.sslip.io/api/health"
+          host="${DOMAIN:-${VM_HOST#*@}.sslip.io}"
+          url="https://$host/api/health"
           for attempt in 1 2 3; do
             if curl -fsS --max-time 30 "$url" | grep -q '"ok":true'; then
               echo "Health check passed on attempt $attempt"
