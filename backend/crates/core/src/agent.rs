@@ -12,7 +12,7 @@ use crate::error::ApiResult;
 use crate::ledger::Rejection;
 use crate::money::{from_fixed, to_fixed, MONEY_SCALE};
 use crate::prices;
-use crate::settlement::binomo_multiplier;
+use crate::settlement::{binomo_multiplier, PRICE_SCALE};
 use crate::ticks::TickBuffer;
 use crate::world::{self, HumanGrant};
 
@@ -26,7 +26,7 @@ pub const CLOSING_MS: i64 = 35_000;
 const LOOKBACK_MS: i64 = 15_000;
 const RANGE_MS: i64 = 120_000;
 /// The 15 s move has to be at least this share of the 2 minute range.
-const MOVE_THRESHOLD: f64 = 0.3;
+pub const MOVE_THRESHOLD: f64 = 0.3;
 /// A start message may not be valid for longer than this.
 const MAX_START_AHEAD_MS: i64 = 10 * 60 * 1000;
 
@@ -260,6 +260,24 @@ pub fn signal(ring: &TickBuffer, asset: &str, now_ms: i64) -> Signal {
     }
 }
 
+pub struct Reading {
+    pub price: f64,
+    pub move_pct: f64,
+    pub range_share: f64,
+}
+
+/// The numbers `signal` judged, for showing even when it skips.
+pub fn reading(ring: &TickBuffer, asset: &str, now_ms: i64) -> Option<Reading> {
+    let now = ring.latest(asset)?;
+    let then = ring.at_or_before(asset, now_ms - LOOKBACK_MS)?;
+    let range = ring.range(asset, now_ms - RANGE_MS);
+    (range > 0.0).then(|| Reading {
+        price: now.price,
+        move_pct: (now.price - then.price) / then.price * 100.0,
+        range_share: (now.price - then.price).abs() / range,
+    })
+}
+
 /// Stop-loss minus realized net loss minus open stakes. Profit never widens it.
 pub fn stop_loss_headroom(session: &Session, open: Decimal) -> Decimal {
     let realized_loss = (-session.realized_pnl).max(Decimal::ZERO);
@@ -337,6 +355,8 @@ pub struct Session {
     pub stopped_reason: Option<String>,
     pub spent: Decimal,
     pub realized_pnl: Decimal,
+    pub wins: i64,
+    pub losses: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +375,8 @@ pub struct Decision {
     pub expires_at_ms: Option<i64>,
     pub confidence: Option<f64>,
     pub trace: Option<Value>,
+    pub strike: Option<Decimal>,
+    pub round_ends_at_ms: Option<i64>,
 }
 
 fn money_json(value: Decimal) -> Value {
@@ -377,6 +399,8 @@ impl Session {
             "stoppedReason": self.stopped_reason,
             "spent": money_json(self.spent),
             "realizedPnl": money_json(self.realized_pnl),
+            "wins": self.wins,
+            "losses": self.losses,
         })
     }
 }
@@ -398,6 +422,8 @@ impl Decision {
             "pnl": self.pnl.map(money_json),
             "expiresAt": self.expires_at_ms,
             "trace": self.trace,
+            "strike": self.strike.map(money_json),
+            "roundEndsAt": self.round_ends_at_ms,
         })
     }
 }
@@ -413,9 +439,13 @@ pub fn trace(session: &Session, signal: &str, jev_needed: Option<f64>) -> Value 
 }
 
 const SESSION_COLUMNS: &str = "id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
-     starts_at, ends_at, status, stopped_reason, spent, realized_pnl";
+     starts_at, ends_at, status, stopped_reason, spent, realized_pnl, \
+     (SELECT count(*) FROM agent_decisions d WHERE d.session_id = agent_sessions.id AND d.result = 'win'), \
+     (SELECT count(*) FROM agent_decisions d WHERE d.session_id = agent_sessions.id AND d.result = 'loss')";
 const DECISION_COLUMNS: &str =
-    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at, confidence, trace";
+    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at, confidence, trace, \
+     (SELECT r.strike_price FROM bet_rounds r WHERE r.bet_id = agent_decisions.bet_id), \
+     (SELECT r.end_time FROM bet_rounds r WHERE r.bet_id = agent_decisions.bet_id)";
 
 /// Stored like a multiplier, at 4 decimals.
 fn confidence_fixed(confidence: f64) -> i64 {
@@ -445,6 +475,8 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         stopped_reason: row.get(10)?,
         spent: money(row.get(11)?),
         realized_pnl: money(row.get(12)?),
+        wins: row.get(13)?,
+        losses: row.get(14)?,
     })
 }
 
@@ -476,6 +508,10 @@ fn decision_row(row: &Row) -> rusqlite::Result<Decision> {
                     Box::new(err),
                 )
             })?,
+        strike: row
+            .get::<_, Option<i64>>(14)?
+            .map(|fixed| from_fixed(fixed, PRICE_SCALE)),
+        round_ends_at_ms: row.get::<_, Option<i64>>(15)?.map(|us| us / 1_000),
     })
 }
 
@@ -915,13 +951,9 @@ pub async fn decision_for(
         Ok(conn
             .query_row(
                 &format!(
-                    "SELECT {} FROM agent_decisions d JOIN agent_sessions s ON s.id = d.session_id \
-                     WHERE d.id = ?1 AND d.session_id = ?2 AND s.wallet = ?3",
-                    DECISION_COLUMNS
-                        .split(", ")
-                        .map(|c| format!("d.{c}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "SELECT {DECISION_COLUMNS} FROM agent_decisions \
+                     WHERE id = ?1 AND session_id = ?2 AND session_id IN \
+                       (SELECT id FROM agent_sessions WHERE wallet = ?3)"
                 ),
                 [&id, &session_id, &wallet],
                 decision_row,
@@ -1085,6 +1117,8 @@ mod tests {
             stopped_reason: None,
             spent: Decimal::ZERO,
             realized_pnl: Decimal::from(pnl),
+            wins: 0,
+            losses: 0,
         };
         assert!(!needs_human(&session("yolo", -4)));
         assert!(needs_human(&session("yolo", -5)));
@@ -1108,6 +1142,8 @@ mod tests {
             stopped_reason: None,
             spent: Decimal::ZERO,
             realized_pnl: Decimal::ZERO,
+            wins: 0,
+            losses: 0,
         };
         for mode in ["normal", "yolo"] {
             assert_eq!(stake(&session(mode), Decimal::ZERO), Ok(Decimal::new(2, 1)));

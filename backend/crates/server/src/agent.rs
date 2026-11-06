@@ -8,7 +8,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use strike_core::agent::{
     self, Decision, Proposed, Release, Reservation, Reserve, Session, Signal,
 };
@@ -69,6 +69,13 @@ pub fn publish(session_id: &str, frame: String) {
             let _ = watcher.send(frame.clone());
         }
         let _ = l.frames.send(frame);
+    }
+}
+
+/// One step of a check as it happens. Live only: never stored or replayed.
+fn step(session_id: &str, data: Value) {
+    if let Some(l) = live().get(session_id) {
+        let _ = l.frames.send(format!("event: check\ndata: {data}\n\n"));
     }
 }
 
@@ -291,29 +298,66 @@ async fn check(
     if world::enabled() && !human_checked && agent::needs_human(session) {
         return Ok(Placement::Pause);
     }
-    let (direction, strike, reason, proposal) =
-        match agent::signal(ticks::buffer(), &session.asset, now) {
-            Signal::Skip(why) => return note(database, session, "skipped", why).await,
-            Signal::Trade {
-                direction,
-                strike,
-                reason,
-                move_pct,
-                range_share,
-                range_pct,
-            } => (
-                direction,
-                strike,
-                reason,
-                jev_proposal(session, direction, stake, move_pct, range_share, range_pct),
-            ),
-        };
-    if session.ends_at_ms - now < agent::CLOSING_MS {
+    let signal = agent::signal(ticks::buffer(), &session.asset, now);
+    let closing = session.ends_at_ms - now < agent::CLOSING_MS;
+    let skip = match &signal {
+        Signal::Skip(why) => Some(*why),
+        Signal::Trade { .. } if closing => Some("Session is closing"),
+        Signal::Trade { .. } => None,
+    };
+    let read = agent::reading(ticks::buffer(), &session.asset, now);
+    step(
+        &session.id,
+        json!({
+            "stage": "signal",
+            "at": now,
+            "price": read.as_ref().map(|r| r.price),
+            "movePct": read.as_ref().map(|r| r.move_pct),
+            "rangeShare": read.as_ref().map(|r| r.range_share),
+            "needed": agent::MOVE_THRESHOLD,
+            "skip": skip,
+            "stake": stake.to_f64(),
+            "room": agent::stop_loss_headroom(session, Decimal::ZERO).to_f64(),
+        }),
+    );
+    let (direction, strike, reason, proposal) = match signal {
+        Signal::Skip(why) => return note(database, session, "skipped", why).await,
+        Signal::Trade {
+            direction,
+            strike,
+            reason,
+            move_pct,
+            range_share,
+            range_pct,
+        } => (
+            direction,
+            strike,
+            reason,
+            jev_proposal(session, direction, stake, move_pct, range_share, range_pct),
+        ),
+    };
+    if closing {
         return note(database, session, "skipped", "Session is closing").await;
     }
     let needed = jev::enabled().then(|| jev::needed(proposal.payout_multiplier));
     let trace = agent::trace(session, &reason, needed);
-    let confidence = match jev::review(&proposal).await {
+    if jev::enabled() {
+        step(&session.id, json!({ "stage": "ai", "status": "running" }));
+    }
+    let asked = std::time::Instant::now();
+    let gate = jev::review(&proposal).await;
+    let ms = asked.elapsed().as_millis() as u64;
+    let ai = |status: &str, score: Option<f64>, why: Option<&str>| json!({ "stage": "ai", "status": status, "score": score, "needed": needed, "why": why, "ms": ms });
+    step(
+        &session.id,
+        match &gate {
+            Gate::Off => ai("off", None, None),
+            Gate::Pass(score) => ai("pass", Some(*score), None),
+            Gate::Block(score) => ai("block", Some(*score), None),
+            Gate::Failed(why) => ai("failed", None, Some(why)),
+        },
+    );
+    let confidence = match gate {
         Gate::Off => None,
         Gate::Pass(confidence) => Some(confidence),
         Gate::Block(confidence) => {
@@ -355,6 +399,10 @@ async fn check(
             return Ok(Placement::Gone);
         };
         publish(&session.id, decision_frame(&proposal));
+        step(
+            &session.id,
+            json!({ "stage": "result", "outcome": "proposed" }),
+        );
         let expires_ms = proposal.expires_at_ms.unwrap_or(now + agent::PROPOSAL_MS);
         return Ok(Placement::Proposed {
             id: proposal.id,
@@ -371,7 +419,16 @@ async fn check(
         confidence,
         trace: Some(&trace),
     };
-    place(database, session, trade).await
+    let placed = place(database, session, trade).await?;
+    let outcome = match placed {
+        Placement::Opened(_) => "placed",
+        _ => "refused",
+    };
+    step(
+        &session.id,
+        json!({ "stage": "result", "outcome": outcome }),
+    );
+    Ok(placed)
 }
 
 /// Places nothing until the session's human steps up again through

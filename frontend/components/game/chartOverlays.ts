@@ -230,6 +230,13 @@ function drawClassicBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet
     ctx.globalAlpha = 1;
   }
 
+  if (bet.startTime !== undefined) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(s.x(bet.startTime), strikeY, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   ctx.setLineDash([4, 4]);

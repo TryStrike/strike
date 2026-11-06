@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import type { ActiveBet } from "@/lib/store/gameSlice";
+import type { AssetType } from "@/lib/utils/priceFeed";
 
 export type Verdict =
   "awaiting" | "placed" | "skipped" | "blocked" | "rejected";
@@ -17,6 +19,8 @@ export interface AgentSession {
   stoppedReason: string | null;
   spent: number;
   realizedPnl: number;
+  wins: number;
+  losses: number;
 }
 
 export interface Trace {
@@ -41,6 +45,8 @@ export interface Decision {
   pnl: number | null;
   expiresAt: number | null;
   trace: Trace | null;
+  strike: number | null;
+  roundEndsAt: number | null;
 }
 
 export interface ToolStep {
@@ -66,11 +72,75 @@ interface ThoughtFrame {
   step?: ToolStep;
 }
 
+export interface SignalStep {
+  stage: "signal";
+  at: number;
+  price: number | null;
+  movePct: number | null;
+  rangeShare: number | null;
+  needed: number;
+  skip: string | null;
+  stake: number;
+  room: number;
+}
+
+export interface AiStep {
+  stage: "ai";
+  status: "running" | "pass" | "block" | "failed" | "off";
+  score?: number | null;
+  needed?: number | null;
+  why?: string | null;
+  ms?: number;
+}
+
+export interface ResultStep {
+  stage: "result";
+  outcome: "proposed" | "placed" | "refused";
+}
+
+/** The check happening now. It arrives live and is never stored. */
+export interface Activity {
+  signal?: SignalStep;
+  ai?: AiStep;
+  result?: ResultStep;
+}
+
+/** Agent rounds still open, in the shape the chart draws a bet. */
+export function agentChartBets(): ActiveBet[] {
+  const { session, decisions } = useAgentFeed.getState();
+  if (!session) return [];
+  return decisions.flatMap((d) =>
+    d.betId &&
+    !d.result &&
+    d.direction &&
+    d.stake !== null &&
+    d.strike !== null &&
+    d.roundEndsAt !== null
+      ? [
+          {
+            id: d.betId,
+            mode: "binomo" as const,
+            asset: session.asset as AssetType,
+            amount: d.stake,
+            multiplier: 1,
+            direction: d.direction,
+            timestamp: d.createdAt,
+            strikePrice: d.strike,
+            startTime: d.roundEndsAt - ROUND_MS,
+            endTime: d.roundEndsAt,
+          },
+        ]
+      : [],
+  );
+}
+
 /** `agent::WAITING_FOR_HUMAN` in the Rust core. */
 export const WAITING_FOR_HUMAN = "Waiting for a human";
 /** Rows `get_agent_decisions` reads, so a Why can only reach this far back. */
 export const WHY_REACH = 20;
 const KEEP = 100;
+/** `agent::ROUND_SECONDS` in the Rust core. */
+const ROUND_MS = 30_000;
 const KEEP_THOUGHTS = 30;
 /** When the running session ends. Lets other pages connect without asking the server first. */
 const LIVE_UNTIL = "strike-agent-live-until";
@@ -81,6 +151,8 @@ interface AgentFeed {
   session: AgentSession | null;
   decisions: Decision[];
   thoughts: Thought[];
+  activity: Activity;
+  showStep: (step: SignalStep | AiStep | ResultStep) => void;
   showSession: (session: AgentSession) => void;
   showDecision: (decision: Decision) => void;
   showThought: (frame: ThoughtFrame) => void;
@@ -94,6 +166,14 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
   session: null,
   decisions: [],
   thoughts: [],
+  activity: {},
+  showStep: (step) =>
+    set((s) => ({
+      activity:
+        step.stage === "signal"
+          ? { signal: step }
+          : { ...s.activity, [step.stage]: step },
+    })),
   showSession: (session) => {
     if (session.status === "running")
       localStorage.setItem(LIVE_UNTIL, String(session.endsAt));
@@ -131,7 +211,7 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
   connect: (fresh = false) => {
     if (source && !fresh) return;
     source?.close();
-    if (fresh) set({ decisions: [], thoughts: [] });
+    if (fresh) set({ decisions: [], thoughts: [], activity: {} });
     const opened = new EventSource("/api/agent/decisions");
     source = opened;
     opened.addEventListener("session", (e) =>
@@ -139,6 +219,9 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     );
     opened.addEventListener("decision", (e) =>
       get().showDecision(JSON.parse((e as MessageEvent).data)),
+    );
+    opened.addEventListener("check", (e) =>
+      get().showStep(JSON.parse((e as MessageEvent).data)),
     );
     opened.addEventListener("thought", (e) =>
       get().showThought(JSON.parse((e as MessageEvent).data)),
@@ -157,6 +240,6 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     source?.close();
     source = null;
     localStorage.removeItem(LIVE_UNTIL);
-    set({ session: null, decisions: [], thoughts: [] });
+    set({ session: null, decisions: [], thoughts: [], activity: {} });
   },
 }));

@@ -40,6 +40,21 @@ const RESULT: Record<string, string> = {
   withheld: "withheld",
 };
 
+/** A skip that follows a tap: the signal is re-read, and the move was gone. */
+const FADED = new Set([
+  "No clear move",
+  "Market is flat",
+  "Price data is stale",
+  "Not enough price history",
+]);
+
+function verdictText(d: Decision) {
+  if (d.verdict === "placed") return `placed ${d.direction}`;
+  if (d.verdict === "skipped" && FADED.has(d.reason))
+    return "The move faded before your tap, so no bet was placed";
+  return d.reason;
+}
+
 function stepsOf(d: Decision) {
   const steps: { name: string; text: string; bad?: boolean }[] = [];
   const { trace } = d;
@@ -51,8 +66,8 @@ function stepsOf(d: Decision) {
         Math.round(trace.jevNeeded * 100),
       ];
       steps.push({
-        name: "jev",
-        text: `confidence ${score}, needed ${needed}`,
+        name: "AI",
+        text: `scored ${score}, needs ${needed}`,
         bad: d.confidence < trace.jevNeeded,
       });
     }
@@ -63,11 +78,10 @@ function stepsOf(d: Decision) {
       });
     }
   }
-  const placed = d.verdict === "placed";
   if (d.verdict !== "awaiting") {
     steps.push({
       name: "Verdict",
-      text: placed ? `placed ${d.direction}` : d.reason,
+      text: verdictText(d),
       bad: d.verdict === "blocked" || d.verdict === "rejected",
     });
   }

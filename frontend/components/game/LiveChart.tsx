@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import type { Cell, CellLabel, Scales, TapGrid } from "tapgrid";
 import { TapGridChart } from "tapgrid/react";
 import { useStore } from "@/lib/store";
+import { agentChartBets } from "@/lib/agent/agentFeed";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 import { AssetType } from "@/lib/utils/priceFeed";
 import { motion, AnimatePresence } from "framer-motion";
@@ -1252,6 +1253,20 @@ export const LiveChart = React.memo(function LiveChart({
       [...activeBets, ...settlingBets],
       {
         mode: gameMode,
+        asset: selectedAsset,
+        price: useStore.getState().currentPrice,
+        intervalMs: gridInterval,
+        symbol: currencySymbol,
+        fontFamily: theme.fontFamily,
+      },
+      theme.palette,
+    );
+    drawBets(
+      ctx,
+      scales,
+      agentChartBets(),
+      {
+        mode: "binomo",
         asset: selectedAsset,
         price: useStore.getState().currentPrice,
         intervalMs: gridInterval,

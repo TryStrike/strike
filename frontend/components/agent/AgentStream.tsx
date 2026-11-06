@@ -4,14 +4,19 @@ import { useEffect, useRef, useState } from "react";
 import {
   Brain,
   CheckCircle,
+  HandPalm,
   PaperPlaneRight,
   Stop,
   StopCircle,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { Button, Field, cx } from "@/components/ui/kit";
+import { useStore } from "@/lib/store";
+import { formatPrice } from "@/components/history/historyFormat";
 import { DecisionRow } from "@/components/agent/DecisionRow";
+import { LiveActivity } from "@/components/agent/LiveActivity";
 import {
+  WAITING_FOR_HUMAN,
   WHY_REACH,
   useAgentFeed,
   type AgentSession,
@@ -31,6 +36,7 @@ function SessionStrip({ session }: { session: AgentSession }) {
   }, [running]);
   const left = running ? Math.max(0, session.endsAt - now) : 0;
   const pnl = session.realizedPnl;
+  const lossRoom = session.stopLoss - Math.max(0, -pnl);
   const stats: [string, string, string?][] = [
     ["Spent", `${session.spent.toFixed(2)}/${session.budget}`],
     [
@@ -38,12 +44,12 @@ function SessionStrip({ session }: { session: AgentSession }) {
       `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`,
       pnl > 0 ? "text-up" : pnl < 0 ? "text-down" : undefined,
     ],
-    ["Stop-loss", session.stopLoss.toFixed(2)],
+    ["Record", `${session.wins}W ${session.losses}L`],
+    ["Loss room", lossRoom.toFixed(2)],
     [
       "Time left",
       `${Math.floor(left / 60_000)}:${String(Math.floor((left % 60_000) / 1000)).padStart(2, "0")}`,
     ],
-    ["Status", session.status],
   ];
   return (
     <section className="grid grid-cols-5 gap-1 rounded-2xl bg-surface px-3 py-2 text-center">
@@ -64,6 +70,50 @@ function SessionStrip({ session }: { session: AgentSession }) {
       ))}
     </section>
   );
+}
+
+function OpenBet({ d, asset }: { d: Decision; asset: string }) {
+  const price = useStore((s) => s.currentPrice);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const strike = d.strike ?? price;
+  const ahead = d.direction === "UP" ? price - strike : strike - price;
+  const left = Math.max(0, Math.ceil(((d.roundEndsAt ?? now) - now) / 1000));
+  return (
+    <p className="flex items-center justify-between gap-2 rounded-2xl bg-surface px-3 py-2 text-xs">
+      <span className="min-w-0 truncate">
+        {d.direction === "UP" ? "↑" : "↓"} {asset} from {formatPrice(strike)},{" "}
+        <span className={ahead >= 0 ? "text-up" : "text-down"}>
+          {ahead >= 0 ? "ahead" : "behind"} by {formatPrice(Math.abs(ahead))}
+        </span>
+      </span>
+      <span className="shrink-0 font-jet tabular-nums text-faint">
+        {left > 0 ? `${left}s left` : "settling"}
+      </span>
+    </p>
+  );
+}
+
+/** What the agent is doing this moment, so a quiet feed never looks dead. */
+function NowLine({
+  session,
+  decisions,
+}: {
+  session: AgentSession;
+  decisions: Decision[];
+}) {
+  const open = decisions.find((d) => d.betId && !d.result);
+  if (open) return <OpenBet d={open} asset={session.asset} />;
+  if (decisions[0]?.reason === WAITING_FOR_HUMAN)
+    return (
+      <p className="flex items-center gap-1.5 px-1 text-xs text-muted">
+        <HandPalm size={14} weight="fill" /> Paused until you check in
+      </p>
+    );
+  return <LiveActivity />;
 }
 
 function Step({ step }: { step: ToolStep }) {
@@ -93,10 +143,19 @@ function ThoughtRow({ t }: { t: Thought }) {
       {t.steps.map((step, i) => (
         <Step key={i} step={step} />
       ))}
-      {t.thinking && (
-        <p className="whitespace-pre-wrap text-subtle">{t.thinking}</p>
+      {t.text ? (
+        <p className="whitespace-pre-wrap text-ink">{t.text}</p>
+      ) : (
+        t.thinking && (
+          <p className="whitespace-pre-wrap text-subtle">{t.thinking}</p>
+        )
       )}
-      {t.text && <p className="mt-1 whitespace-pre-wrap text-ink">{t.text}</p>}
+      {t.text && t.thinking && (
+        <details className="mt-1 text-subtle">
+          <summary className="cursor-pointer text-faint">How it got there</summary>
+          <p className="mt-1 whitespace-pre-wrap">{t.thinking}</p>
+        </details>
+      )}
     </div>
   );
 }
@@ -222,6 +281,9 @@ export default function AgentStream({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <SessionStrip session={session} />
+      {session.status === "running" && (
+        <NowLine session={session} decisions={byTime} />
+      )}
       {session.status === "running" ? (
         <Button
           variant="secondary"
@@ -263,9 +325,16 @@ export default function AgentStream({
         ))}
         {session.status === "stopped" && (
           <li className="flex items-center justify-between gap-2 rounded-2xl bg-ink px-3 py-2 text-sm text-white">
-            <span className="flex items-center gap-1.5">
-              <StopCircle size={15} weight="fill" /> Stopped:{" "}
-              {session.stoppedReason}
+            <span>
+              <span className="flex items-center gap-1.5">
+                <StopCircle size={15} weight="fill" /> Stopped:{" "}
+                {session.stoppedReason}
+              </span>
+              <span className="mt-0.5 block text-xs opacity-80">
+                {session.wins} won, {session.losses} lost,{" "}
+                {session.realizedPnl >= 0 ? "+" : ""}
+                {session.realizedPnl.toFixed(2)} USDC
+              </span>
             </span>
             <button
               type="button"
