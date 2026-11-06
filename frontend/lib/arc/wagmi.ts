@@ -3,6 +3,8 @@ import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { getArcConfig } from './config';
 import { BRAND } from '@/lib/brand';
+import { passkeyConnector } from '@/lib/wallet/passkey';
+import { injected, walletConnect } from 'wagmi/connectors';
 
 const arcConfig = getArcConfig();
 
@@ -18,20 +20,30 @@ export const arc = defineChain({
   },
 });
 
+const walletConnectProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? '';
+const app = {
+  name: BRAND.name,
+  description: BRAND.tagline,
+  url: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
+  icons: [typeof window !== 'undefined' ? `${window.location.origin}/icon.svg` : '/icon.svg'],
+};
+
 export const config = createConfig(
   getDefaultConfig({
     chains: [arc],
     transports: {
       [arc.id]: http(arcConfig.rpcEndpoint),
     },
-
     enableAaveAccount: false,
-    walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'dummy-id',
-
-    appName: BRAND.name,
-
-    appDescription: BRAND.tagline,
-    appUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
-    appIcon: typeof window !== 'undefined' ? `${window.location.origin}/icon.svg` : '/icon.svg',
-  })
+    walletConnectProjectId,
+    appName: app.name,
+    appDescription: app.description,
+    appUrl: app.url,
+    appIcon: app.icons[0],
+    connectors: [
+      passkeyConnector,
+      injected(),
+      ...(walletConnectProjectId ? [walletConnect({ projectId: walletConnectProjectId, metadata: app, showQrModal: false })] : []),
+    ],
+  }),
 );

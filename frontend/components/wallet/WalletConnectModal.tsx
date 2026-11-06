@@ -6,7 +6,8 @@ import { useModal } from 'connectkit';
 import { useConnect, useConnectors, useSwitchChain } from 'wagmi';
 import { useToast } from '@/lib/hooks/useToast';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CaretRight, ClockCounterClockwise, Wallet, WarningCircle, X } from '@phosphor-icons/react';
+import { CaretRight, ClockCounterClockwise, Fingerprint, Wallet, WarningCircle, X } from '@phosphor-icons/react';
+import { PASSKEY_CONNECTOR_ID, passkeySignIn } from '@/lib/wallet/passkey';
 import { arcChainLabel, arcTargetChainId } from '@/lib/wallet/arcChain';
 import { classifyConnectError, safeConnectErrorMessage } from '@/lib/wallet/connectErrors';
 import { connectCopyForError, isConnectingPhase } from '@/lib/wallet/connectMachine';
@@ -158,6 +159,30 @@ export const WalletConnectModal: React.FC = () => {
     const dispatchConnectEvent = useStore((s) => s.dispatchConnectEvent);
 
     const pending = isConnectingPhase(connectPhase);
+    const connectors = useConnectors();
+    const { connectAsync } = useConnect();
+    const toast = useToast();
+    const [passkeyBusy, setPasskeyBusy] = useState<'register' | 'login' | null>(null);
+
+    const handlePasskey = async (mode: 'register' | 'login') => {
+        const connector = connectors.find((c) => c.id === PASSKEY_CONNECTOR_ID);
+        if (pending || passkeyBusy || !connector) return;
+        setPasskeyBusy(mode);
+        dispatchConnectEvent({ type: 'START_CONNECT' });
+        try {
+            await passkeySignIn(mode);
+            await connectAsync({ connector, chainId: arcTargetChainId() });
+            dispatchConnectEvent({ type: 'CONNECT_SUCCESS' });
+            setOpen(false);
+        } catch (err) {
+            const kind = classifyConnectError(err);
+            dispatchConnectEvent({ type: 'CONNECT_FAILURE', error: kind, message: safeConnectErrorMessage(err) });
+            console.error('[passkey] sign-in failed', err);
+            toast.error(mode === 'register' ? 'Could not create the passkey.' : 'Could not sign in with your passkey.');
+        } finally {
+            setPasskeyBusy(null);
+        }
+    };
 
     const handleArcConnect = () => {
         if (pending) return;
@@ -212,6 +237,22 @@ export const WalletConnectModal: React.FC = () => {
                                 <div className="mx-auto my-1 h-px w-16 bg-line" aria-hidden="true" />
                             </>
                         ) : null}
+                        <OptionRow
+                            icon={Fingerprint}
+                            title="Create passkey account"
+                            description="Touch ID or Face ID. No wallet app, no gas."
+                            busy={passkeyBusy === 'register'}
+                            disabled={pending || passkeyBusy !== null}
+                            onClick={() => void handlePasskey('register')}
+                        />
+                        <OptionRow
+                            icon={Fingerprint}
+                            title="Use my passkey"
+                            description="Sign back in on this device."
+                            busy={passkeyBusy === 'login'}
+                            disabled={pending || passkeyBusy !== null}
+                            onClick={() => void handlePasskey('login')}
+                        />
                         <OptionRow
                             icon={Wallet}
                             title="Browser wallet"
