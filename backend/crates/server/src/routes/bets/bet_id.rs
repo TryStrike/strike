@@ -65,7 +65,7 @@ async fn handle(
     }
 }
 
-async fn run(bet_id: &str, address: &str) -> Result<Value, ApiError> {
+pub(crate) async fn run(bet_id: &str, address: &str) -> Result<Value, ApiError> {
     // Row lookup: id + wallet in the predicate, wallet never in the projection.
     let mut binds = Binds::new();
     let id_ph = binds.push(
@@ -324,7 +324,7 @@ fn string_or_empty(value: Option<&Value>) -> String {
 }
 
 /// `BET_ID = /^[A-Za-z0-9_.:-]{1,120}$/`.
-fn bet_id_ok(raw: &str) -> bool {
+pub(crate) fn bet_id_ok(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     (1..=120).contains(&bytes.len())
         && bytes

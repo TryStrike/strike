@@ -1,5 +1,6 @@
 //! Strike backend service: every `/api/...` route the Next app proxies.
 
+mod agent;
 mod bans;
 mod http;
 mod routes;
@@ -29,6 +30,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Every panic, in a handler or a background task, reaches the log with its location.
     std::panic::set_hook(Box::new(|info| tracing::error!("panic: {info}")));
+
+    let stale = strike_core::agent::stop_all_running(strike_core::db::db().await?).await?;
+    if stale > 0 {
+        tracing::warn!("{stale} agent sessions were running before the restart, marked stopped");
+    }
 
     supervise("tick flusher", strike_core::ticks::run_flusher());
     supervise(

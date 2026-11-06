@@ -791,6 +791,46 @@ pub fn bet_success_body(
     Value::Object(map)
 }
 
+/// What an in-process caller learns from the locked bet path.
+#[derive(Debug, PartialEq)]
+pub enum BetOutcome {
+    Placed { bet_id: String },
+    PriceMoved,
+    PriceUnavailable,
+    Banned,
+    InsufficientBalance,
+    Rejected(String),
+}
+
+pub fn bet_outcome(result: &Result<Value, Rejection>) -> BetOutcome {
+    let body = match result {
+        Ok(body) => {
+            return match body.get("betId").and_then(Value::as_str) {
+                Some(bet_id) => BetOutcome::Placed {
+                    bet_id: bet_id.to_string(),
+                },
+                None => BetOutcome::Rejected("Bet placement returned no bet id".into()),
+            }
+        }
+        Err((_, body)) => body,
+    };
+    let message = body
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match body.get("code").and_then(Value::as_str) {
+        Some("price_moved") => BetOutcome::PriceMoved,
+        Some("price_unavailable") => BetOutcome::PriceUnavailable,
+        _ if message == BANNED_MESSAGE => BetOutcome::Banned,
+        _ if message.starts_with("Insufficient house balance")
+            || message.starts_with("No house balance for this wallet") =>
+        {
+            BetOutcome::InsufficientBalance
+        }
+        _ => BetOutcome::Rejected(message.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/balance/deposit
 // ---------------------------------------------------------------------------
@@ -1746,6 +1786,80 @@ mod tests {
         assert_eq!(
             resp,
             error_body("Betting is temporarily unavailable. Please try again later.")
+        );
+    }
+
+    // -- in-process bet outcome ----------------------------------------------
+
+    #[test]
+    fn bet_outcome_types_every_bet_path_result() {
+        let placed = Ok(bet_success_body(json!(5), "bet_1_abc", "tok", false, None));
+        assert_eq!(
+            bet_outcome(&placed),
+            BetOutcome::Placed {
+                bet_id: "bet_1_abc".into()
+            }
+        );
+        let replayed = Ok(bet_success_body(json!(5), "bet_1_abc", "tok", true, None));
+        assert_eq!(
+            bet_outcome(&replayed),
+            BetOutcome::Placed {
+                bet_id: "bet_1_abc".into()
+            }
+        );
+
+        let moved = Err((
+            409,
+            json!({ "error": "The price moved before your bet arrived", "code": "price_moved" }),
+        ));
+        assert_eq!(bet_outcome(&moved), BetOutcome::PriceMoved);
+        let gone = Err((
+            503,
+            json!({ "error": "Live price is unavailable.", "code": "price_unavailable" }),
+        ));
+        assert_eq!(bet_outcome(&gone), BetOutcome::PriceUnavailable);
+
+        assert_eq!(bet_outcome(&Err(banned_rejection())), BetOutcome::Banned);
+        let rpc_banned = bet_rpc_decision(&json!({ "error": BANNED_MESSAGE }), ADDR, "USDC");
+        let BetRpcDecision::FailClosed { status, body } = rpc_banned else {
+            panic!()
+        };
+        assert_eq!(bet_outcome(&Err((status, body))), BetOutcome::Banned);
+
+        let BetRows::Reject(short) = bet_choose_row(
+            &[json!({ "user_address": ADDR, "balance": 0.5, "status": "active" })],
+            1.0,
+            "USDC",
+        ) else {
+            panic!()
+        };
+        assert_eq!(bet_outcome(&Err(short)), BetOutcome::InsufficientBalance);
+        let BetRows::Reject(no_row) = bet_choose_row(&[], 1.0, "USDC") else {
+            panic!()
+        };
+        assert_eq!(bet_outcome(&Err(no_row)), BetOutcome::InsufficientBalance);
+        for rpc_error in ["Insufficient balance", "User not found"] {
+            let BetRpcDecision::FailClosed { status, body } =
+                bet_rpc_decision(&json!({ "error": rpc_error }), ADDR, "USDC")
+            else {
+                panic!()
+            };
+            assert_eq!(
+                bet_outcome(&Err((status, body))),
+                BetOutcome::InsufficientBalance
+            );
+        }
+
+        assert_eq!(
+            bet_outcome(&Err(route_crash())),
+            BetOutcome::Rejected("An error occurred processing your request".into())
+        );
+        assert_eq!(
+            bet_outcome(&Err((
+                400,
+                json!({ "error": "This asset cannot be traded", "code": "unsupported_asset" })
+            ))),
+            BetOutcome::Rejected("This asset cannot be traded".into())
         );
     }
 

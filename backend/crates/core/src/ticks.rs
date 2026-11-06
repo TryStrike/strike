@@ -121,6 +121,27 @@ impl TickBuffer {
         ticks.iter().rev().find(|tick| tick.at_ms <= at_ms).copied()
     }
 
+    /// Every tick at or after `since_ms`, oldest first.
+    pub fn since(&self, asset: &str, since_ms: i64) -> Vec<Tick> {
+        let Ok(rings) = self.rings.lock() else {
+            return Vec::new();
+        };
+        rings.get(asset).map_or_else(Vec::new, |ring| {
+            ring.ticks
+                .iter()
+                .filter(|t| t.at_ms >= since_ms)
+                .copied()
+                .collect()
+        })
+    }
+
+    /// The oldest tick at or after `since_ms`.
+    pub fn first_since(&self, asset: &str, since_ms: i64) -> Option<Tick> {
+        let rings = self.rings.lock().ok()?;
+        let ticks = &rings.get(asset)?.ticks;
+        ticks.iter().find(|tick| tick.at_ms >= since_ms).copied()
+    }
+
     /// High minus low of the ticks at or after `since_ms`; 0 with fewer than two.
     pub fn range(&self, asset: &str, since_ms: i64) -> f64 {
         let Ok(rings) = self.rings.lock() else {

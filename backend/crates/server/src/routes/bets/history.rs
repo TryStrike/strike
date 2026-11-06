@@ -56,7 +56,7 @@ async fn handle(headers: HeaderMap, Query(raw): Query<HashMap<String, String>>) 
 /// The data fetch + response assembly. Errors here map to the two TS failure
 /// messages: a query failure is `Failed to fetch bets`, anything else (schema
 /// lookup) is the generic `Internal server error` from the route's outer catch.
-async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
+pub(crate) async fn run(q: HistoryQuery) -> Result<Value, ApiError> {
     let mut binds = Binds::new();
     let mut clauses: Vec<String> = Vec::new();
 

@@ -56,6 +56,41 @@ const SEED_MARKER: &str = "-- SEED";
 const MIGRATIONS: &[&str] = &[
     // 2: usernames, access codes and the waitlist had no reader or writer left.
     "DROP TABLE IF EXISTS user_profiles; DROP TABLE IF EXISTS access_codes; DROP TABLE IF EXISTS waitlist;",
+    // 3: agent mode sessions and the decisions they make.
+    "CREATE TABLE agent_sessions (
+       id             TEXT PRIMARY KEY,
+       wallet         TEXT NOT NULL,
+       asset          TEXT NOT NULL,
+       mode           TEXT NOT NULL CHECK (mode IN ('normal', 'yolo')),
+       budget         INTEGER NOT NULL,
+       max_per_trade  INTEGER NOT NULL,
+       stop_loss      INTEGER NOT NULL,
+       starts_at      INTEGER NOT NULL,
+       ends_at        INTEGER NOT NULL,
+       nonce          TEXT NOT NULL UNIQUE,
+       status         TEXT NOT NULL CHECK (status IN ('running', 'stopped')),
+       stopped_reason TEXT,
+       spent          INTEGER NOT NULL DEFAULT 0,
+       realized_pnl   INTEGER NOT NULL DEFAULT 0,
+       created_at     INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
+     ) STRICT;
+     CREATE UNIQUE INDEX agent_sessions_one_running ON agent_sessions(wallet) WHERE status = 'running';
+     CREATE TABLE agent_decisions (
+       id         TEXT PRIMARY KEY,
+       session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+       created_at INTEGER NOT NULL,
+       direction  TEXT CHECK (direction IN ('UP', 'DOWN')),
+       stake      INTEGER,
+       verdict    TEXT NOT NULL CHECK (verdict IN ('awaiting', 'placed', 'skipped', 'blocked', 'rejected')),
+       reason     TEXT NOT NULL,
+       skip_count INTEGER NOT NULL DEFAULT 1,
+       confidence INTEGER,
+       bet_id     TEXT,
+       result     TEXT,
+       pnl        INTEGER,
+       expires_at INTEGER
+     ) STRICT;
+     CREATE INDEX agent_decisions_by_session ON agent_decisions(session_id, created_at);",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

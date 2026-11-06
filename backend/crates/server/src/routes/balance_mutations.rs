@@ -241,6 +241,15 @@ async fn bet(headers: HeaderMap, raw: Bytes) -> Response {
     }
 }
 
+/// The locked bet path for in-process callers. Requires a well-formed
+/// `betRequestId`, a derived key would let a retry deduct twice.
+pub(crate) async fn place_bet(body: &Value) -> ledger::BetOutcome {
+    if ledger::sanitize_bet_request_id(body.get("betRequestId")).is_none() {
+        return ledger::BetOutcome::Rejected("Invalid bet request id".into());
+    }
+    ledger::bet_outcome(&bet_run(body).await)
+}
+
 async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
     // `isBalanceSettlementSigningConfigured()`. Rust has the one `production`
     // flag, so "not production" is the development branch: a caller with NODE_ENV
