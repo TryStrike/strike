@@ -14,6 +14,25 @@ const PILL_WIDTH = 80;
 const PILL_HEIGHT = 22;
 const STALE_ALPHA = 0.35;
 
+// Heat haze: payout -> hue (blue, indigo, violet, coral).
+const HEAT_STOPS = [[33, 81, 245], [79, 70, 229], [147, 51, 234], [244, 99, 77]];
+const HEAT_INK = [12, 14, 30];
+const HEAT_BUCKETS = 32;
+const TILE_INSET = 3;
+const TILE_RADIUS = 7;
+const COLD_FILL = 'rgba(22,24,29,0.035)';
+const COLD_TEXT = '#b8bcc4';
+const mixRgb = (a: number[], b: number[], t: number) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+const rgba = (c: number[], a: number) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const heatOf = (multiplier: number) => Math.max(0, Math.min(1, (multiplier - 1) / 2.6));
+const hueAt = (t: number) => {
+  const seg = t * (HEAT_STOPS.length - 1);
+  const i = Math.min(Math.floor(seg), HEAT_STOPS.length - 2);
+  return mixRgb(HEAT_STOPS[i], HEAT_STOPS[i + 1], seg - i);
+};
+// One entry per heat bucket; fills are built at the origin and translated into place.
+const HEAT_TEXT = Array.from({ length: HEAT_BUCKETS + 1 }, (_, b) => rgba(mixRgb(hueAt(b / HEAT_BUCKETS), HEAT_INK, 0.35), 1));
+
 export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions): TapGrid {
   const context = canvas.getContext('2d');
   if (!context) throw new Error('tapgrid needs a 2d canvas context');
@@ -38,6 +57,9 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
 
   let labels = new Map<string, CellLabel | null>();
   let labelsAt = 0;
+  let fills: CanvasGradient[] = [];
+  let fillsKey = '';
+  let boostEdge: CanvasGradient | null = null;
   const timeTexts = new Map<number, string>();
 
   let frameId = 0;
@@ -127,6 +149,70 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
     tip = reducedMotion || !tip ? price : ease(tip, price, dt, TIP_EASE_MS);
   };
 
+  const labelFor = (cell: Cell, s: Scales) => {
+    let label = labels.get(cell.key);
+    if (label === undefined) {
+      label = options.cellLabel ? options.cellLabel(cell, s) : null;
+      labels.set(cell.key, label);
+    }
+    return label;
+  };
+
+  const tileFills = (w: number, h: number) => {
+    const key = `${w}x${h}`;
+    if (key === fillsKey) return;
+    fillsKey = key;
+    fills = [];
+    for (let b = 0; b <= HEAT_BUCKETS; b++) {
+      const t = b / HEAT_BUCKETS;
+      const hue = hueAt(t);
+      const g = ctx.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, rgba(hue, 0.05 + t * 0.06));
+      g.addColorStop(1, rgba(hue, 0.13 + t * 0.1));
+      fills.push(g);
+    }
+    boostEdge = ctx.createLinearGradient(0, 0, w, h);
+    boostEdge.addColorStop(0, 'rgba(244,99,77,0.85)');
+    boostEdge.addColorStop(1, 'rgba(251,176,64,0.85)');
+  };
+
+  const drawTiles = (s: Scales, firstColumn: number, lastColumnIndex: number, topRow: number, bottomRow: number) => {
+    const columnPx = (options.intervalMs / 1000) * options.pxPerSecond;
+    const w = columnPx - TILE_INSET * 2;
+    const h = rowPx() - TILE_INSET * 2;
+    if (w <= 2 || h <= 2) return;
+    const radius = Math.min(TILE_RADIUS, w / 2, h / 2);
+    tileFills(w, h);
+    for (let column = firstColumn; column <= lastColumnIndex; column++) {
+      for (let r = bottomRow; r < topRow; r++) {
+        const cell = cellOf(column, r, s.now);
+        if (cell.state === 'past' || cell.state === 'crossing') continue;
+        const label = labelFor(cell, s);
+        if (!label) continue;
+        const x = s.x(cell.time) + TILE_INSET;
+        if (x + w / 2 > width - AXIS_GUTTER_PX) continue;
+        ctx.save();
+        ctx.translate(x, s.y(cell.top) + TILE_INSET);
+        ctx.globalAlpha = cell.state === 'locked' ? 0.4 : 1;
+        ctx.beginPath();
+        ctx.roundRect(0, 0, w, h, radius);
+        if (label.cold || label.heat === undefined) {
+          ctx.fillStyle = COLD_FILL;
+          ctx.fill();
+        } else {
+          ctx.fillStyle = fills[Math.round(heatOf(label.heat) * HEAT_BUCKETS)];
+          ctx.fill();
+          if (label.accent && boostEdge) {
+            ctx.strokeStyle = boostEdge;
+            ctx.lineWidth = 1.25;
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+    }
+  };
+
   const drawGrid = (s: Scales) => {
     const { intervalMs, pxPerSecond, mode, colors, fontFamily } = options;
     const columnPx = (intervalMs / 1000) * pxPerSecond;
@@ -140,6 +226,14 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
       const left = snap(s.x(crossing));
       ctx.fillStyle = colors.crossing;
       ctx.fillRect(left, 0, snap(s.x(crossing + intervalMs)) - left, height);
+    }
+
+    if (mode === 'grid' && options.cellLabel) {
+      if (s.now - labelsAt >= LABEL_REFRESH_MS) {
+        labels = new Map();
+        labelsAt = s.now;
+      }
+      drawTiles(s, firstColumn, lastColumnIndex, topRow, bottomRow);
     }
 
     ctx.strokeStyle = colors.grid;
@@ -159,10 +253,6 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
 
     ctx.font = `10px ${fontFamily}`;
     if (mode === 'grid' && options.cellLabel) {
-      if (s.now - labelsAt >= LABEL_REFRESH_MS) {
-        labels = new Map();
-        labelsAt = s.now;
-      }
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const row = rowPx();
@@ -170,14 +260,15 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
         for (let r = bottomRow; r < topRow; r++) {
           const cell = cellOf(column, r, s.now);
           if (cell.state === 'past' || cell.state === 'crossing') continue;
-          let label = labels.get(cell.key);
-          if (label === undefined) {
-            label = options.cellLabel(cell, s);
-            labels.set(cell.key, label);
-          }
+          const label = labelFor(cell, s);
           if (!label) continue;
-          ctx.fillStyle = label.accent ? colors.accentText : colors.cellText;
-          ctx.globalAlpha = label.cold ? 0.2 : cell.state === 'locked' ? 0.4 : 1;
+          const cold = label.cold || label.heat === undefined;
+          const t = cold ? 0 : heatOf(label.heat as number);
+          // Larger for richer payouts, shrunk to fit the tile.
+          const size = Math.max(8, Math.min(14 + t * 2, row * 0.5, (columnPx - 8) / (label.text.length * 0.6)));
+          ctx.font = `${cold ? 600 : t > 0.66 ? 700 : t > 0.33 ? 650 : 600} ${size.toFixed(1)}px ${fontFamily}`;
+          ctx.fillStyle = cold ? COLD_TEXT : HEAT_TEXT[Math.round(t * HEAT_BUCKETS)];
+          ctx.globalAlpha = cell.state === 'locked' ? 0.4 : 1;
           const labelX = s.x(cell.time) + columnPx / 2;
           // The price axis owns the right edge; a multiplier there would print over it.
           if (labelX > width - AXIS_GUTTER_PX) continue;
@@ -187,6 +278,7 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
       ctx.globalAlpha = 1;
     }
 
+    ctx.font = `10px ${fontFamily}`;
     ctx.fillStyle = colors.text;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'alphabetic';

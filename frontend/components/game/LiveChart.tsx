@@ -1249,6 +1249,7 @@ export const LiveChart = React.memo(function LiveChart({
       return {
         text: `${multiplier}x`,
         accent: boosted,
+        heat: Number(multiplier),
         value: { asset, multiplier, isUp: center > price, boosted },
       };
     },

@@ -16,6 +16,8 @@ export interface Cell {
 export interface CellLabel<V = unknown> {
   text: string;
   accent?: boolean;
+  /** Payout multiplier; tints the cell by how rich it is. */
+  heat?: number;
   /** Drawn faded; the app refuses taps on it. */
   cold?: boolean;
   value?: V;
