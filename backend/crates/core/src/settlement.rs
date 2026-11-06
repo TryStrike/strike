@@ -103,7 +103,7 @@ fn refuse(status: u16, code: &str, message: &str) -> Rejection {
 }
 
 /// Text first, so the fixed point holds the decimal the double was written as.
-fn fixed_price(price: f64) -> Option<i64> {
+pub(crate) fn fixed_price(price: f64) -> Option<i64> {
     to_fixed(parse_decimal(&format!("{price}")).ok()?, PRICE_SCALE).ok()
 }
 

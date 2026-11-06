@@ -139,6 +139,25 @@ const MIGRATIONS: &[&str] = &[
     "CREATE INDEX bet_rounds_open_by_wallet ON bet_rounds(user_address) WHERE outcome IS NULL;",
     // 9: the numbers behind a decision, snapshotted when it was made.
     "ALTER TABLE agent_decisions ADD COLUMN trace TEXT;",
+    // 10: every signal the agent rule sees, settled on paper.
+    "CREATE TABLE signal_shadow (
+       id           TEXT PRIMARY KEY,
+       asset        TEXT NOT NULL,
+       signal_at    INTEGER NOT NULL,
+       direction    TEXT NOT NULL CHECK (direction IN ('UP', 'DOWN')),
+       move_pct     REAL NOT NULL,
+       range_share  REAL NOT NULL,
+       range_pct    REAL NOT NULL,
+       signal_price REAL NOT NULL,
+       strike       REAL NOT NULL,
+       jev_status   TEXT NOT NULL CHECK (jev_status IN ('off', 'passed', 'blocked', 'failed')),
+       jev_score    REAL,
+       jev_needed   REAL,
+       jev_ms       INTEGER,
+       end_at       INTEGER NOT NULL,
+       outcome      TEXT CHECK (outcome IN ('win', 'loss', 'tie'))
+     ) STRICT;
+     CREATE INDEX signal_shadow_by_asset ON signal_shadow(asset, signal_at);",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
@@ -1294,10 +1313,10 @@ mod tests {
         let expected: Vec<(String, String, String)> = crate::schema::COLUMNS
             .iter()
             .map(|(table, column, ty)| {
-                let storage = if ty == &"text" || ty == &"uuid" {
-                    "TEXT"
-                } else {
-                    "INTEGER"
+                let storage = match *ty {
+                    "text" | "uuid" => "TEXT",
+                    "double precision" => "REAL",
+                    _ => "INTEGER",
                 };
                 (table.to_string(), column.to_string(), storage.to_string())
             })

@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         supervise("binance stream", strike_core::binance_ws::run());
     }
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    supervise("shadow log", strike_core::shadow::run());
     if !strike_core::world::enabled() {
         tracing::warn!(
             "NEXT_PUBLIC_WORLD_APP_ID, WORLD_RP_ID or WORLD_RP_SIGNING_KEY is unset: YOLO agents are refused in production, and start unchecked elsewhere"

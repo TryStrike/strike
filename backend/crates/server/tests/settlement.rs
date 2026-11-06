@@ -1003,6 +1003,60 @@ async fn jev_server(btc: f64, score: f64) -> (Server, Feed) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_signal_settles_on_paper_with_no_session() {
+    let (s, feed) = jev_server(100.0, 0.4).await;
+
+    jump_after_history(&feed).await;
+    let row = || {
+        s.sqlite()
+            .query_row(
+                "SELECT direction, jev_status, jev_score, jev_needed, outcome FROM signal_shadow \
+                 WHERE asset = 'BTC' ORDER BY signal_at LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<f64>>(2)?,
+                        r.get::<_, Option<f64>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .ok()
+    };
+    let mut seen = None;
+    for _ in 0..60 {
+        seen = row();
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        seen,
+        Some(("UP".into(), "blocked".into(), Some(0.4), Some(0.6), None)),
+        "a blocked signal is still recorded, and still open"
+    );
+
+    set_price(&feed, 102.0);
+    let mut settled = None;
+    for _ in 0..80 {
+        settled = row().and_then(|r| r.4);
+        if settled.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(settled.as_deref(), Some("win"));
+    let bets: i64 = s
+        .sqlite()
+        .query_row("SELECT count(*) FROM bet_rounds", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(bets, 0, "the shadow log never places a bet");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_jev_block_keeps_its_direction_stake_and_trace() {
     let (s, feed) = jev_server(100.0, 0.4).await;
     let trader = key(40);
