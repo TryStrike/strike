@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
+use rust_decimal::Decimal;
 use strike_core::address::search_variants;
 use strike_core::bets::{is_truthy, now_ms, number_coerce, to_number, value_to_string};
 use strike_core::config::USDC_DECIMALS;
@@ -23,7 +24,6 @@ use strike_core::payout_rules::{
     verify_withdrawal_intent, within_accept_window,
 };
 use strike_core::withdrawals::{self, Claim};
-use rust_decimal::Decimal;
 
 use crate::bans::is_globally_banned;
 use crate::http;

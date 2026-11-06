@@ -9,10 +9,10 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, routing::post, Json, Router};
-use strike_core::error::ApiError;
-use strike_core::eth::{reference, PayError, Rpc, Sent, Transfer, Treasury};
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
+use strike_core::error::ApiError;
+use strike_core::eth::{reference, PayError, Rpc, Sent, Transfer, Treasury};
 
 const USDC: &str = "0x3600000000000000000000000000000000000000";
 const CONTRACT: &str = "0x00000000000000000000000000000000000000c0";

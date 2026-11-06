@@ -12,12 +12,12 @@ use axum::http::StatusCode as AxumStatus;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use strike_core::address::keccak256;
-use strike_core::agent::{start_message, StartTerms};
 use k256::ecdsa::SigningKey;
 use reqwest::{Client, StatusCode};
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
+use strike_core::address::keccak256;
+use strike_core::agent::{start_message, StartTerms};
 
 const SECRET: &str = "http-test-secret";
 const SETTLEMENT_SECRET: &str = "http-test-settlement-secret";

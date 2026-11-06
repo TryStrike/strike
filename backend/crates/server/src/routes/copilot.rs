@@ -13,6 +13,7 @@ use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use rust_decimal::prelude::ToPrimitive;
 use strike_core::agent;
 use strike_core::bets::now_ms;
 use strike_core::bets::{canonical_address, HistoryQuery};
@@ -23,7 +24,6 @@ use strike_core::crypto::{self, AgentClaims, AGENT_COOKIE};
 use strike_core::db;
 use strike_core::error::ApiError;
 use strike_core::ticks;
-use rust_decimal::prelude::ToPrimitive;
 
 use crate::http;
 use crate::routes::stream::sse_headers;

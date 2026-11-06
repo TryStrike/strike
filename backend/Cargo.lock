@@ -187,33 +187,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "strike-core"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono",
- "futures",
- "getrandom 0.4.3",
- "hex",
- "hmac",
- "k256",
- "once_cell",
- "reqwest",
- "rusqlite",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tiny-keccak",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1598,7 +1571,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "strike-core",
  "chrono",
  "dotenvy",
  "futures",
@@ -1610,6 +1582,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strike-core",
  "tokio",
  "tower-http",
  "tracing",
@@ -1711,6 +1684,33 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "strike-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac",
+ "k256",
+ "once_cell",
+ "reqwest",
+ "rusqlite",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tiny-keccak",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "subtle"

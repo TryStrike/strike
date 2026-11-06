@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
-use strike_core::address::keccak256;
-use strike_core::payout_rules::withdrawal_intent_message;
 use k256::ecdsa::SigningKey;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
+use strike_core::address::keccak256;
+use strike_core::payout_rules::withdrawal_intent_message;
 
 const SECRET: &str = "shutdown-test-secret";
 const TREASURY: &str = "0x00000000000000000000000000000000000000c0";

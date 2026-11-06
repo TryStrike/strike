@@ -31,6 +31,8 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
 
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use strike_core::address;
 use strike_core::bets::{self, iso_ms, now_ms};
 use strike_core::config::config;
@@ -42,8 +44,6 @@ use strike_core::ledger;
 use strike_core::settlement::{self, Settled};
 use strike_core::ticks;
 use strike_core::withdrawals;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
 
 use crate::bans::is_globally_banned;
 use crate::http::{require_balance_session, require_wallet_session};
