@@ -3,12 +3,10 @@
 //! its own sender so its last thought outlives the session.
 
 use std::collections::HashSet;
-use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::time::{timeout_at, Instant};
+use tokio::sync::broadcast::Sender;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use strike_core::agent::Session;
 use strike_core::bets::now_ms;
@@ -18,30 +16,20 @@ use strike_core::crypto::AgentClaims;
 
 use crate::routes::copilot::converse;
 
-/// A watcher whose stop frame never came gives up this long after the session ends.
-const LINGER: Duration = Duration::from_secs(60);
-
-pub fn spawn(session: &Session, frames: Sender<String>) {
-    let Some(key) = config().anthropic_api_key.clone() else {
-        return;
-    };
+/// Where the session sends its frames for the watcher. `None` when it has none.
+pub fn spawn(session: &Session, frames: Sender<String>) -> Option<UnboundedSender<String>> {
+    let key = config().anthropic_api_key.clone()?;
     if session.mode != "yolo" {
-        return;
+        return None;
     }
     let claims = AgentClaims {
         session_id: session.id.clone(),
         wallet: session.wallet.clone(),
         exp: session.ends_at_ms / 1_000,
     };
-    let left = Duration::from_millis((session.ends_at_ms - now_ms()).max(0) as u64);
-    let events = frames.subscribe();
-    tokio::spawn(run(
-        key,
-        claims,
-        frames,
-        events,
-        Instant::now() + left + LINGER,
-    ));
+    let (events, received) = mpsc::unbounded_channel();
+    tokio::spawn(run(key, claims, frames, received));
+    Some(events)
 }
 
 #[derive(Default)]
@@ -86,22 +74,13 @@ async fn run(
     key: String,
     claims: AgentClaims,
     frames: Sender<String>,
-    mut events: Receiver<String>,
-    until: Instant,
+    mut events: UnboundedReceiver<String>,
 ) {
     let mut watch = Watch::default();
-    loop {
-        match timeout_at(until, events.recv()).await {
-            Err(_) | Ok(Err(RecvError::Closed)) => return,
-            Ok(Err(RecvError::Lagged(_))) => {}
-            Ok(Ok(frame)) => watch.take(&frame),
-        }
-        loop {
-            match events.try_recv() {
-                Ok(frame) => watch.take(&frame),
-                Err(TryRecvError::Lagged(_)) => {}
-                Err(_) => break,
-            }
+    while let Some(frame) = events.recv().await {
+        watch.take(&frame);
+        while let Ok(frame) = events.try_recv() {
+            watch.take(&frame);
         }
         if let Some(event) = watch.latest.take() {
             if let Err(why) = think(&key, &claims, &frames, &event).await {

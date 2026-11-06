@@ -32,7 +32,7 @@ function stepsOf(d: Decision) {
     steps.push({ name: 'Signal', text: trace.signal });
     if (trace.jevNeeded !== null && d.confidence !== null) {
       const [score, needed] = [Math.round(d.confidence * 100), Math.round(trace.jevNeeded * 100)];
-      steps.push({ name: 'jev', text: `confidence ${score}, needed ${needed}`, bad: score < needed });
+      steps.push({ name: 'jev', text: `confidence ${score}, needed ${needed}`, bad: d.confidence < trace.jevNeeded });
     }
     if (d.verdict !== 'blocked' && d.stake !== null) {
       steps.push({

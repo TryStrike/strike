@@ -97,7 +97,7 @@ export function useAgent() {
   const settle = useCallback((a: WorldAttempt) => {
     setChallenge(null);
     setBusy(false);
-    if (a.status === 'approved') connect(true);
+    if (a.status === 'approved' && a.kind !== 'checkpoint') connect(true);
   }, [connect]);
 
   useEffect(() => connect(), [connect]);

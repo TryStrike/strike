@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use tokio::sync::{broadcast, watch, Notify};
+use tokio::sync::{broadcast, mpsc, watch, Notify};
 
 use strike_core::agent::{
     self, Decision, Proposed, Release, Reservation, Reserve, Session, Signal,
@@ -28,6 +28,7 @@ const SETTLE_POLL_MS: u64 = 1_000;
 
 struct Live {
     frames: broadcast::Sender<String>,
+    watcher: Option<mpsc::UnboundedSender<String>>,
     stop: watch::Sender<bool>,
     approval: Approval,
     /// Set while a YOLO agent waits for its human, until this time.
@@ -64,6 +65,9 @@ pub fn subscribe(session_id: &str) -> Option<broadcast::Receiver<String>> {
 
 pub fn publish(session_id: &str, frame: String) {
     if let Some(l) = live().get(session_id) {
+        if let Some(watcher) = &l.watcher {
+            let _ = watcher.send(frame.clone());
+        }
         let _ = l.frames.send(frame);
     }
 }
@@ -106,11 +110,12 @@ pub fn spawn(session: Session) {
         lock: Arc::default(),
         answered: Arc::default(),
     };
-    crate::watcher::spawn(&session, frames.clone());
+    let watcher = crate::watcher::spawn(&session, frames.clone());
     live().insert(
         session.id.clone(),
         Live {
             frames,
+            watcher,
             stop,
             approval: approval.clone(),
             paused_until: None,

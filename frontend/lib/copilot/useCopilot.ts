@@ -29,6 +29,7 @@ interface CopilotChat {
 }
 
 export const useCopilot = create<CopilotChat>((set, get) => {
+  let asking: AbortController | null = null;
   const onLast = (change: (last: ChatMessage) => ChatMessage) =>
     set((s) => ({ messages: [...s.messages.slice(0, -1), change(s.messages[s.messages.length - 1])] }));
 
@@ -36,8 +37,14 @@ export const useCopilot = create<CopilotChat>((set, get) => {
     messages: [],
     busy: false,
     error: null,
-    clear: () => set({ messages: [], error: null }),
+    clear: () => {
+      asking?.abort();
+      set({ messages: [], error: null, busy: false });
+    },
     send: async (question, label) => {
+      if (get().busy) return;
+      const mine = new AbortController();
+      asking = mine;
       const asked = [...get().messages, { role: 'user' as const, content: question, label, at: Date.now() }];
       set({ messages: [...asked, { role: 'assistant', content: '', at: Date.now() }], busy: true, error: null });
       try {
@@ -45,6 +52,7 @@ export const useCopilot = create<CopilotChat>((set, get) => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ messages: history(asked) }),
+          signal: mine.signal,
         });
         if (!res.ok || !res.body) {
           const body = await res.json().catch(() => null);
@@ -77,9 +85,11 @@ export const useCopilot = create<CopilotChat>((set, get) => {
           }
         }
       } catch (e) {
-        set({ error: e instanceof Error ? e.message : 'Copilot failed' });
+        if (!mine.signal.aborted) set({ error: e instanceof Error ? e.message : 'Copilot failed' });
       } finally {
-        set((s) => ({ messages: s.messages.filter((m) => m.content.trim() || m.steps?.length), busy: false }));
+        if (!mine.signal.aborted) {
+          set((s) => ({ messages: s.messages.filter((m) => m.content.trim() || m.steps?.length), busy: false }));
+        }
       }
     },
   };

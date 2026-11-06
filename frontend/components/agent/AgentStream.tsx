@@ -92,7 +92,9 @@ export default function AgentStream({
   const { messages, busy, error, send } = useCopilot();
   const [draft, setDraft] = useState('');
   const [stopError, setStopError] = useState<string | null>(null);
-  const end = useRef<HTMLDivElement>(null);
+  const [stopping, setStopping] = useState(false);
+  const list = useRef<HTMLOListElement>(null);
+  const following = useRef(true);
 
   const byTime = [...decisions].sort((a, b) => b.createdAt - a.createdAt);
   const rows: Row[] = [
@@ -103,16 +105,27 @@ export default function AgentStream({
   const newest = byTime.find((d) => d.verdict !== 'skipped');
   const tail = rows.length + messages.reduce((n, m) => n + m.content.length, 0) + (byTime[0]?.skipCount ?? 0) + thoughts.reduce((n, t) => n + t.thinking.length + t.text.length, 0);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'nearest' });
+    if (following.current) list.current?.scrollTo({ top: list.current.scrollHeight });
   }, [tail, session.status]);
 
   const why = (d: Decision) => send(`Explain decision ${d.id} of this session.`, 'Why this decision?');
 
   const stop = async () => {
+    setStopping(true);
     setStopError(null);
-    const res = await fetch('/api/agent/stop', { method: 'POST' });
-    if (res.ok) useAgentFeed.getState().showSession((await res.json()).session);
-    else setStopError(`Stop failed with ${res.status}`);
+    try {
+      const res = await fetch('/api/agent/stop', { method: 'POST' });
+      if (res.ok) {
+        useAgentFeed.getState().showSession((await res.json()).session);
+        return;
+      }
+      const body = await res.json().catch(() => null);
+      setStopError(`The agent is still running. ${body?.error ?? `Stop failed with ${res.status}`}`);
+    } catch (e) {
+      setStopError(`The agent is still running. ${e instanceof Error ? e.message : 'Stop failed'}`);
+    } finally {
+      setStopping(false);
+    }
   };
 
   const submit = (e: React.FormEvent) => {
@@ -127,7 +140,7 @@ export default function AgentStream({
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <SessionStrip session={session} />
       {session.status === 'running' ? (
-        <Button variant="secondary" size="sm" onClick={stop}>
+        <Button variant="secondary" size="sm" onClick={stop} disabled={stopping}>
           <Stop size={14} weight="fill" /> Stop agent
         </Button>
       ) : (
@@ -138,7 +151,14 @@ export default function AgentStream({
           {stopError}
         </p>
       )}
-      <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+      <ol
+        ref={list}
+        onScroll={(e) => {
+          const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
+          following.current = scrollHeight - scrollTop - clientHeight < 40;
+        }}
+        className="min-h-0 flex-1 space-y-2 overflow-y-auto"
+      >
         {rows.map((row) => (
           <li key={row.key}>
             {'decision' in row ? (
@@ -147,7 +167,7 @@ export default function AgentStream({
                 session={session}
                 newest={row.decision.id === newest?.id}
                 later={row.index > 0}
-                canWhy={row.index < WHY_REACH}
+                canWhy={row.index < WHY_REACH && !busy}
                 onWhy={why}
                 onAnswer={onAnswer}
               />
@@ -163,12 +183,11 @@ export default function AgentStream({
             <span className="flex items-center gap-1.5">
               <StopCircle size={15} weight="fill" /> Stopped: {session.stoppedReason}
             </span>
-            <button type="button" onClick={() => send('Why did my agent stop?')} className="text-xs font-semibold underline">
+            <button type="button" disabled={busy} onClick={() => send('Why did my agent stop?')} className="text-xs font-semibold underline disabled:opacity-40">
               Why?
             </button>
           </li>
         )}
-        <div ref={end} />
       </ol>
       {error && (
         <p role="alert" className="rounded-2xl bg-down-soft px-3 py-2 text-xs text-down">
