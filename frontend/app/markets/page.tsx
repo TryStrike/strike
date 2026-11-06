@@ -1,12 +1,21 @@
-'use client';
+"use client";
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
-import { ArrowUpRight, CaretDown, MagnifyingGlass, Storefront } from '@phosphor-icons/react';
-import { SiteNav } from '@/components/SiteNav';
-import { WalletConnect } from '@/components/wallet';
-import { Label, cx, glassPrimary } from '@/components/ui/kit';
-import { isAsset } from '@/lib/utils/priceFeed';
+import { Fragment, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import {
+  ArrowUpRight,
+  CaretDown,
+  MagnifyingGlass,
+  Storefront,
+} from "@phosphor-icons/react";
+import { SiteNav } from "@/components/SiteNav";
+import { WalletConnect } from "@/components/wallet";
+import { Label, cx, glassPrimary } from "@/components/ui/kit";
+import { isAsset } from "@/lib/utils/priceFeed";
+import {
+  StockTrade,
+  stockMarketEnabled,
+} from "@/components/markets/StockTrade";
 
 interface Venue {
   issuer: string;
@@ -31,53 +40,80 @@ interface Asset {
 
 interface Markets {
   at: number;
-  session: 'pre' | 'open' | 'post' | 'closed';
+  session: "pre" | "open" | "post" | "closed";
   quoteUsd: number;
   assets: Asset[];
 }
 
 const REFRESH_MS = 30_000;
-const SESSION_LABEL = { pre: 'Pre-market', open: 'Market open', post: 'After hours', closed: 'Market closed' } as const;
+const SESSION_LABEL = {
+  pre: "Pre-market",
+  open: "Market open",
+  post: "After hours",
+  closed: "Market closed",
+} as const;
 const FILTERS = {
-  all: { label: 'All', test: () => true },
-  tech: { label: 'Tech', test: (a: Asset) => ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'META', 'AMD'].includes(a.ticker) },
-  consumer: { label: 'Consumer', test: (a: Asset) => ['AMZN', 'TSLA', 'NFLX'].includes(a.ticker) },
-  etf: { label: 'ETF', test: (a: Asset) => a.ticker === 'SPY' },
-  multi: { label: '2+ venues', test: (a: Asset) => quoted(a).length > 1 },
+  all: { label: "All", test: () => true },
+  tech: {
+    label: "Tech",
+    test: (a: Asset) =>
+      ["NVDA", "AAPL", "MSFT", "GOOGL", "META", "AMD"].includes(a.ticker),
+  },
+  consumer: {
+    label: "Consumer",
+    test: (a: Asset) => ["AMZN", "TSLA", "NFLX"].includes(a.ticker),
+  },
+  etf: { label: "ETF", test: (a: Asset) => a.ticker === "SPY" },
+  multi: { label: "2+ venues", test: (a: Asset) => quoted(a).length > 1 },
 } as const;
 type FilterKey = keyof typeof FILTERS;
-type SortKey = 'volume' | 'change' | 'spread' | 'name';
+type SortKey = "volume" | "change" | "spread" | "name";
 
 const usd = (n: number | null | undefined) =>
-  n == null ? '–' : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const pct = (n: number | null | undefined) => (n == null ? '–' : `${n >= 0 ? '+' : '−'}${Math.abs(n).toFixed(2)}%`);
-const bps = (n: number | null) => (n == null ? '' : `${n >= 0 ? '+' : '−'}${Math.abs(n)} bp`);
+  n == null
+    ? "–"
+    : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const pct = (n: number | null | undefined) =>
+  n == null ? "–" : `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(2)}%`;
+const bps = (n: number | null) =>
+  n == null ? "" : `${n >= 0 ? "+" : "−"}${Math.abs(n)} bp`;
 const compact = (n: number | null) =>
-  n == null ? '–' : Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+  n == null
+    ? "–"
+    : Intl.NumberFormat(undefined, {
+        notation: "compact",
+        maximumFractionDigits: 1,
+      }).format(n);
 const quoted = (a: Asset) => a.venues.filter((v) => v.price != null);
-const bestVenue = (a: Asset) => a.venues.find((v) => v.issuer === a.best) ?? null;
+const bestVenue = (a: Asset) =>
+  a.venues.find((v) => v.issuer === a.best) ?? null;
 function spread(a: Asset) {
   const prices = quoted(a).map((v) => v.price as number);
-  return prices.length > 1 ? (Math.max(...prices) / Math.min(...prices) - 1) * 100 : 0;
+  return prices.length > 1
+    ? (Math.max(...prices) / Math.min(...prices) - 1) * 100
+    : 0;
 }
 const tradable = isAsset;
 
 export default function MarketsPage() {
   const [data, setData] = useState<Markets | null>(null);
   const [failed, setFailed] = useState(false);
-  const [filter, setFilter] = useState<FilterKey>('all');
-  const [sort, setSort] = useState<SortKey>('volume');
-  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<FilterKey>("all");
+  const [sort, setSort] = useState<SortKey>("volume");
+  const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [trading, setTrading] = useState<Asset | null>(null);
 
   useEffect(() => {
     let alive = true;
     const load = () =>
-      fetch('/api/markets')
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      fetch("/api/markets")
+        .then((r) =>
+          r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)),
+        )
         .then((d: Markets) => alive && (setData(d), setFailed(false)))
         .catch((err) => {
-          console.error('[markets] load failed', err);
+          console.error("[markets] load failed", err);
           if (alive) setFailed(true);
         });
     load();
@@ -92,7 +128,11 @@ export default function MarketsPage() {
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = assets.filter(
-      (a) => FILTERS[filter].test(a) && (!q || a.ticker.toLowerCase().includes(q) || a.name?.toLowerCase().includes(q))
+      (a) =>
+        FILTERS[filter].test(a) &&
+        (!q ||
+          a.ticker.toLowerCase().includes(q) ||
+          a.name?.toLowerCase().includes(q)),
     );
     const by: Record<SortKey, (a: Asset, b: Asset) => number> = {
       volume: (a, b) => (b.volume ?? 0) - (a.volume ?? 0),
@@ -103,17 +143,25 @@ export default function MarketsPage() {
     return [...list].sort(by[sort]);
   }, [assets, filter, sort, query]);
 
-  const byChange = useMemo(() => [...assets].sort((a, b) => (b.changePct ?? 0) - (a.changePct ?? 0)), [assets]);
-  const bySpread = useMemo(() => [...assets].sort((a, b) => spread(b) - spread(a)), [assets]);
+  const byChange = useMemo(
+    () => [...assets].sort((a, b) => (b.changePct ?? 0) - (a.changePct ?? 0)),
+    [assets],
+  );
+  const bySpread = useMemo(
+    () => [...assets].sort((a, b) => spread(b) - spread(a)),
+    [assets],
+  );
   const hero = bySpread[0] && spread(bySpread[0]) > 0 ? bySpread[0] : null;
   const venueCount = assets.reduce((n, a) => n + quoted(a).length, 0);
 
   const reveal = (ticker: string) => {
     setOpen(ticker);
-    setFilter('all');
-    setQuery('');
+    setFilter("all");
+    setQuery("");
     requestAnimationFrame(() =>
-      document.getElementById(`market-${ticker}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      document
+        .getElementById(`market-${ticker}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" }),
     );
   };
 
@@ -132,15 +180,19 @@ export default function MarketsPage() {
               One stock, every wrapper, best price
             </h1>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
-              Live quotes for a ${data?.quoteUsd ?? 100} buy of each tokenized stock on BNB Chain, slippage included.
-              Read-only: nothing here moves money.
+              Live quotes for a ${data?.quoteUsd ?? 100} buy of each tokenized
+              stock on BNB Chain, slippage included. Read-only: nothing here
+              moves money.
             </p>
           </div>
           {data && <SessionPill session={data.session} />}
         </header>
 
         {failed && !data ? (
-          <div role="alert" className="rounded-3xl bg-down-soft px-5 py-4 text-sm text-ink ring-1 ring-down/20">
+          <div
+            role="alert"
+            className="rounded-3xl bg-down-soft px-5 py-4 text-sm text-ink ring-1 ring-down/20"
+          >
             Could not reach the markets feed. It retries every 30 seconds.
           </div>
         ) : !data ? (
@@ -161,7 +213,7 @@ export default function MarketsPage() {
                   <p className="mt-3 max-w-md text-sm leading-relaxed text-muted">
                     {hero
                       ? `${hero.ticker} costs ${spread(hero).toFixed(2)}% less on ${hero.best} than on its dearest wrapper right now.`
-                      : 'Each stock trades as several wrapper tokens. We quote all of them and show the cheapest.'}{' '}
+                      : "Each stock trades as several wrapper tokens. We quote all of them and show the cheapest."}{" "}
                     {venueCount} live quotes across {assets.length} stocks.
                   </p>
                 </div>
@@ -171,21 +223,25 @@ export default function MarketsPage() {
                       <div
                         key={v.symbol}
                         className={cx(
-                          'min-w-0 rounded-2xl bg-white px-3 py-3 ring-1',
-                          v.issuer === hero.best ? 'ring-up/40' : 'ring-line'
+                          "min-w-0 rounded-2xl bg-white px-3 py-3 ring-1",
+                          v.issuer === hero.best ? "ring-up/40" : "ring-line",
                         )}
                       >
-                        <div className="truncate text-[13px] font-semibold">{v.symbol}</div>
+                        <div className="truncate text-[13px] font-semibold">
+                          {v.symbol}
+                        </div>
                         <div className="mt-1 font-jet text-sm tabular-nums">
-                          {v.price == null ? 'no quote' : usd(v.price)}
+                          {v.price == null ? "no quote" : usd(v.price)}
                         </div>
                         <div
                           className={cx(
-                            'mt-0.5 text-[11px]',
-                            v.issuer === hero.best ? 'font-semibold text-up' : 'text-subtle'
+                            "mt-0.5 text-[11px]",
+                            v.issuer === hero.best
+                              ? "font-semibold text-up"
+                              : "text-subtle",
                           )}
                         >
-                          {v.issuer === hero.best ? 'Best price' : v.issuer}
+                          {v.issuer === hero.best ? "Best price" : v.issuer}
                         </div>
                       </div>
                     ))}
@@ -210,7 +266,9 @@ export default function MarketsPage() {
               <MiniList
                 title="Widest venue gap"
                 rows={bySpread.slice(0, 3)}
-                value={(a) => (spread(a) ? `${spread(a).toFixed(2)}%` : 'one venue')}
+                value={(a) =>
+                  spread(a) ? `${spread(a).toFixed(2)}%` : "one venue"
+                }
                 onPick={reveal}
                 neutral
               />
@@ -227,8 +285,10 @@ export default function MarketsPage() {
                       onClick={() => setFilter(k)}
                       aria-pressed={filter === k}
                       className={cx(
-                        'rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
-                        filter === k ? 'bg-surface text-ink ring-1 ring-line' : 'text-muted hover:bg-surface'
+                        "rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                        filter === k
+                          ? "bg-surface text-ink ring-1 ring-line"
+                          : "text-muted hover:bg-surface",
                       )}
                     >
                       {FILTERS[k].label}
@@ -265,10 +325,18 @@ export default function MarketsPage() {
                   <thead>
                     <tr className="border-b border-line font-jet text-[11px] uppercase tracking-[0.08em] text-faint">
                       <th className="pb-3 pr-3 font-medium">Asset</th>
-                      <th className="pb-3 pr-3 text-right font-medium">Price</th>
-                      <th className="pb-3 pr-3 text-right font-medium">Today</th>
-                      <th className="pb-3 pr-3 text-right font-medium">Volume</th>
-                      <th className="pb-3 pr-3 font-medium">Today&apos;s chart</th>
+                      <th className="pb-3 pr-3 text-right font-medium">
+                        Price
+                      </th>
+                      <th className="pb-3 pr-3 text-right font-medium">
+                        Today
+                      </th>
+                      <th className="pb-3 pr-3 text-right font-medium">
+                        Volume
+                      </th>
+                      <th className="pb-3 pr-3 font-medium">
+                        Today&apos;s chart
+                      </th>
                       <th className="pb-3 pr-3 font-medium">Best venue</th>
                       <th className="pb-3 font-medium" />
                     </tr>
@@ -288,45 +356,80 @@ export default function MarketsPage() {
                               <div className="flex items-center gap-2.5">
                                 <StockLogo ticker={a.ticker} />
                                 <div className="min-w-0">
-                                  <div className="font-semibold">{a.ticker}</div>
-                                  <div className="truncate text-xs text-subtle">{a.name ?? '–'}</div>
+                                  <div className="font-semibold">
+                                    {a.ticker}
+                                  </div>
+                                  <div className="truncate text-xs text-subtle">
+                                    {a.name ?? "–"}
+                                  </div>
                                 </div>
                               </div>
                             </td>
-                            <td className="py-3 pr-3 text-right font-jet font-medium tabular-nums">{usd(a.price)}</td>
-                            <td className={cx('py-3 pr-3 text-right font-jet tabular-nums', tone(a.changePct))}>
+                            <td className="py-3 pr-3 text-right font-jet font-medium tabular-nums">
+                              {usd(a.price)}
+                            </td>
+                            <td
+                              className={cx(
+                                "py-3 pr-3 text-right font-jet tabular-nums",
+                                tone(a.changePct),
+                              )}
+                            >
                               {pct(a.changePct)}
                             </td>
                             <td className="py-3 pr-3 text-right font-jet tabular-nums text-muted">
                               {compact(a.volume)}
                             </td>
                             <td className="py-3 pr-3">
-                              <Sparkline points={a.points} up={(a.changePct ?? 0) >= 0} />
+                              <Sparkline
+                                points={a.points}
+                                up={(a.changePct ?? 0) >= 0}
+                              />
                             </td>
                             <td className="py-3 pr-3">
                               {best ? (
                                 <div>
                                   <div className="font-medium">
-                                    {best.issuer} <span className="font-jet tabular-nums">{usd(best.price)}</span>
+                                    {best.issuer}{" "}
+                                    <span className="font-jet tabular-nums">
+                                      {usd(best.price)}
+                                    </span>
                                   </div>
                                   <div className="text-xs text-subtle">
                                     {a.venues.length === 1
-                                      ? 'Only venue'
+                                      ? "Only venue"
                                       : `${quoted(a).length} of ${a.venues.length} venues quoting`}
-                                    {best.premiumBps != null && ` · ${bps(best.premiumBps)} vs stock`}
+                                    {best.premiumBps != null &&
+                                      ` · ${bps(best.premiumBps)} vs stock`}
                                   </div>
                                 </div>
                               ) : (
-                                <span className="text-xs text-subtle">No venue quoting</span>
+                                <span className="text-xs text-subtle">
+                                  No venue quoting
+                                </span>
                               )}
                             </td>
                             <td className="py-3 text-right">
                               <div className="flex items-center justify-end gap-2">
+                                {stockMarketEnabled() && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setTrading(a);
+                                    }}
+                                    className={cx(
+                                      "rounded-full px-3.5 py-1.5 text-xs font-semibold",
+                                      glassPrimary,
+                                    )}
+                                  >
+                                    Buy
+                                  </button>
+                                )}
                                 {tradable(a.ticker) && (
                                   <Link
                                     href={`/trade?asset=${a.ticker}`}
                                     onClick={(e) => e.stopPropagation()}
-                                    className={cx('rounded-full px-3.5 py-1.5 text-xs font-semibold', glassPrimary)}
+                                    className="rounded-full bg-ink/[0.05] px-3.5 py-1.5 text-xs font-semibold text-ink hover:bg-ink/[0.08]"
                                   >
                                     Predict
                                   </Link>
@@ -334,7 +437,10 @@ export default function MarketsPage() {
                                 <CaretDown
                                   size={14}
                                   aria-hidden="true"
-                                  className={cx('text-faint transition-transform', expanded && 'rotate-180')}
+                                  className={cx(
+                                    "text-faint transition-transform",
+                                    expanded && "rotate-180",
+                                  )}
                                 />
                               </div>
                             </td>
@@ -351,7 +457,10 @@ export default function MarketsPage() {
                     })}
                     {rows.length === 0 && (
                       <tr>
-                        <td colSpan={7} className="py-10 text-center text-sm text-subtle">
+                        <td
+                          colSpan={7}
+                          className="py-10 text-center text-sm text-subtle"
+                        >
                           No stocks match this filter.
                         </td>
                       </tr>
@@ -360,29 +469,50 @@ export default function MarketsPage() {
                 </table>
               </div>
               <p className="mt-4 font-jet text-[11px] text-faint">
-                Stock prices from Yahoo Finance. Wrapper quotes from the KyberSwap aggregator on BNB Chain. Updated{' '}
+                Stock prices from Yahoo Finance. Wrapper quotes from the
+                KyberSwap aggregator on BNB Chain. Updated{" "}
                 {new Date(data.at).toLocaleTimeString()}.
               </p>
             </section>
           </div>
         )}
       </main>
+      {trading && (
+        <StockTrade
+          ticker={trading.ticker}
+          name={trading.name}
+          price={trading.price}
+          mainnetRoute={
+            bestVenue(trading)
+              ? `${bestVenue(trading)!.issuer} on BNB Chain`
+              : null
+          }
+          onClose={() => setTrading(null)}
+        />
+      )}
     </div>
   );
 }
 
-const tone = (n: number | null) => (n == null || Math.abs(n) < 0.005 ? 'text-muted' : n > 0 ? 'text-up' : 'text-down');
+const tone = (n: number | null) =>
+  n == null || Math.abs(n) < 0.005
+    ? "text-muted"
+    : n > 0
+      ? "text-up"
+      : "text-down";
 
-function SessionPill({ session }: { session: Markets['session'] }) {
-  const live = session === 'open';
+function SessionPill({ session }: { session: Markets["session"] }) {
+  const live = session === "open";
   return (
     <span
       className={cx(
-        'inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium',
-        live ? 'bg-up-soft text-up' : 'bg-surface text-muted ring-1 ring-line'
+        "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium",
+        live ? "bg-up-soft text-up" : "bg-surface text-muted ring-1 ring-line",
       )}
     >
-      <span className={cx('h-1.5 w-1.5 rounded-full', live ? 'bg-up' : 'bg-faint')} />
+      <span
+        className={cx("h-1.5 w-1.5 rounded-full", live ? "bg-up" : "bg-faint")}
+      />
       {SESSION_LABEL[session]}
       {!live && <span className="text-faint">· wrappers still trade</span>}
     </span>
@@ -395,24 +525,34 @@ function VenueTable({ asset }: { asset: Asset }) {
       {asset.venues.map((v) => (
         <div
           key={v.symbol}
-          className={cx('rounded-2xl bg-white px-4 py-3 ring-1', v.issuer === asset.best ? 'ring-up/40' : 'ring-line')}
+          className={cx(
+            "rounded-2xl bg-white px-4 py-3 ring-1",
+            v.issuer === asset.best ? "ring-up/40" : "ring-line",
+          )}
         >
           <div className="flex items-center justify-between gap-2">
             <span className="font-semibold">{v.symbol}</span>
             {v.issuer === asset.best && (
-              <span className="rounded-full bg-up-soft px-2 py-0.5 text-[10px] font-semibold text-up">Best</span>
+              <span className="rounded-full bg-up-soft px-2 py-0.5 text-[10px] font-semibold text-up">
+                Best
+              </span>
             )}
           </div>
           <div className="text-xs text-subtle">{v.issuer} · BNB Chain</div>
           {v.price != null ? (
             <>
-              <div className="mt-2 font-jet text-[15px] font-medium tabular-nums">{usd(v.price)}</div>
+              <div className="mt-2 font-jet text-[15px] font-medium tabular-nums">
+                {usd(v.price)}
+              </div>
               <div className="text-xs text-subtle">
-                {bps(v.premiumBps)} vs stock{v.route.length > 0 && ` · via ${v.route.join(', ')}`}
+                {bps(v.premiumBps)} vs stock
+                {v.route.length > 0 && ` · via ${v.route.join(", ")}`}
               </div>
             </>
           ) : (
-            <div className="mt-2 text-xs text-down">{v.error ?? 'No quote'}</div>
+            <div className="mt-2 text-xs text-down">
+              {v.error ?? "No quote"}
+            </div>
           )}
           <a
             href={`https://bscscan.com/token/${v.address}`}
@@ -444,7 +584,9 @@ function MiniList({
 }) {
   return (
     <div className="rounded-3xl bg-white/70 px-4 py-3.5 ring-1 ring-ink/[0.06]">
-      <div className="font-jet text-[11px] uppercase tracking-[0.12em] text-faint">{title}</div>
+      <div className="font-jet text-[11px] uppercase tracking-[0.12em] text-faint">
+        {title}
+      </div>
       <ul className="mt-2">
         {rows.map((a) => (
           <li key={a.ticker}>
@@ -455,12 +597,23 @@ function MiniList({
             >
               <StockLogo ticker={a.ticker} small />
               <span className="min-w-0 flex-1">
-                <span className="block text-[13px] font-semibold leading-tight">{a.ticker}</span>
-                <span className="block truncate text-[11px] text-subtle">{a.name}</span>
+                <span className="block text-[13px] font-semibold leading-tight">
+                  {a.ticker}
+                </span>
+                <span className="block truncate text-[11px] text-subtle">
+                  {a.name}
+                </span>
               </span>
               <span className="text-right">
-                <span className="block font-jet text-[13px] tabular-nums">{usd(a.price)}</span>
-                <span className={cx('block font-jet text-xs tabular-nums', neutral ? 'text-muted' : tone(a.changePct))}>
+                <span className="block font-jet text-[13px] tabular-nums">
+                  {usd(a.price)}
+                </span>
+                <span
+                  className={cx(
+                    "block font-jet text-xs tabular-nums",
+                    neutral ? "text-muted" : tone(a.changePct),
+                  )}
+                >
                   {value(a)}
                 </span>
               </span>
@@ -474,13 +627,13 @@ function MiniList({
 
 function StockLogo({ ticker, small }: { ticker: string; small?: boolean }) {
   const [broken, setBroken] = useState(false);
-  const size = small ? 'h-7 w-7' : 'h-8 w-8';
+  const size = small ? "h-7 w-7" : "h-8 w-8";
   if (broken) {
     return (
       <span
         className={cx(
           size,
-          'flex shrink-0 items-center justify-center rounded-full bg-surface text-[11px] font-semibold text-muted'
+          "flex shrink-0 items-center justify-center rounded-full bg-surface text-[11px] font-semibold text-muted",
         )}
       >
         {ticker[0]}
@@ -493,7 +646,7 @@ function StockLogo({ ticker, small }: { ticker: string; small?: boolean }) {
       src={`/logos/stock-${ticker}-logo.png`}
       alt=""
       onError={() => setBroken(true)}
-      className={cx(size, 'shrink-0 rounded-full bg-surface object-cover')}
+      className={cx(size, "shrink-0 rounded-full bg-surface object-cover")}
     />
   );
 }
@@ -502,13 +655,23 @@ function Sparkline({ points, up }: { points: number[]; up: boolean }) {
   if (points.length < 2) return <span className="text-xs text-faint">–</span>;
   const min = Math.min(...points);
   const range = Math.max(...points) - min || 1;
-  const d = points.map((p, i) => `${(i / (points.length - 1)) * 100},${28 - ((p - min) / range) * 26}`).join(' ');
+  const d = points
+    .map(
+      (p, i) =>
+        `${(i / (points.length - 1)) * 100},${28 - ((p - min) / range) * 26}`,
+    )
+    .join(" ");
   return (
-    <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-7 w-24" aria-hidden="true">
+    <svg
+      viewBox="0 0 100 30"
+      preserveAspectRatio="none"
+      className="h-7 w-24"
+      aria-hidden="true"
+    >
       <polyline
         points={d}
         fill="none"
-        stroke={up ? 'var(--up)' : 'var(--down)'}
+        stroke={up ? "var(--up)" : "var(--down)"}
         strokeWidth="1.5"
         vectorEffect="non-scaling-stroke"
       />

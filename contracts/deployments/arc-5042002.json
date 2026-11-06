@@ -26,5 +26,15 @@
       "perTx": "1000",
       "perDay": "10000"
     }
+  },
+  "testStockMarket": {
+    "address": "0xd9f98f3b268e788f3ccf6e7ced2d592a84a6f80f",
+    "txHash": "0x1d5f7bc4eb75491110d70ebfcb757a40abe7b1471bc72b3aef96ef3989c68ca7",
+    "quoteSigner": "0xc0368D6Ec4586B9F96b379a9584ae05E0d31fD28",
+    "tokens": [
+      "USDC",
+      "EURC"
+    ],
+    "note": "Testnet simulation: test shares priced by signed quotes from live stock prices, in USDC or EURC."
   }
 }

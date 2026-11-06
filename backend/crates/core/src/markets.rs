@@ -17,6 +17,12 @@ use tokio::sync::Mutex;
 
 use crate::prices::now_millis;
 
+use k256::ecdsa::SigningKey;
+
+use crate::address::keccak256;
+use crate::error::{ApiError, ApiResult};
+use crate::eth::{hex_decode, normalize_low_s};
+
 const SPARK_URL: &str = "https://query2.finance.yahoo.com/v7/finance/spark";
 const KYBER_URL: &str = "https://aggregator-api.kyberswap.com/bsc/api/v1/routes";
 const USDT_BSC: &str = "0x55d398326f99059fF775485246999027B3197955";
@@ -463,5 +469,210 @@ mod tests {
         assert_eq!(session_at(&spark, 15), "open");
         assert_eq!(session_at(&spark, 25), "post");
         assert_eq!(session_at(&spark, 40), "closed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestStockMarket quotes: the live price, signed so the contract can trust it
+// for a minute without any price ever being posted onchain.
+// ---------------------------------------------------------------------------
+
+/// How long a signed price is good for.
+pub const QUOTE_TTL_SECS: u64 = 60;
+
+fn word_u(v: u128) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[16..].copy_from_slice(&v.to_be_bytes());
+    w
+}
+
+fn address_word(address: &str) -> ApiResult<[u8; 32]> {
+    let bytes = hex_decode(address.trim_start_matches("0x"))
+        .filter(|b| b.len() == 20)
+        .ok_or_else(|| ApiError::Other(format!("{address} is not an address")))?;
+    let mut word = [0u8; 32];
+    word[12..].copy_from_slice(&bytes);
+    Ok(word)
+}
+
+/// `TestStockMarket.quoteDigest`:
+/// keccak256(abi.encode(chainid, market, token, keccak256(symbol), price, deadline)).
+pub fn quote_digest(
+    chain_id: u64,
+    market: &str,
+    token: &str,
+    symbol: &str,
+    price: u128,
+    deadline: u64,
+) -> ApiResult<[u8; 32]> {
+    Ok(keccak256(
+        &[
+            word_u(chain_id as u128),
+            address_word(market)?,
+            address_word(token)?,
+            keccak256(symbol.as_bytes()),
+            word_u(price),
+            word_u(deadline as u128),
+        ]
+        .concat(),
+    ))
+}
+
+/// EIP-191 signature (r, s, v with v = 27/28) over [`quote_digest`], as 0x hex.
+pub fn sign_quote(key: &SigningKey, digest: &[u8; 32]) -> ApiResult<String> {
+    let prehash = keccak256(&[b"\x19Ethereum Signed Message:\n32".as_slice(), digest].concat());
+    let (sig, rec) = key
+        .sign_prehash_recoverable(&prehash)
+        .map_err(|e| ApiError::Other(format!("quote signing failed: {e}")))?;
+    let (sig, rec) = normalize_low_s(sig, rec);
+    Ok(format!(
+        "0x{}{:02x}",
+        hex::encode(sig.to_bytes()),
+        rec.to_byte() + 27
+    ))
+}
+
+type RateCache = Option<(Instant, f64)>;
+static EUR_USD: Lazy<Mutex<RateCache>> = Lazy::new(|| Mutex::new(None));
+
+/// USD per EUR from Yahoo (EURUSD=X), cached for a minute.
+async fn eur_usd() -> ApiResult<f64> {
+    let mut cache = EUR_USD.lock().await;
+    if let Some((at, rate)) = *cache {
+        if at.elapsed() < Duration::from_secs(60) {
+            return Ok(rate);
+        }
+    }
+    let body: Value = HTTP
+        .get("https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?range=1d&interval=5m")
+        .send()
+        .await?
+        .json()
+        .await?;
+    let rate = body["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        .as_f64()
+        .filter(|r| r.is_finite() && *r > 0.5 && *r < 2.0)
+        .ok_or_else(|| ApiError::unavailable("No EUR/USD rate right now"))?;
+    *cache = Some((Instant::now(), rate));
+    Ok(rate)
+}
+
+/// The live price of `symbol` in `currency` (USDC or EURC) as a quote TestStockMarket
+/// accepts until `deadline`, signed by the treasury operator key.
+pub async fn signed_quote(symbol: &str, currency: &str) -> ApiResult<Value> {
+    let cfg = crate::config::config();
+    let market = cfg
+        .stock_market_address
+        .clone()
+        .ok_or_else(|| ApiError::unavailable("NEXT_PUBLIC_STOCK_MARKET_ADDRESS is not set"))?;
+    let key = cfg
+        .treasury_secret_key
+        .as_deref()
+        .and_then(|k| hex_decode(k.trim_start_matches("0x")))
+        .and_then(|b| SigningKey::from_slice(&b).ok())
+        .ok_or_else(|| ApiError::unavailable("ARC_TREASURY_SECRET_KEY is missing or invalid"))?;
+    let snapshot = snapshot().await;
+    let symbol = symbol.trim().to_uppercase();
+    let asset = snapshot
+        .assets
+        .iter()
+        .find(|a| a.ticker == symbol)
+        .ok_or_else(|| ApiError::json(axum::http::StatusCode::NOT_FOUND, "Unknown stock"))?;
+    let price = asset
+        .price
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .ok_or_else(|| ApiError::unavailable("No live price for this stock right now"))?;
+    let currency = currency.trim().to_uppercase();
+    let token = crate::config::token_address(&currency)
+        .ok_or_else(|| ApiError::bad_request("currency must be USDC or EURC"))?;
+    let price = if currency == "EURC" {
+        price / eur_usd().await?
+    } else {
+        price
+    };
+    let price_units = (price * 1e6).round() as u128;
+    let deadline = (now_millis() / 1000) as u64 + QUOTE_TTL_SECS;
+    let digest = quote_digest(
+        cfg.arc_chain_id,
+        &market,
+        &token,
+        &symbol,
+        price_units,
+        deadline,
+    )?;
+    Ok(serde_json::json!({
+        "symbol": symbol,
+        "currency": currency,
+        "token": token,
+        "price": price_units.to_string(),
+        "deadline": deadline,
+        "signature": sign_quote(&key, &digest)?,
+        "market": market,
+        "chainId": cfg.arc_chain_id,
+        "session": snapshot.session,
+    }))
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::*;
+    use crate::eth::address_from_signing_key;
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    #[test]
+    fn a_signed_quote_recovers_to_the_signer() {
+        let key = SigningKey::from_slice(&[0x42u8; 32]).unwrap();
+        let digest = quote_digest(
+            5_042_002,
+            "0x53f4cd4d13358a5d8b2e47f0bdc169c7ba9a9911",
+            "0x3600000000000000000000000000000000000000",
+            "GOOGL",
+            285_210_000,
+            1_793_990_000,
+        )
+        .unwrap();
+        let sig = hex_decode(sign_quote(&key, &digest).unwrap().trim_start_matches("0x")).unwrap();
+        let prehash =
+            keccak256(&[b"\x19Ethereum Signed Message:\n32".as_slice(), &digest].concat());
+        let recovered = VerifyingKey::recover_from_prehash(
+            &prehash,
+            &Signature::from_slice(&sig[..64]).unwrap(),
+            RecoveryId::from_byte(sig[64] - 27).unwrap(),
+        )
+        .unwrap();
+        let addr = format!(
+            "0x{}",
+            hex::encode(&keccak256(&recovered.to_encoded_point(false).as_bytes()[1..])[12..])
+        );
+        assert_eq!(
+            addr.to_lowercase(),
+            address_from_signing_key(&key).to_lowercase()
+        );
+        // A USDC price can't be paid in EURC.
+        assert_ne!(
+            digest,
+            quote_digest(
+                5_042_002,
+                "0x53f4cd4d13358a5d8b2e47f0bdc169c7ba9a9911",
+                "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+                "GOOGL",
+                285_210_000,
+                1_793_990_000
+            )
+            .unwrap()
+        );
+        // A different symbol is a different digest, so a GOOGL price can't buy NVDA.
+        assert_ne!(
+            digest,
+            quote_digest(
+                5_042_002,
+                "0x53f4cd4d13358a5d8b2e47f0bdc169c7ba9a9911",
+                "0x3600000000000000000000000000000000000000",
+                "NVDA",
+                285_210_000,
+                1_793_990_000
+            )
+            .unwrap()
+        );
     }
 }

@@ -94,6 +94,8 @@ pub struct Config {
     pub arkiv_secret_key: Option<String>,
     /// Bee node or gateway that epoch bundles upload to. Unset: no Swarm archive.
     pub swarm_bee_url: Option<String>,
+    /// TestStockMarket on Arc testnet; quotes are signed for this address.
+    pub stock_market_address: Option<String>,
     pub swarm_batch_id: Option<String>,
     /// `ARKIV_RPC_URL`, with `ARKIV_ACCESS_KEY` appended as the path when set.
     pub arkiv_rpc: String,
@@ -193,6 +195,7 @@ impl Config {
             treasury_address: str_var("NEXT_PUBLIC_TREASURY_ADDRESS").unwrap_or_default(),
             arkiv_secret_key: str_var("ARKIV_PRIVATE_KEY"),
             swarm_bee_url: str_var("SWARM_BEE_URL"),
+            stock_market_address: str_var("NEXT_PUBLIC_STOCK_MARKET_ADDRESS"),
             swarm_batch_id: str_var("SWARM_BATCH_ID"),
             arkiv_rpc: {
                 let base = str_var("ARKIV_RPC_URL")

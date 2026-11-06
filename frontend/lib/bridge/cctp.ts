@@ -1,8 +1,10 @@
-import { BridgeKit } from '@circle-fin/bridge-kit';
-import { createViemAdapterFromProvider } from '@circle-fin/adapter-viem-v2';
-import type { EIP1193Provider } from 'viem';
+import { BridgeKit } from "@circle-fin/bridge-kit";
+import { createViemAdapterFromProvider } from "@circle-fin/adapter-viem-v2";
+import type { EIP1193Provider } from "viem";
 
-export type BridgeDirection = 'in' | 'out';
+export type BridgeDirection = "in" | "out";
+/** Where `out` can send to: CCTP chains where Circle's Forwarder pays the destination mint. */
+export type OutChain = "Base_Sepolia" | "Arbitrum_Sepolia" | "Ethereum_Sepolia";
 
 export interface BridgeOutcome {
   burnTx: string | null;
@@ -15,10 +17,14 @@ export async function bridgeUsdc(
   amount: string,
   direction: BridgeDirection,
   onStep: (name: string) => void,
+  dest: OutChain = "Base_Sepolia",
 ): Promise<BridgeOutcome> {
-  const [from, to] = direction === 'in' ? (['Base_Sepolia', 'Arc_Testnet'] as const) : (['Arc_Testnet', 'Base_Sepolia'] as const);
+  const [from, to] =
+    direction === "in"
+      ? (["Base_Sepolia", "Arc_Testnet"] as const)
+      : (["Arc_Testnet", dest] as const);
   const kit = new BridgeKit();
-  kit.on('*', (event: { method?: string }) => {
+  kit.on("*", (event: { method?: string }) => {
     if (event?.method) onStep(event.method);
   });
   const adapter = await createViemAdapterFromProvider({ provider });
@@ -27,10 +33,13 @@ export async function bridgeUsdc(
     to: { recipientAddress: recipient, chain: to, useForwarder: true },
     amount,
   });
-  if (result.state !== 'success') {
-    const failed = result.steps.find((s) => s.state === 'error');
-    throw new Error(`Bridge ${result.state}${failed ? ` at the ${failed.name} step` : ''}`);
+  if (result.state !== "success") {
+    const failed = result.steps.find((s) => s.state === "error");
+    throw new Error(
+      `Bridge ${result.state}${failed ? ` at the ${failed.name} step` : ""}`,
+    );
   }
-  const tx = (name: string) => result.steps.find((s) => s.name.toLowerCase() === name)?.txHash ?? null;
-  return { burnTx: tx('burn'), mintTx: tx('mint') };
+  const tx = (name: string) =>
+    result.steps.find((s) => s.name.toLowerCase() === name)?.txHash ?? null;
+  return { burnTx: tx("burn"), mintTx: tx("mint") };
 }
