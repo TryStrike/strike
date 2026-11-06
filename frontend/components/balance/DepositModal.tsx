@@ -1,20 +1,48 @@
-'use client';
+"use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { erc20Abi, isAddress, parseUnits, formatUnits, type EIP1193Provider } from 'viem';
-import { arcPublicClient, arcWalletClient, readAssetBalance } from '@/lib/arc/client';
-import { Modal } from '@/components/ui/Modal';
-import { Badge, Button, Segmented, glassSelected } from '@/components/ui/kit';
-import { ArrowUpRight, CheckCircle, CircleNotch, WarningCircle } from '@phosphor-icons/react';
-import { useStore } from '@/lib/store';
-import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  erc20Abi,
+  isAddress,
+  parseUnits,
+  formatUnits,
+  type EIP1193Provider,
+} from "viem";
+import {
+  arcPublicClient,
+  arcWalletClient,
+  readAssetBalance,
+} from "@/lib/arc/client";
+import { Modal } from "@/components/ui/Modal";
+import { Badge, Button, Segmented, glassSelected } from "@/components/ui/kit";
+import {
+  ArrowUpRight,
+  CheckCircle,
+  CircleNotch,
+  WarningCircle,
+} from "@phosphor-icons/react";
+import { useStore } from "@/lib/store";
+import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 
-import { useToast } from '@/lib/hooks/useToast';
-import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
-import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
-import { getArcConfig, ARC_ASSETS, explorerTxUrl, explorerAddressUrl, type ArcAsset } from '@/lib/arc/config';
-import { shortenAddress } from '@/lib/utils/address';
-import { calculateFeeAmount, getFeePercentLabel } from '@/lib/fees/platformFee';
+import { useToast } from "@/lib/hooks/useToast";
+import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
+import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
+import {
+  getArcConfig,
+  ARC_ASSETS,
+  explorerTxUrl,
+  explorerAddressUrl,
+  type ArcAsset,
+} from "@/lib/arc/config";
+import { shortenAddress } from "@/lib/utils/address";
+import { calculateFeeAmount, getFeePercentLabel } from "@/lib/fees/platformFee";
+import { GatewayDeposit } from "./GatewayDeposit";
 
 interface DepositModalProps {
   isOpen: boolean;
@@ -41,19 +69,28 @@ const POLL_INTERVAL_MS = 2500;
 const MAX_POLLS = 24;
 
 type DepositPhase =
-  | { kind: 'idle' }
-  | { kind: 'signing' }
+  | { kind: "idle" }
+  | { kind: "signing" }
   | {
-      kind: 'pending';
+      kind: "pending";
       txHash: string;
       confirmations: number | null;
       requiredConfirmations: number;
       note: string;
     }
-  | { kind: 'credited'; txHash: string; amount: number }
-  | { kind: 'failed'; txHash: string | null; retryable: boolean; code: string; message: string };
+  | { kind: "credited"; txHash: string; amount: number }
+  | {
+      kind: "failed";
+      txHash: string | null;
+      retryable: boolean;
+      code: string;
+      message: string;
+    };
 
-type TrackedPhase = Extract<DepositPhase, { kind: 'pending' | 'credited' | 'failed' }>;
+type TrackedPhase = Extract<
+  DepositPhase,
+  { kind: "pending" | "credited" | "failed" }
+>;
 
 interface DepositApiResponse {
   success?: boolean;
@@ -105,51 +142,52 @@ interface PreFlight {
 
 const verifications = new Map<string, VerificationRecord>();
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const decimalPlaces = (value: string): number => {
-  const [, fraction = ''] = value.split('.');
+  const [, fraction = ""] = value.split(".");
   return fraction.length;
 };
 
 function pendingNote(code: string | undefined, status: number): string {
   switch (code) {
-    case 'tx_not_found':
-      return 'Arc has not broadcast the transaction yet — this is normal for a second.';
-    case 'insufficient_confirmations':
-      return 'The deposit is on Arc. More confirmations are needed before it can be credited.';
-    case 'rpc_error':
-      return 'Arc is slow to answer. Retrying the same transaction, nothing was lost.';
-    case 'config_missing':
-      return 'The ledger is temporarily reconfiguring. Your transaction is safe on Arc.';
+    case "tx_not_found":
+      return "Arc has not broadcast the transaction yet — this is normal for a second.";
+    case "insufficient_confirmations":
+      return "The deposit is on Arc. More confirmations are needed before it can be credited.";
+    case "rpc_error":
+      return "Arc is slow to answer. Retrying the same transaction, nothing was lost.";
+    case "config_missing":
+      return "The ledger is temporarily reconfiguring. Your transaction is safe on Arc.";
     default:
       return status === 503
-        ? 'The ledger service is busy. Retrying the same transaction.'
-        : 'Still checking the deposit on Arc.';
+        ? "The ledger service is busy. Retrying the same transaction."
+        : "Still checking the deposit on Arc.";
   }
 }
 
 const TERMINAL_GUIDANCE: Record<string, string> = {
   tx_reverted:
-    'The transfer reverted on Arc, so no USDC left your wallet and nothing was credited. Deposit again — if it reverts a second time, check the explorer link below.',
+    "The transfer reverted on Arc, so no USDC left your wallet and nothing was credited. Deposit again — if it reverts a second time, check the explorer link below.",
   amount_mismatch:
-    'No transfer of at least this amount reached the Strike treasury, so nothing was credited. If you sent less, or sent it somewhere else, deposit the correct amount again; the USDC that did move stays on Arc and is recoverable from the sending wallet.',
+    "No transfer of at least this amount reached the Strike treasury, so nothing was credited. If you sent less, or sent it somewhere else, deposit the correct amount again; the USDC that did move stays on Arc and is recoverable from the sending wallet.",
   sender_mismatch:
-    'This transaction was paid from a different address than the one you are signed in with, so it cannot be credited here. Sign in with the wallet that sent the USDC and check this same transaction again.',
+    "This transaction was paid from a different address than the one you are signed in with, so it cannot be credited here. Sign in with the wallet that sent the USDC and check this same transaction again.",
   credit_refused:
-    'Nothing was credited to your house balance. Check the transaction on the explorer, then deposit again.',
+    "Nothing was credited to your house balance. Check the transaction on the explorer, then deposit again.",
   wallet_banned:
-    'This wallet is blocked from the platform, so the deposit cannot be credited. The USDC already sent to Arc stays in the treasury and needs support to recover it.',
+    "This wallet is blocked from the platform, so the deposit cannot be credited. The USDC already sent to Arc stays in the treasury and needs support to recover it.",
   not_signed_in:
-    'This browser is not signed in to the ledger, so the deposit could not be attributed. Reload Strike and press Check again — the same transaction is retried, so it cannot be credited twice.',
+    "This browser is not signed in to the ledger, so the deposit could not be attributed. Reload Strike and press Check again — the same transaction is retried, so it cannot be credited twice.",
 };
 
 const STILL_PENDING_GUIDANCE =
-  'Your deposit is still valid on Arc — it has just not been credited yet. Keep this window or press Check again; the same transaction is retried, so it can never be credited twice.';
+  "Your deposit is still valid on Arc — it has just not been credited yet. Keep this window or press Check again; the same transaction is retried, so it can never be credited twice.";
 
 async function runVerification(
   record: VerificationRecord,
-  input: VerificationInput
+  input: VerificationInput,
 ): Promise<void> {
   const publish = (phase: TrackedPhase) => {
     record.phase = phase;
@@ -164,10 +202,10 @@ async function runVerification(
     let status = 0;
     let body: DepositApiResponse | null = null;
     try {
-      const response = await fetch('/api/balance/deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
+      const response = await fetch("/api/balance/deposit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           userAddress: input.userAddress,
           amount: input.amount,
@@ -176,22 +214,39 @@ async function runVerification(
         }),
       });
       status = response.status;
-      body = (await response.json().catch(() => null)) as DepositApiResponse | null;
+      body = (await response
+        .json()
+        .catch(() => null)) as DepositApiResponse | null;
     } catch (err) {
-      console.error('[deposit] credit request failed, will retry', record.txHash, err);
+      console.error(
+        "[deposit] credit request failed, will retry",
+        record.txHash,
+        err,
+      );
       status = 0;
       body = null;
     }
 
-    if ((status === 200 && body?.success) || body?.duplicate || status === 409) {
+    if (
+      (status === 200 && body?.success) ||
+      body?.duplicate ||
+      status === 409
+    ) {
       const credit: ServerCredit = {
-        fee: typeof body?.fee === 'number' ? body.fee : undefined,
-        netCredited: typeof body?.netCredited === 'number' ? body.netCredited : undefined,
-        newBalance: typeof body?.newBalance === 'number' ? body.newBalance : undefined,
-        creditedAt: typeof body?.creditedAt === 'string' ? body.creditedAt : undefined,
+        fee: typeof body?.fee === "number" ? body.fee : undefined,
+        netCredited:
+          typeof body?.netCredited === "number" ? body.netCredited : undefined,
+        newBalance:
+          typeof body?.newBalance === "number" ? body.newBalance : undefined,
+        creditedAt:
+          typeof body?.creditedAt === "string" ? body.creditedAt : undefined,
       };
       record.credit = credit;
-      publish({ kind: 'credited', txHash: record.txHash, amount: input.amount });
+      publish({
+        kind: "credited",
+        txHash: record.txHash,
+        amount: input.amount,
+      });
       input.onCredited(record.txHash, credit);
       return;
     }
@@ -200,23 +255,28 @@ async function runVerification(
       sessionRefreshed = true;
       await ensureBalanceSession();
       publish({
-        kind: 'pending',
+        kind: "pending",
         txHash: record.txHash,
         confirmations,
         requiredConfirmations,
-        note: 'Reconnecting this browser to the ledger. The same transaction is being checked again.',
+        note: "Reconnecting this browser to the ledger. The same transaction is being checked again.",
       });
       continue;
     }
 
-    if (typeof body?.confirmations === 'number') confirmations = body.confirmations;
-    if (typeof body?.requiredConfirmations === 'number') {
+    if (typeof body?.confirmations === "number")
+      confirmations = body.confirmations;
+    if (typeof body?.requiredConfirmations === "number") {
       requiredConfirmations = body.requiredConfirmations;
     }
 
-    if (body?.retryable === true || status === 0 || (status >= 500 && status < 600)) {
+    if (
+      body?.retryable === true ||
+      status === 0 ||
+      (status >= 500 && status < 600)
+    ) {
       publish({
-        kind: 'pending',
+        kind: "pending",
         txHash: record.txHash,
         confirmations,
         requiredConfirmations,
@@ -227,23 +287,27 @@ async function runVerification(
     }
 
     publish({
-      kind: 'failed',
+      kind: "failed",
       txHash: record.txHash,
       retryable: false,
       code:
         body?.code ||
-        (status === 403 ? 'wallet_banned' : status === 401 ? 'not_signed_in' : 'credit_refused'),
-      message: body?.error || 'The deposit could not be credited.',
+        (status === 403
+          ? "wallet_banned"
+          : status === 401
+            ? "not_signed_in"
+            : "credit_refused"),
+      message: body?.error || "The deposit could not be credited.",
     });
     return;
   }
 
   publish({
-    kind: 'failed',
+    kind: "failed",
     txHash: record.txHash,
     retryable: true,
-    code: 'still_pending',
-    message: 'Still waiting for this deposit to be credited on Arc.',
+    code: "still_pending",
+    message: "Still waiting for this deposit to be credited on Arc.",
   });
   verifications.delete(record.txHash);
 }
@@ -254,41 +318,54 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   onSuccess,
   onError,
 }) => {
-  const address = useStore(state => state.address);
-  const fetchBalance = useStore(state => state.fetchBalance);
-  const setSelectedCurrency = useStore(state => state.setSelectedCurrency);
-  const userTier = useStore(state => state.userTier);
+  const address = useStore((state) => state.address);
+  const fetchBalance = useStore((state) => state.fetchBalance);
+  const setSelectedCurrency = useStore((state) => state.setSelectedCurrency);
+  const userTier = useStore((state) => state.userTier);
   const toast = useToast();
 
   const { data: walletClient } = useWalletClient();
   const { connector, chainId: accountChainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
 
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<DepositPhase>({ kind: 'idle' });
+  const [phase, setPhase] = useState<DepositPhase>({ kind: "idle" });
   const [walletBalance, setWalletBalance] = useState(0);
-  const [balanceState, setBalanceState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [balanceState, setBalanceState] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
   const [gasFee, setGasFee] = useState<number | null>(null);
-  const [feeState, setFeeState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [feeState, setFeeState] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
   const [precheck, setPrecheck] = useState<PreFlight | null>(null);
   const [recheckKey, setRecheckKey] = useState(0);
+  const [source, setSource] = useState<"wallet" | "gateway">("wallet");
 
   const config = useMemo(() => getArcConfig(), []);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
   const asset: ArcAsset = resolveHouseLedgerCurrency({ selectedCurrency });
   const assetConfig = config.assets[asset];
+  // Gateway moves USDC only.
+  const fromGateway = source === "gateway" && asset === "USDC";
   const quickAmounts = [1, 5, 10, 25];
   const gasReserve = gasFee == null ? null : gasFee + GAS_BUFFER;
 
-  const treasuryConfigured = isAddress(config.treasuryAddress || '');
+  const treasuryConfigured = isAddress(config.treasuryAddress || "");
 
-  const connectedChainId = typeof accountChainId === 'number' ? accountChainId : null;
+  const connectedChainId =
+    typeof accountChainId === "number" ? accountChainId : null;
 
-  const wrongNetwork = connectedChainId !== null && connectedChainId !== config.chainId;
+  const wrongNetwork =
+    connectedChainId !== null && connectedChainId !== config.chainId;
 
   const activeRecord = useRef<VerificationRecord | null>(null);
-  const submitted = useRef<{ txHash: string; amount: number; userAddress: string } | null>(null);
+  const submitted = useRef<{
+    txHash: string;
+    amount: number;
+    userAddress: string;
+  } | null>(null);
 
   const handlePhase = useCallback((next: TrackedPhase) => setPhase(next), []);
 
@@ -299,11 +376,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         record = {
           txHash,
           phase: {
-            kind: 'pending',
+            kind: "pending",
             txHash,
             confirmations: null,
             requiredConfirmations: REQUIRED_CONFIRMATIONS,
-            note: 'Submitting the deposit for on-chain verification…',
+            note: "Submitting the deposit for on-chain verification…",
           },
           credit: null,
           listeners: new Set(),
@@ -313,12 +390,13 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       }
 
       const previous = activeRecord.current;
-      if (previous && previous !== record) previous.listeners.delete(handlePhase);
+      if (previous && previous !== record)
+        previous.listeners.delete(handlePhase);
       activeRecord.current = record;
       record.listeners.add(handlePhase);
       setPhase(record.phase);
 
-      if (record.phase.kind === 'credited' && !record.running) {
+      if (record.phase.kind === "credited" && !record.running) {
         input.onCredited(txHash, record.credit ?? undefined);
         return;
       }
@@ -330,7 +408,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         });
       }
     },
-    [handlePhase]
+    [handlePhase],
   );
 
   useEffect(
@@ -338,33 +416,33 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       const record = activeRecord.current;
       if (record) record.listeners.delete(handlePhase);
     },
-    [handlePhase]
+    [handlePhase],
   );
 
   const [wasOpen, setWasOpen] = useState(isOpen);
   if (wasOpen !== isOpen) {
     setWasOpen(isOpen);
-    if (isOpen && phase.kind === 'credited') setPhase({ kind: 'idle' });
+    if (isOpen && phase.kind === "credited") setPhase({ kind: "idle" });
   }
 
   useEffect(() => {
     if (!isOpen || !address) return;
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- a fetch effect marks its own request as loading
-    setBalanceState('loading');
+    setBalanceState("loading");
 
     (async () => {
       try {
         const balance = await readAssetBalance(address, asset);
         if (!cancelled) {
           setWalletBalance(balance);
-          setBalanceState('ready');
+          setBalanceState("ready");
         }
       } catch (err) {
-        console.error('Failed to read wallet balance:', err);
+        console.error("Failed to read wallet balance:", err);
         if (!cancelled) {
           setWalletBalance(0);
-          setBalanceState('error');
+          setBalanceState("error");
         }
       }
     })();
@@ -372,7 +450,16 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, address, asset, assetConfig, config.chainId, config.name, config.rpcEndpoint, recheckKey]);
+  }, [
+    isOpen,
+    address,
+    asset,
+    assetConfig,
+    config.chainId,
+    config.name,
+    config.rpcEndpoint,
+    recheckKey,
+  ]);
 
   const estimateGasFee = useCallback(
     async (wholeTokens: number): Promise<number> => {
@@ -382,35 +469,38 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           client.estimateContractGas({
             address: assetConfig.address,
             abi: erc20Abi,
-            functionName: 'transfer',
-            args: [config.treasuryAddress as `0x${string}`, parseUnits(wholeTokens.toString(), assetConfig.decimals)],
+            functionName: "transfer",
+            args: [
+              config.treasuryAddress as `0x${string}`,
+              parseUnits(wholeTokens.toString(), assetConfig.decimals),
+            ],
             account: address as `0x${string}`,
           }),
           client.getGasPrice(),
         ]);
         return Number(formatUnits(gas * gasPrice, 18));
       } catch (err) {
-        console.warn('[deposit] gas estimate failed, reserving 0.01 USDC', err);
+        console.warn("[deposit] gas estimate failed, reserving 0.01 USDC", err);
         return 0.01;
       }
     },
-    [address, assetConfig, config.treasuryAddress]
+    [address, assetConfig, config.treasuryAddress],
   );
 
   useEffect(() => {
-    if (!isOpen || balanceState !== 'ready' || walletBalance <= 0) {
+    if (!isOpen || balanceState !== "ready" || walletBalance <= 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- a fetch effect resets its result when its inputs go away
-      setFeeState('loading');
+      setFeeState("loading");
       setGasFee(null);
       return;
     }
     let cancelled = false;
-    setFeeState('loading');
+    setFeeState("loading");
     void (async () => {
       const fee = await estimateGasFee(walletBalance);
       if (cancelled) return;
       setGasFee(fee);
-      setFeeState('ready');
+      setFeeState("ready");
     })();
     return () => {
       cancelled = true;
@@ -428,13 +518,14 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       try {
         const response = await fetch(
           `/api/arc/deposit-precheck?address=${encodeURIComponent(address)}`,
-          { credentials: 'include' }
+          { credentials: "include" },
         );
         const body = await response.json().catch(() => null);
-        if (!response.ok) console.error(`[deposit] precheck answered ${response.status}`, body);
+        if (!response.ok)
+          console.error(`[deposit] precheck answered ${response.status}`, body);
         if (!cancelled) setPrecheck(response.ok && body ? body : null);
       } catch (err) {
-        console.error('[deposit] precheck failed', err);
+        console.error("[deposit] precheck failed", err);
         if (!cancelled) setPrecheck(null);
       }
     })();
@@ -449,15 +540,17 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   const netPreview = hasAmount ? parsedAmount - feePreview : 0;
 
   const validate = (value: string): string | null => {
-    if (!value.trim()) return 'Enter an amount';
+    if (!value.trim()) return "Enter an amount";
     const parsed = parseFloat(value);
-    if (!Number.isFinite(parsed) || parsed <= 0) return 'Amount must be greater than zero';
+    if (!Number.isFinite(parsed) || parsed <= 0)
+      return "Amount must be greater than zero";
     if (decimalPlaces(value) > assetConfig.decimals) {
       return `${asset} supports at most ${assetConfig.decimals} decimal places`;
     }
-    if (balanceState === 'ready' && parsed > walletBalance) return `Insufficient ${asset} balance`;
+    if (balanceState === "ready" && parsed > walletBalance)
+      return `Insufficient ${asset} balance`;
     if (
-      balanceState === 'ready' &&
+      balanceState === "ready" &&
       gasReserve != null &&
       parsed + gasReserve > walletBalance + FLOAT_EPSILON
     ) {
@@ -469,24 +562,29 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   const preFlightError = (): string | null => {
     const amountError = validate(amount);
     if (amountError) return amountError;
-    if (!address) return 'Connect a wallet first';
-    if (!walletClient && !connector) return 'Wallet is not connected';
+    if (!address) return "Connect a wallet first";
+    if (!walletClient && !connector) return "Wallet is not connected";
     if (wrongNetwork) {
       return `Your wallet is on chain ${connectedChainId}, not ${config.name} (${config.chainId}). Switch before depositing`;
     }
     if (!treasuryConfigured) {
-      return 'Deposits are unavailable: no Strike treasury address is configured';
+      return "Deposits are unavailable: no Strike treasury address is configured";
     }
-    if (precheck?.banned === true) return 'This wallet is banned from the platform.';
-    if (precheck && precheck.ready === false && precheck.code === 'treasury_not_configured') {
-      return 'Deposits are unavailable: the treasury address on the server is not configured';
+    if (precheck?.banned === true)
+      return "This wallet is banned from the platform.";
+    if (
+      precheck &&
+      precheck.ready === false &&
+      precheck.code === "treasury_not_configured"
+    ) {
+      return "Deposits are unavailable: the treasury address on the server is not configured";
     }
     return null;
   };
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
-    if (value !== '' && !/^\d*\.?\d*$/.test(value)) return;
+    if (value !== "" && !/^\d*\.?\d*$/.test(value)) return;
     setAmount(value);
     setError(null);
   };
@@ -510,35 +608,49 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const handleAssetChange = (next: ArcAsset) => {
     setSelectedCurrency(next);
-    setAmount('');
+    setAmount("");
     setError(null);
   };
 
   const switchToArc = useCallback(async () => {
     try {
       if (connector) await switchChainAsync({ chainId: config.chainId });
-      else setError(`Add ${config.name} (chain ${config.chainId}) to your wallet and try again`);
+      else
+        setError(
+          `Add ${config.name} (chain ${config.chainId}) to your wallet and try again`,
+        );
     } catch (err) {
-      console.warn('[deposit] chain switch rejected or failed', err);
+      console.warn("[deposit] chain switch rejected or failed", err);
       setError(`Switch your wallet to ${config.name} and try again`);
     }
   }, [config, connector, switchChainAsync]);
 
-  const resolveWalletProvider = useCallback(async (): Promise<EIP1193Provider> => {
-    if (connector) {
-      return (await connector.getProvider()) as EIP1193Provider;
-    }
-    if (walletClient) {
-      throw new Error('This wallet does not expose a signing provider. Reconnect and try again.');
-    }
-    throw new Error('Wallet is not connected');
-  }, [connector, walletClient]);
+  const resolveWalletProvider =
+    useCallback(async (): Promise<EIP1193Provider> => {
+      if (connector) {
+        return (await connector.getProvider()) as EIP1193Provider;
+      }
+      if (walletClient) {
+        throw new Error(
+          "This wallet does not expose a signing provider. Reconnect and try again.",
+        );
+      }
+      throw new Error("Wallet is not connected");
+    }, [connector, walletClient]);
 
   const markCredited = useCallback(
-    async (txHash: string, creditedAmount: number, walletAddress: string, credit?: ServerCredit) => {
-      await Promise.all([fetchBalance(walletAddress), useStore.getState().refreshWalletBalance()]);
+    async (
+      txHash: string,
+      creditedAmount: number,
+      walletAddress: string,
+      credit?: ServerCredit,
+    ) => {
+      await Promise.all([
+        fetchBalance(walletAddress),
+        useStore.getState().refreshWalletBalance(),
+      ]);
       toast.success(
-        `Successfully deposited ${creditedAmount.toFixed(4)} ${asset}! Balance updated.`
+        `Successfully deposited ${creditedAmount.toFixed(4)} ${asset}! Balance updated.`,
       );
       onSuccess?.(creditedAmount, txHash, {
         txHash,
@@ -547,13 +659,13 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         explorerUrl: explorerTxUrl(txHash),
         ...(credit ?? {}),
       });
-      setAmount('');
+      setAmount("");
       onClose();
     },
-    [asset, config, fetchBalance, onClose, onSuccess, toast]
+    [asset, config, fetchBalance, onClose, onSuccess, toast],
   );
 
-  const isBusy = phase.kind === 'signing' || phase.kind === 'pending';
+  const isBusy = phase.kind === "signing" || phase.kind === "pending";
 
   const handleDeposit = async () => {
     if (isBusy) return;
@@ -566,10 +678,13 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     const depositAmount = parseFloat(amount);
     const walletAddress = address as string;
     setError(null);
-    setPhase({ kind: 'signing' });
+    setPhase({ kind: "signing" });
 
     try {
-      const wallet = arcWalletClient(await resolveWalletProvider(), walletAddress as `0x${string}`);
+      const wallet = arcWalletClient(
+        await resolveWalletProvider(),
+        walletAddress as `0x${string}`,
+      );
 
       if ((await wallet.getChainId()) !== config.chainId) {
         await switchToArc();
@@ -581,21 +696,29 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       const [from] = await wallet.getAddresses();
       if (!from || from.toLowerCase() !== walletAddress.toLowerCase()) {
         throw new Error(
-          `The wallet asked to sign (${shortenAddress(from ?? 'none')}) is not the account you are signed in with (${shortenAddress(
-            walletAddress
-          )}). Connect the right account first.`
+          `The wallet asked to sign (${shortenAddress(from ?? "none")}) is not the account you are signed in with (${shortenAddress(
+            walletAddress,
+          )}). Connect the right account first.`,
         );
       }
 
       const txHash = await wallet.writeContract({
         address: assetConfig.address,
         abi: erc20Abi,
-        functionName: 'transfer',
-        args: [config.treasuryAddress as `0x${string}`, parseUnits(amount, assetConfig.decimals)],
+        functionName: "transfer",
+        args: [
+          config.treasuryAddress as `0x${string}`,
+          parseUnits(amount, assetConfig.decimals),
+        ],
       });
-      if (!txHash) throw new Error('The wallet returned a transaction without a hash');
+      if (!txHash)
+        throw new Error("The wallet returned a transaction without a hash");
 
-      submitted.current = { txHash, amount: depositAmount, userAddress: walletAddress };
+      submitted.current = {
+        txHash,
+        amount: depositAmount,
+        userAddress: walletAddress,
+      };
       startVerification(txHash, {
         userAddress: walletAddress,
         amount: depositAmount,
@@ -606,13 +729,39 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       });
     } catch (err) {
       const message = walletErrorText(err);
-      console.error('Deposit error:', err);
-      setPhase({ kind: 'idle' });
+      console.error("Deposit error:", err);
+      setPhase({ kind: "idle" });
       setError(message);
       toast.error(message);
       onError?.(err instanceof Error ? err : new Error(message));
     }
   };
+
+  const handleGatewayMinted = (txHash: string) => {
+    const walletAddress = address as string;
+    const depositAmount = parseFloat(amount);
+    submitted.current = {
+      txHash,
+      amount: depositAmount,
+      userAddress: walletAddress,
+    };
+    startVerification(txHash, {
+      userAddress: walletAddress,
+      amount: depositAmount,
+      currency: asset,
+      onCredited: (hash, credit) => {
+        void markCredited(hash, depositAmount, walletAddress, credit);
+      },
+    });
+  };
+
+  const handleGatewayError = useCallback(
+    (message: string) => {
+      setError(message);
+      toast.error(message);
+    },
+    [toast],
+  );
 
   const recheckSameTx = () => {
     const last = submitted.current;
@@ -629,10 +778,14 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const chip = (on: boolean) =>
     `h-9 rounded-full font-jet text-[13px] transition-colors disabled:opacity-40 ${
-      on ? glassSelected : 'bg-ink/[0.04] text-muted hover:text-ink'
+      on ? glassSelected : "bg-ink/[0.04] text-muted hover:text-ink"
     }`;
 
-  const summaryRow = (label: string, value: React.ReactNode, hint?: React.ReactNode) => (
+  const summaryRow = (
+    label: string,
+    value: React.ReactNode,
+    hint?: React.ReactNode,
+  ) => (
     <div className="flex items-baseline justify-between gap-3">
       <dt className="shrink-0 text-subtle">{label}</dt>
       <dd className="min-w-0 truncate text-right">
@@ -647,10 +800,12 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       title={`Deposit ${asset}`}
-      showCloseButton={phase.kind !== 'signing'}
+      showCloseButton={phase.kind !== "signing"}
     >
       <p className="-mt-4 mb-6 text-[15px] text-muted">
-        Move USDC from your wallet to your trading balance.
+        {fromGateway
+          ? "Spend your Circle Gateway balance from any chain. It lands on Arc in seconds."
+          : `Move ${asset} from your Arc wallet to your trading balance.`}
       </p>
       {config.chainId === 5042002 && (
         <a
@@ -659,25 +814,42 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           rel="noopener noreferrer"
           className="-mt-3 mb-6 inline-flex items-center gap-1 text-sm font-medium text-up hover:underline"
         >
-          Need test USDC? Get it free from Circle&apos;s faucet <ArrowUpRight size={14} />
+          Need test USDC? Get it free from Circle&apos;s faucet{" "}
+          <ArrowUpRight size={14} />
         </a>
       )}
 
-
       {ARC_ASSETS.length > 1 && (
         <Segmented
-          className="mb-4"
-          options={ARC_ASSETS.map(token => ({ value: token, label: token }))}
+          className="mb-3"
+          options={ARC_ASSETS.map((token) => ({ value: token, label: token }))}
           value={asset}
           onChange={handleAssetChange}
           disabled={isBusy}
         />
       )}
+      {asset === "USDC" && (
+        <Segmented
+          className="mb-4"
+          options={[
+            { value: "wallet", label: "From Arc wallet" },
+            { value: "gateway", label: "Gateway · any chain" },
+          ]}
+          value={source}
+          onChange={(next) => {
+            setSource(next as "wallet" | "gateway");
+            setError(null);
+          }}
+          disabled={isBusy}
+        />
+      )}
 
-      <label htmlFor="deposit-amount" className="sr-only">Amount to deposit</label>
+      <label htmlFor="deposit-amount" className="sr-only">
+        Amount to deposit
+      </label>
       <div
         className={`flex h-16 items-center rounded-2xl bg-white px-5 ring-1 ring-inset transition-shadow focus-within:ring-ink ${
-          error ? 'ring-down' : 'ring-line'
+          error ? "ring-down" : "ring-line"
         }`}
       >
         <input
@@ -695,14 +867,15 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       </div>
 
       <div className="mt-3 grid grid-cols-5 gap-2">
-        {quickAmounts.map(quickAmount => (
+        {quickAmounts.map((quickAmount) => (
           <button
             key={quickAmount}
             type="button"
             onClick={() => handleQuickSelect(quickAmount)}
             disabled={
               isBusy ||
-              (balanceState === 'ready' &&
+              (!fromGateway &&
+                balanceState === "ready" &&
                 gasReserve != null &&
                 quickAmount + gasReserve > walletBalance + FLOAT_EPSILON)
             }
@@ -714,14 +887,14 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         <button
           type="button"
           onClick={handleMaxClick}
-          disabled={isBusy || walletBalance <= 0}
+          disabled={isBusy || fromGateway || walletBalance <= 0}
           className={chip(false)}
         >
           Max
         </button>
       </div>
 
-      {wrongNetwork && (
+      {wrongNetwork && !fromGateway && (
         <div
           role="alert"
           className="mt-5 flex items-start gap-2 rounded-2xl bg-down-soft px-3.5 py-3 text-[13px]"
@@ -732,9 +905,9 @@ export const DepositModal: React.FC<DepositModalProps> = ({
               Your wallet is not on {config.name}
             </p>
             <p className="mt-1 text-muted">
-              It is on chain {connectedChainId}; Strike only credits deposits made on{' '}
-              {config.name} (chain {config.chainId}). Switch first — do not sign on the other
-              network.
+              It is on chain {connectedChainId}; Strike only credits deposits
+              made on {config.name} (chain {config.chainId}). Switch first — do
+              not sign on the other network.
             </p>
             <Button
               variant="secondary"
@@ -749,86 +922,108 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         </div>
       )}
 
+      {fromGateway && (
+        <GatewayDeposit
+          amount={hasAmount ? amount : ""}
+          disabled={isBusy || phase.kind === "credited"}
+          onMinted={handleGatewayMinted}
+          onError={handleGatewayError}
+        />
+      )}
+
       <dl className="mt-6 space-y-2 font-jet text-[13px]">
         {summaryRow(
-          'You send',
-          hasAmount ? `${parsedAmount.toFixed(4)} ${asset}` : `— ${asset}`
+          "You send",
+          hasAmount ? `${parsedAmount.toFixed(4)} ${asset}` : `— ${asset}`,
         )}
-        {summaryRow('Token', `${asset} · ${assetConfig.decimals} decimals`)}
-        {summaryRow('Network', `${config.name} · ${config.chainId}`)}
-        {summaryRow(
-          'Sending to',
-          treasuryConfigured ? shortenAddress(config.treasuryAddress) : 'not configured',
-          treasuryConfigured ? (
-            <a
-              href={explorerAddressUrl(config.treasuryAddress)}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="View treasury on explorer"
-              className="text-up hover:underline"
-            >
-              <ArrowUpRight size={12} className="inline" />
-            </a>
-          ) : undefined
-        )}
-        {summaryRow(
-          'Wallet',
-          balanceState === 'loading'
-            ? `reading…`
-            : `${walletBalance.toFixed(4)} ${asset}`
-        )}
-        {summaryRow(
-          'Network fee (est.)',
-          balanceState === 'error'
-            ? 'unavailable'
-            : feeState === 'loading' || gasFee == null
-              ? 'checking…'
-              : `~${gasFee.toFixed(4)} ${asset}`,
-          gasFee != null && balanceState === 'ready' ? (
-            <span>· keep {gasReserve?.toFixed(4)} spare</span>
-          ) : undefined
-        )}
+        {!fromGateway &&
+          summaryRow(
+            "Wallet",
+            balanceState === "loading"
+              ? `reading…`
+              : `${walletBalance.toFixed(4)} ${asset}`,
+          )}
+        {!fromGateway &&
+          summaryRow(
+            "Network fee (est.)",
+            balanceState === "error"
+              ? "unavailable"
+              : feeState === "loading" || gasFee == null
+                ? "checking…"
+                : `~${gasFee.toFixed(4)} ${asset}`,
+          )}
         {summaryRow(
           `Credited after ${getFeePercentLabel(userTier)} fee`,
-          hasAmount ? `${netPreview.toFixed(4)} ${asset}` : `0.0000 ${asset}`
+          hasAmount ? `${netPreview.toFixed(4)} ${asset}` : `0.0000 ${asset}`,
         )}
-        <div className="flex items-center justify-between gap-3 pt-1">
-          <dt className="text-subtle">Pre-flight</dt>
-          <dd>
-            {precheck === null ? (
-              <Badge tone="neutral">checks unavailable</Badge>
-            ) : precheck.banned === true ? (
-              <Badge tone="down">wallet banned</Badge>
-            ) : precheck.ready === true ? (
-              <Badge tone="up">ready</Badge>
-            ) : (
-              <Badge tone="down">{String(precheck.code ?? 'not ready')}</Badge>
-            )}
-            <button
-              type="button"
-              onClick={() => setRecheckKey((k) => k + 1)}
-              disabled={isBusy}
-              className="ml-2 font-jet text-[12px] text-up hover:underline disabled:opacity-40"
-            >
-              Re-check
-            </button>
-          </dd>
-        </div>
       </dl>
+      <details className="mt-3 font-jet text-[13px]">
+        <summary className="cursor-pointer text-subtle">Details</summary>
+        <dl className="mt-2 space-y-2">
+          {summaryRow("Token", `${asset} · ${assetConfig.decimals} decimals`)}
+          {summaryRow("Network", `${config.name} · ${config.chainId}`)}
+          {summaryRow(
+            "Sending to",
+            treasuryConfigured
+              ? shortenAddress(config.treasuryAddress)
+              : "not configured",
+            treasuryConfigured ? (
+              <a
+                href={explorerAddressUrl(config.treasuryAddress)}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="View treasury on explorer"
+                className="text-up hover:underline"
+              >
+                <ArrowUpRight size={12} className="inline" />
+              </a>
+            ) : undefined,
+          )}
+          <div className="flex items-center justify-between gap-3 pt-1">
+            <dt className="text-subtle">Pre-flight</dt>
+            <dd>
+              {precheck === null ? (
+                <Badge tone="neutral">checks unavailable</Badge>
+              ) : precheck.banned === true ? (
+                <Badge tone="down">wallet banned</Badge>
+              ) : precheck.ready === true ? (
+                <Badge tone="up">ready</Badge>
+              ) : (
+                <Badge tone="down">
+                  {String(precheck.code ?? "not ready")}
+                </Badge>
+              )}
+              <button
+                type="button"
+                onClick={() => setRecheckKey((k) => k + 1)}
+                disabled={isBusy}
+                className="ml-2 font-jet text-[12px] text-up hover:underline disabled:opacity-40"
+              >
+                Re-check
+              </button>
+            </dd>
+          </div>
+        </dl>
+      </details>
 
-      {phase.kind === 'signing' && (
+      {phase.kind === "signing" && (
         <div
           role="status"
           aria-live="polite"
           className="mt-5 flex items-center gap-2 rounded-2xl bg-surface px-3.5 py-3 font-jet text-[13px]"
         >
           <CircleNotch size={16} className="animate-spin text-up" />
-          Confirm the USDC transfer in your wallet — nothing is credited until Arc shows it.
+          Confirm the USDC transfer in your wallet — nothing is credited until
+          Arc shows it.
         </div>
       )}
 
-      {phase.kind === 'pending' && (
-        <div role="status" aria-live="polite" className="mt-5 rounded-2xl bg-surface px-3.5 py-3">
+      {phase.kind === "pending" && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-5 rounded-2xl bg-surface px-3.5 py-3"
+        >
           <div className="flex items-center gap-2 font-jet text-[13px] font-semibold">
             <CircleNotch size={16} className="animate-spin text-up" />
             Verifying your deposit
@@ -840,14 +1035,17 @@ export const DepositModal: React.FC<DepositModalProps> = ({
             </li>
             <li className="flex items-center gap-1.5">
               <CircleNotch size={13} className="animate-spin text-up" />
-              Waiting for confirmations — {Math.min(phase.confirmations ?? 0, phase.requiredConfirmations)}/
+              Waiting for confirmations —{" "}
+              {Math.min(phase.confirmations ?? 0, phase.requiredConfirmations)}/
               {phase.requiredConfirmations}
             </li>
             <li className="flex items-center gap-1.5 text-faint">
               <span aria-hidden>○</span> Credited to your house balance
             </li>
           </ol>
-          <p className="mt-2 text-[12px] leading-relaxed text-subtle">{phase.note}</p>
+          <p className="mt-2 text-[12px] leading-relaxed text-subtle">
+            {phase.note}
+          </p>
           {phase.txHash && (
             <a
               href={explorerTxUrl(phase.txHash)}
@@ -855,21 +1053,23 @@ export const DepositModal: React.FC<DepositModalProps> = ({
               rel="noopener noreferrer"
               className="mt-2 inline-flex items-center gap-1 font-jet text-[12px] text-up hover:underline"
             >
-              Verify {shortenAddress(phase.txHash, 6)} on explorer <ArrowUpRight size={12} />
+              Verify {shortenAddress(phase.txHash, 6)} on explorer{" "}
+              <ArrowUpRight size={12} />
             </a>
           )}
         </div>
       )}
 
-      {phase.kind === 'credited' && (
+      {phase.kind === "credited" && (
         <div role="status" className="mt-5 rounded-2xl bg-up-soft px-3.5 py-3">
           <div className="flex items-center gap-2 font-jet text-[13px] font-semibold text-up">
             <CheckCircle size={16} weight="fill" />
             Credited on Arc
           </div>
           <p className="mt-1 text-[12px] leading-relaxed text-muted">
-            {phase.amount.toFixed(4)} {asset} paid into {shortenAddress(config.treasuryAddress)}{' '}
-            and credited to your house balance. Transaction{' '}
+            {phase.amount.toFixed(4)} {asset} paid into{" "}
+            {shortenAddress(config.treasuryAddress)} and credited to your house
+            balance. Transaction{" "}
             <a
               href={explorerTxUrl(phase.txHash)}
               target="_blank"
@@ -883,19 +1083,22 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         </div>
       )}
 
-      {phase.kind === 'failed' && (
+      {phase.kind === "failed" && (
         <div role="alert" className="mt-5 rounded-2xl bg-down-soft px-3.5 py-3">
           <div className="flex items-start gap-2">
             <WarningCircle size={16} className="mt-0.5 shrink-0 text-down" />
             <div className="min-w-0">
               <p className="font-jet text-[13px] font-semibold text-down">
-                {phase.retryable ? 'Not credited yet' : 'Deposit rejected'}
+                {phase.retryable ? "Not credited yet" : "Deposit rejected"}
               </p>
-              <p className="mt-1 text-[12px] leading-relaxed text-muted">{phase.message}</p>
+              <p className="mt-1 text-[12px] leading-relaxed text-muted">
+                {phase.message}
+              </p>
               <p className="mt-1.5 text-[12px] leading-relaxed text-ink">
                 {phase.retryable
                   ? STILL_PENDING_GUIDANCE
-                  : TERMINAL_GUIDANCE[phase.code] || TERMINAL_GUIDANCE.credit_refused}
+                  : TERMINAL_GUIDANCE[phase.code] ||
+                    TERMINAL_GUIDANCE.credit_refused}
               </p>
               {phase.txHash && (
                 <a
@@ -904,7 +1107,8 @@ export const DepositModal: React.FC<DepositModalProps> = ({
                   rel="noopener noreferrer"
                   className="mt-2 inline-flex items-center gap-1 font-jet text-[12px] text-up hover:underline"
                 >
-                  View {shortenAddress(phase.txHash, 6)} on explorer <ArrowUpRight size={12} />
+                  View {shortenAddress(phase.txHash, 6)} on explorer{" "}
+                  <ArrowUpRight size={12} />
                 </a>
               )}
               <div className="mt-2.5 flex gap-2">
@@ -917,11 +1121,13 @@ export const DepositModal: React.FC<DepositModalProps> = ({
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    setPhase({ kind: 'idle' });
+                    setPhase({ kind: "idle" });
                     submitted.current = null;
                   }}
                 >
-                  {phase.retryable ? 'Close this status' : 'Start a new deposit'}
+                  {phase.retryable
+                    ? "Close this status"
+                    : "Start a new deposit"}
                 </Button>
               </div>
             </div>
@@ -930,35 +1136,53 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       )}
 
       {error && (
-        <p role="alert" className="mt-4 rounded-xl bg-down-soft px-3.5 py-2.5 text-[13px] text-down">
+        <p
+          role="alert"
+          className="mt-4 rounded-xl bg-down-soft px-3.5 py-2.5 text-[13px] text-down"
+        >
           {error}
         </p>
       )}
 
-      <Button
-        size="lg"
-        onClick={handleDeposit}
-        disabled={isBusy || wrongNetwork || !amount || phase.kind === 'credited'}
-        className="mt-6 w-full"
-      >
-        {phase.kind === 'signing'
-          ? 'Confirm in your wallet…'
-          : phase.kind === 'pending'
-            ? 'Verifying deposit…'
-            : phase.kind === 'credited'
-              ? 'Credited'
-              : `Deposit ${asset}`}
-      </Button>
+      {!fromGateway && (
+        <Button
+          size="lg"
+          onClick={handleDeposit}
+          disabled={
+            isBusy || wrongNetwork || !amount || phase.kind === "credited"
+          }
+          className="mt-6 w-full"
+        >
+          {phase.kind === "signing"
+            ? "Confirm in your wallet…"
+            : phase.kind === "pending"
+              ? "Verifying deposit…"
+              : phase.kind === "credited"
+                ? "Credited"
+                : `Deposit ${asset}`}
+        </Button>
+      )}
     </Modal>
   );
 };
 
 /** One readable line for a wallet or RPC failure, never viem's multi-paragraph dump. */
 function walletErrorText(err: unknown): string {
-  const raw = err instanceof Error ? `${(err as { shortMessage?: string }).shortMessage ?? ''} ${err.message}` : String(err);
-  if (/user rejected|denied|rejected the request/i.test(raw)) return 'You cancelled the transaction in your wallet.';
-  if (/rate limit|429|too many requests/i.test(raw)) return 'Arc RPC is busy. Wait a few seconds and deposit again.';
-  if (/insufficient funds|exceeds balance/i.test(raw)) return 'Not enough USDC in your wallet for this amount plus gas.';
+  const raw =
+    err instanceof Error
+      ? `${(err as { shortMessage?: string }).shortMessage ?? ""} ${err.message}`
+      : String(err);
+  if (/user rejected|denied|rejected the request/i.test(raw))
+    return "You cancelled the transaction in your wallet.";
+  if (/rate limit|429|too many requests/i.test(raw))
+    return "Arc RPC is busy. Wait a few seconds and deposit again.";
+  if (/insufficient funds|exceeds balance/i.test(raw))
+    return "Not enough USDC in your wallet for this amount plus gas.";
   const short = (err as { shortMessage?: string })?.shortMessage;
-  return short || (err instanceof Error ? err.message.split('\n')[0] : 'Deposit failed. Please try again.');
+  return (
+    short ||
+    (err instanceof Error
+      ? err.message.split("\n")[0]
+      : "Deposit failed. Please try again.")
+  );
 }

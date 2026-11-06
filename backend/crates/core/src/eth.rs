@@ -537,7 +537,7 @@ impl DepositFailure {
                 "No USDC transfer of at least the claimed amount reached the treasury".to_string()
             }
             Self::SenderMismatch => {
-                "Claimed depositor is neither the transaction sender nor a transfer sender"
+                "This deposit came from another wallet, so it cannot be credited to yours"
                     .to_string()
             }
         }
@@ -553,6 +553,56 @@ pub struct DepositOk {
 }
 
 /// Verifies a `token` transfer (USDC or EURC) actually reached the house treasury.
+/// Circle Gateway's minter, at the same address on every supported chain.
+pub const GATEWAY_MINTER: &str = "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B";
+
+/// `AttestationUsed(address,address,bytes32,uint32,bytes32,bytes32,uint256)` from
+/// [`GATEWAY_MINTER`] that minted `token` to `recipient` out of `depositor`'s
+/// Gateway balance, for at least `claimed`. Only Circle's minter can emit it, and
+/// only after the depositor's signed burn intent was attested.
+pub fn gateway_credit(
+    logs: &[Value],
+    token: &str,
+    recipient: &str,
+    depositor: &str,
+    claimed: u128,
+) -> Option<u128> {
+    let topic = format!(
+        "0x{}",
+        hex::encode(keccak256(
+            b"AttestationUsed(address,address,bytes32,uint32,bytes32,bytes32,uint256)"
+        ))
+    );
+    logs.iter().find_map(|log| {
+        let field = |k: &str| log.get(k).and_then(Value::as_str).unwrap_or_default();
+        if canonical(field("address")) != canonical(GATEWAY_MINTER) {
+            return None;
+        }
+        let topics: Vec<&str> = log
+            .get("topics")?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        if topics.len() < 4 || !topics[0].eq_ignore_ascii_case(&topic) {
+            return None;
+        }
+        if canonical(&topic_to_address(topics[1])) != canonical(token)
+            || canonical(&topic_to_address(topics[2])) != canonical(recipient)
+        {
+            return None;
+        }
+        // data: sourceDomain, sourceDepositor, sourceSigner, value (one word each).
+        let data = field("data").trim_start_matches("0x");
+        if data.len() < 256 {
+            return None;
+        }
+        let source_depositor = topic_to_address(&format!("0x{}", &data[64..128]));
+        let value = parse_data_word(&format!("0x{}", &data[192..256]))?;
+        (canonical(&source_depositor) == canonical(depositor) && value >= claimed).then_some(value)
+    })
+}
+
 pub async fn verify_deposit(
     tx_hash: &str,
     user_address: &str,
@@ -674,6 +724,22 @@ pub async fn verify_deposit(
                 incoming.push((from, value));
             }
         }
+    }
+
+    // A Circle Gateway mint pays the treasury from the zero address. It counts for
+    // the claimant only when Circle's minter attests they were the source depositor.
+    let logs = receipt
+        .get("logs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if let Some(value) = gateway_credit(logs, &token, &recipient, user_address, claimed) {
+        return Ok(DepositOk {
+            payer_address: user_address.to_string(),
+            transferred_amount: format_units(value, decimals),
+            confirmations,
+            transaction_hash: tx_hash.to_string(),
+        });
     }
 
     if incoming.is_empty() {
@@ -1305,6 +1371,53 @@ pub fn build_eip1559_raw(
 mod tests {
     use super::*;
     use k256::elliptic_curve::scalar::IsHigh;
+
+    #[test]
+    fn a_gateway_mint_counts_only_for_its_attested_depositor() {
+        let word =
+            |hexstr: &str| format!("{:0>64}", hexstr.trim_start_matches("0x").to_lowercase());
+        let token = "0x3600000000000000000000000000000000000000";
+        let treasury = "0x8726144B6a122862B9F1184752d8ebA0AcD662B6";
+        let player = "0x0F05DF479Fcb23b2281e28813Fb47e57e47d1Bb7";
+        let topic = format!(
+            "0x{}",
+            hex::encode(keccak256(
+                b"AttestationUsed(address,address,bytes32,uint32,bytes32,bytes32,uint256)"
+            ))
+        );
+        let log = |minter: &str, depositor: &str, value: u128| {
+            json!({
+                "address": minter,
+                "topics": [topic, format!("0x{}", word(token)), format!("0x{}", word(treasury)), format!("0x{}", "11".repeat(32))],
+                "data": format!("0x{}{}{}{}", word("6"), word(depositor), word(depositor), word(&format!("{value:x}"))),
+            })
+        };
+        let ok = [log(GATEWAY_MINTER, player, 2_000_000)];
+        assert_eq!(
+            gateway_credit(&ok, token, treasury, player, 2_000_000),
+            Some(2_000_000)
+        );
+        // Someone else's Gateway balance, a lookalike minter, or too little: no credit.
+        let other = "0x000000000000000000000000000000000000dEaD";
+        assert_eq!(
+            gateway_credit(
+                &[log(GATEWAY_MINTER, other, 2_000_000)],
+                token,
+                treasury,
+                player,
+                1
+            ),
+            None
+        );
+        assert_eq!(
+            gateway_credit(&[log(other, player, 2_000_000)], token, treasury, player, 1),
+            None
+        );
+        assert_eq!(
+            gateway_credit(&ok, token, treasury, player, 3_000_000),
+            None
+        );
+    }
 
     #[test]
     fn transfer_topic_matches_known_hash() {
