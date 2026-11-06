@@ -109,7 +109,8 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
     }
     if (targetStep > 0) {
       const change = stepChange(step, targetStep);
-      if (change === 'now' || (change === 'boundary' && column !== lastColumn)) {
+      const overLimit = options.maxStep > 0 && step > options.maxStep;
+      if (overLimit || change === 'now' || (change === 'boundary' && column !== lastColumn)) {
         step = targetStep;
         labelsAt = 0;
       }

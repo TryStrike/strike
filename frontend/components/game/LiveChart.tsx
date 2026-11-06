@@ -561,7 +561,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
     const priceRange = scales.maxPrice - scales.minPrice;
     const priceTop = scales.priceAt(minY);
-    const priceBottom = scales.priceAt(minY + constrainedHeight);
+    const drawnBottom = scales.priceAt(minY + constrainedHeight);
+    const priceBottom = maxBand > 0 ? Math.max(drawnBottom, priceTop - maxBand) : drawnBottom;
 
     const startOffsetSeconds = (minX - scales.tipX) / pixelsPerSecond;
     const durationSeconds = constrainedWidth / pixelsPerSecond;
@@ -726,7 +727,8 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       priceTop: pendingBox.priceTop,
       priceBottom: pendingBox.priceBottom,
     };
-    drawBets(ctx, scales, useStore.getState().activeBets, {
+    const { activeBets, settlingBets } = useStore.getState();
+    drawBets(ctx, scales, [...activeBets, ...settlingBets], {
       mode: gameMode,
       asset: selectedAsset,
       price: useStore.getState().currentPrice,

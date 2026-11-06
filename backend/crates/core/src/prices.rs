@@ -163,6 +163,11 @@ static YAHOO_FWD: Lazy<HashMap<&'static str, &'static str>> =
     Lazy::new(|| YAHOO_PAIRS.iter().copied().collect());
 
 /// The Binance symbol for an asset, if it is a Binance-backed (crypto) asset.
+/// The app asset for a Binance symbol.
+pub fn binance_asset(symbol: &str) -> Option<&'static str> {
+    BINANCE_REV.get(symbol).copied()
+}
+
 pub fn binance_symbol(asset: &str) -> Option<&'static str> {
     BINANCE_FWD.get(asset).copied()
 }
@@ -582,7 +587,9 @@ pub async fn fetch_latest_prices(
         let crypto_asset = is_crypto(asset);
         // The SSE ticker re-quotes crypto every tick; slow quotes refresh every
         // 15s+ at source, so the bypass never applies to them.
-        let cached = if crypto_asset && bypass_crypto_cache {
+        let cached = if binance_ws::covers(asset, now) {
+            cache_get(asset).map(|entry| entry.price)
+        } else if crypto_asset && bypass_crypto_cache {
             None
         } else {
             fresh(asset, now)
@@ -606,9 +613,7 @@ pub async fn fetch_latest_prices(
             let stamp = now_millis();
             for (asset, price) in pairs {
                 out.insert(asset.clone(), price);
-                if !binance_ws::covers(&asset, stamp) {
-                    cache_set(&asset, price, stamp, source);
-                }
+                cache_set(&asset, price, stamp, source);
             }
         };
 
@@ -622,7 +627,7 @@ pub async fn fetch_latest_prices(
     // Crypto Binance did not return still gets a Yahoo quote (just slower).
     let crypto_missing: Vec<String> = crypto
         .iter()
-        .filter(|a| !out.contains_key(a.as_str()) && !binance_ws::covers(a, now_millis()))
+        .filter(|a| !out.contains_key(a.as_str()))
         .cloned()
         .collect();
     if !crypto_missing.is_empty() {

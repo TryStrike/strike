@@ -90,7 +90,7 @@ export interface GameState {
 
 
 
-const MAX_PRICE_HISTORY = 200;
+const MAX_PRICE_HISTORY = 720;
 
 const DEFAULT_TARGET_CELLS: TargetCell[] = [
   { id: '1', label: '+$5 in 30s', multiplier: 1.5, priceChange: 5, direction: 'UP' },

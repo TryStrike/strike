@@ -55,6 +55,20 @@ impl Drop for Subscription {
 struct Client {
     assets: BTreeSet<String>,
     tx: FrameTx,
+    /// A frame was dropped, so the next one must carry every price.
+    behind: bool,
+}
+
+impl Client {
+    /// Frames carry only moves, so a dropped frame is repaired with a full one.
+    fn offer(&mut self, frame: String, full_frame: impl FnOnce(&BTreeSet<String>) -> String) {
+        let frame = if self.behind {
+            full_frame(&self.assets)
+        } else {
+            frame
+        };
+        self.behind = self.tx.try_send(frame).is_err();
+    }
 }
 
 #[derive(Default)]
@@ -103,6 +117,7 @@ pub fn subscribe(assets: &[String]) -> Subscription {
             Client {
                 assets: assets.iter().cloned().collect(),
                 tx,
+                behind: false,
             },
         );
     }
@@ -240,9 +255,7 @@ pub fn prime(id: u64, assets: &[String]) {
     }
     let now = prices::now_millis();
     let frame = prices::price_frame(&quotes, &band_widths(assets, now), now);
-    if let Some(client) = lock_hub().clients.get(&id) {
-        let _ = client.tx.try_send(frame);
-    }
+    deliver(id, &[frame]);
 }
 
 async fn pump() {
@@ -278,11 +291,12 @@ async fn pump() {
             .iter()
             .map(|(id, client)| (*id, client.assets.clone()))
             .collect();
-        for (id, frame) in fan_out(&live, &mut hub.last_sent, &quotes, &bands, ts) {
-            if let Some(client) = hub.clients.get(&id) {
-                if client.tx.try_send(frame).is_err() {
-                    tracing::debug!("[stream] client {id} is not reading, frame dropped");
-                }
+        let frames = fan_out(&live, &mut hub.last_sent, &quotes, &bands, ts);
+        for (id, frame) in frames {
+            if let Some(client) = hub.clients.get_mut(&id) {
+                client.offer(frame, |assets| {
+                    prices::price_frame(&only(&quotes, assets), &only(&bands, assets), ts)
+                });
             }
         }
     }
@@ -504,6 +518,26 @@ mod tests {
         let sub = subscribe(&["DOGE".to_string()]);
         let frames: Vec<String> = (0..FRAME_BUFFER + 10).map(|n| n.to_string()).collect();
         assert_eq!(deliver(sub.id(), &frames), FRAME_BUFFER);
+    }
+
+    #[test]
+    fn a_dropped_frame_is_repaired_by_a_full_one() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut client = Client {
+            assets: set(&["BTC"]),
+            tx,
+            behind: false,
+        };
+        let full = |_: &BTreeSet<String>| "full".to_string();
+
+        client.offer("first".to_string(), full);
+        client.offer("dropped".to_string(), full);
+        assert!(client.behind);
+
+        assert_eq!(rx.try_recv().unwrap(), "first");
+        client.offer("next".to_string(), full);
+        assert_eq!(rx.try_recv().unwrap(), "full");
+        assert!(!client.behind);
     }
 
     #[tokio::test]

@@ -6,26 +6,29 @@
 //! Both record under the `binance` source, so a round never refunds because the
 //! transport changed.
 //!
-//! A trade is stamped with its exchange time, never its arrival, so a backlog
-//! can't record old prices as fresh, and a trade older than [`MAX_TRADE_AGE_MS`]
-//! is dropped.
+//! A trade is stamped on arrival, like a REST quote. A tick dated before a round's
+//! end therefore can't appear after it, so a claim's timing can't change the end
+//! price. Exchange time is only used to drop a backlog, past [`MAX_TRADE_AGE_MS`].
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::StreamExt;
+use once_cell::sync::Lazy;
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::config;
 use crate::prices::{self, binance_symbol};
-use crate::ticks;
 
-const MAX_TRADE_AGE_MS: i64 = 2_000;
+const MAX_TRADE_AGE_MS: i64 = 1_000;
 /// Silence longer than this means the socket is dead, and REST takes over.
 const LIVE_WINDOW_MS: i64 = 3_000;
 /// A pair with no trade for this long gets its price from REST.
 const PAIR_WINDOW_MS: i64 = 2_000;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Binance closes a connection at 24 hours, so leave first.
 const MAX_SESSION: Duration = Duration::from_secs(23 * 60 * 60);
@@ -33,6 +36,7 @@ const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 static LAST_FRAME_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_TRADE_MS: Lazy<Mutex<HashMap<&'static str, i64>>> = Lazy::new(Mutex::default);
 
 fn streams_url() -> String {
     let streams: Vec<String> = prices::VALID_ASSETS
@@ -47,41 +51,33 @@ fn streams_url() -> String {
     )
 }
 
-/// The asset for an upper-case Binance symbol.
-fn asset_of(symbol: &str) -> Option<&'static str> {
-    prices::VALID_ASSETS
-        .iter()
-        .copied()
-        .find(|asset| binance_symbol(asset) == Some(symbol))
-}
-
 /// `(asset, price, traded_at_ms)` from one stream frame.
 fn parse_trade(frame: &str) -> Option<(&'static str, f64, i64)> {
     let value: Value = serde_json::from_str(frame).ok()?;
     let trade = value.get("data")?;
-    let asset = asset_of(trade.get("s")?.as_str()?)?;
+    let asset = prices::binance_asset(trade.get("s")?.as_str()?)?;
     let price = trade.get("p")?.as_str()?.parse().ok()?;
     let traded_at = trade.get("T")?.as_i64()?;
     Some((asset, price, traded_at))
 }
 
-/// When to record a trade, `None` if it is too old. A clock behind the exchange
-/// can't stamp a trade in the future.
-fn trade_stamp(traded_at: i64, now_ms: i64) -> Option<i64> {
-    (now_ms - traded_at <= MAX_TRADE_AGE_MS).then_some(traded_at.min(now_ms))
+fn is_backlog(traded_at: i64, now_ms: i64) -> bool {
+    now_ms - traded_at > MAX_TRADE_AGE_MS
 }
 
 fn is_live(now_ms: i64) -> bool {
     now_ms - LAST_FRAME_MS.load(Ordering::Relaxed) <= LIVE_WINDOW_MS
 }
 
-/// `true` when the stream already has this asset, so REST must not record over it.
+/// `true` when the stream has a recent trade for this asset, so REST need not
+/// quote it. A quiet pair is not covered and keeps its REST tick every sample.
 pub fn covers(asset: &str, now_ms: i64) -> bool {
     is_live(now_ms)
-        && binance_symbol(asset).is_some()
-        && ticks::buffer()
-            .latest(asset)
-            .is_some_and(|tick| now_ms - tick.at_ms <= PAIR_WINDOW_MS)
+        && LAST_TRADE_MS.lock().is_ok_and(|trades| {
+            trades
+                .get(asset)
+                .is_some_and(|at| now_ms - at <= PAIR_WINDOW_MS)
+        })
 }
 
 fn on_frame(frame: &str) {
@@ -90,16 +86,22 @@ fn on_frame(frame: &str) {
     let Some((asset, price, traded_at)) = parse_trade(frame) else {
         return;
     };
-    if let Some(at_ms) = trade_stamp(traded_at, now) {
-        prices::record_trade(asset, price, at_ms);
+    if is_backlog(traded_at, now) {
+        return;
     }
+    if let Ok(mut trades) = LAST_TRADE_MS.lock() {
+        trades.insert(asset, now);
+    }
+    prices::record_trade(asset, price, now);
 }
 
 /// One connection, until it fails or reaches [`MAX_SESSION`].
 async fn session(url: &str) -> Result<(), String> {
-    let (mut socket, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|err| format!("connect: {err}"))?;
+    let (mut socket, _) =
+        tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+            .await
+            .map_err(|_| "connect timed out".to_string())?
+            .map_err(|err| format!("connect: {err}"))?;
     let deadline = tokio::time::Instant::now() + MAX_SESSION;
     loop {
         let read = tokio::time::timeout_at(
@@ -162,11 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn an_old_trade_is_dropped_and_a_future_one_is_clamped() {
-        assert_eq!(trade_stamp(10_000, 11_000), Some(10_000));
-        assert_eq!(trade_stamp(10_000, 12_000), Some(10_000));
-        assert_eq!(trade_stamp(10_000, 12_001), None, "a backlog is not fresh");
-        assert_eq!(trade_stamp(10_500, 10_000), Some(10_000));
+    fn only_a_trade_past_the_age_limit_is_a_backlog() {
+        assert!(!is_backlog(10_000, 11_000));
+        assert!(is_backlog(10_000, 11_001), "a backlog is not fresh");
+        assert!(!is_backlog(10_500, 10_000), "a clock behind the exchange");
     }
 
     #[test]
@@ -179,9 +180,17 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_socket_hands_every_pair_back_to_rest() {
-        assert!(!is_live(i64::MAX / 2));
-        assert!(!covers("BTC", i64::MAX / 2));
-        assert!(!covers("GOLD", 0), "a slow asset is never the stream's");
+    fn rest_keeps_a_quiet_pair_and_a_silent_socket() {
+        let now = prices::now_millis();
+        LAST_FRAME_MS.store(now, Ordering::Relaxed);
+        LAST_TRADE_MS.lock().unwrap().insert("ADA", now - 100);
+        LAST_TRADE_MS
+            .lock()
+            .unwrap()
+            .insert("XLM", now - PAIR_WINDOW_MS - 1);
+        assert!(covers("ADA", now));
+        assert!(!covers("XLM", now), "a quiet pair stays with REST");
+        assert!(!covers("GOLD", now), "a slow asset is never the stream's");
+        assert!(!covers("ADA", now + LIVE_WINDOW_MS + 1), "a silent socket");
     }
 }
