@@ -1,4 +1,4 @@
-//! Live crypto trades from Binance's combined stream.
+//! Live trades from Binance's combined streams, one socket each for spot and perps.
 //!
 //! This is a speed layer over the REST sampler, not a replacement. REST keeps
 //! running, and fills in for any pair without a recent trade, so a quiet pair
@@ -35,19 +35,33 @@ const MAX_SESSION: Duration = Duration::from_secs(23 * 60 * 60);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-static LAST_FRAME_MS: AtomicI64 = AtomicI64::new(0);
+static SPOT_FRAME_MS: AtomicI64 = AtomicI64::new(0);
+static PERP_FRAME_MS: AtomicI64 = AtomicI64::new(0);
 static LAST_TRADE_MS: Lazy<Mutex<HashMap<&'static str, i64>>> = Lazy::new(Mutex::default);
 
-fn streams_url() -> String {
+fn streams_url(
+    endpoint: &str,
+    channel: &str,
+    symbol_of: fn(&str) -> Option<&'static str>,
+) -> String {
     let streams: Vec<String> = prices::VALID_ASSETS
         .iter()
-        .filter_map(|asset| binance_symbol(asset))
-        .map(|symbol| format!("{}@trade", symbol.to_lowercase()))
+        .filter_map(|asset| symbol_of(asset))
+        .map(|symbol| format!("{}@{channel}", symbol.to_lowercase()))
         .collect();
-    format!(
-        "{}?streams={}",
-        config().binance_ws_endpoint,
-        streams.join("/")
+    format!("{endpoint}?streams={}", streams.join("/"))
+}
+
+fn spot_url() -> String {
+    streams_url(&config().binance_ws_endpoint, "trade", binance_symbol)
+}
+
+/// Perps carry only aggregate trades, in the same shape.
+fn perp_url() -> String {
+    streams_url(
+        &config().binance_perp_ws_endpoint,
+        "aggTrade",
+        prices::perp_symbol,
     )
 }
 
@@ -65,14 +79,19 @@ fn is_backlog(traded_at: i64, now_ms: i64) -> bool {
     now_ms - traded_at > MAX_TRADE_AGE_MS
 }
 
-fn is_live(now_ms: i64) -> bool {
-    now_ms - LAST_FRAME_MS.load(Ordering::Relaxed) <= LIVE_WINDOW_MS
+fn is_live(frames: &AtomicI64, now_ms: i64) -> bool {
+    now_ms - frames.load(Ordering::Relaxed) <= LIVE_WINDOW_MS
 }
 
 /// `true` when the stream has a recent trade for this asset, so REST need not
 /// quote it. A quiet pair is not covered and keeps its REST tick every sample.
 pub fn covers(asset: &str, now_ms: i64) -> bool {
-    is_live(now_ms)
+    let frames = if prices::perp_symbol(asset).is_some() {
+        &PERP_FRAME_MS
+    } else {
+        &SPOT_FRAME_MS
+    };
+    is_live(frames, now_ms)
         && LAST_TRADE_MS.lock().is_ok_and(|trades| {
             trades
                 .get(asset)
@@ -80,9 +99,9 @@ pub fn covers(asset: &str, now_ms: i64) -> bool {
         })
 }
 
-fn on_frame(frame: &str) {
+fn on_frame(frame: &str, frames: &AtomicI64) {
     let now = prices::now_millis();
-    LAST_FRAME_MS.store(now, Ordering::Relaxed);
+    frames.store(now, Ordering::Relaxed);
     let Some((asset, price, traded_at)) = parse_trade(frame) else {
         return;
     };
@@ -96,7 +115,7 @@ fn on_frame(frame: &str) {
 }
 
 /// One connection, until it fails or reaches [`MAX_SESSION`].
-async fn session(url: &str) -> Result<(), String> {
+async fn session(url: &str, frames: &AtomicI64) -> Result<(), String> {
     let (mut socket, _) =
         tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
             .await
@@ -113,7 +132,7 @@ async fn session(url: &str) -> Result<(), String> {
             Err(_) => return Err("no frame in time".to_string()),
             Ok(None) => return Err("closed".to_string()),
             Ok(Some(Err(err))) => return Err(format!("read: {err}")),
-            Ok(Some(Ok(Message::Text(frame)))) => on_frame(frame.as_str()),
+            Ok(Some(Ok(Message::Text(frame)))) => on_frame(frame.as_str(), frames),
             Ok(Some(Ok(_))) => {}
         }
     }
@@ -122,11 +141,18 @@ async fn session(url: &str) -> Result<(), String> {
 /// Runs for the life of the process, and only ever logs a failure: REST is
 /// already covering whatever this misses.
 pub async fn run() {
-    let url = streams_url();
+    futures::future::join(
+        stream(spot_url(), &SPOT_FRAME_MS),
+        stream(perp_url(), &PERP_FRAME_MS),
+    )
+    .await;
+}
+
+async fn stream(url: String, frames: &AtomicI64) {
     let mut backoff = MIN_BACKOFF;
     loop {
-        let outcome = session(&url).await;
-        if is_live(prices::now_millis()) {
+        let outcome = session(&url, frames).await;
+        if is_live(frames, prices::now_millis()) {
             backoff = MIN_BACKOFF;
         }
         if let Err(err) = outcome {
@@ -156,7 +182,7 @@ mod tests {
         assert_eq!(parse_trade("not json"), None);
         assert_eq!(parse_trade(r#"{"result":null,"id":1}"#), None);
         assert_eq!(
-            parse_trade(&TRADE.replace("BTCUSDT", "LINKUSDT")),
+            parse_trade(&TRADE.replace("BTCUSDT", "NOPEUSDT")),
             None,
             "a pair the app does not trade"
         );
@@ -172,17 +198,20 @@ mod tests {
 
     #[test]
     fn every_binance_pair_is_subscribed_and_nothing_else() {
-        let url = streams_url();
+        let url = spot_url();
         assert!(url.contains("btcusdt@trade/"));
         assert!(url.contains("dogeusdt@trade"));
-        assert_eq!(url.matches("@trade").count(), 14);
-        assert!(!url.contains("gold"));
+        assert_eq!(url.matches("@trade").count(), 42);
+        assert!(!url.contains("xau"));
+        let perps = perp_url();
+        assert!(perps.contains("xauusdt@aggTrade"));
+        assert_eq!(perps.matches("@aggTrade").count(), 5);
     }
 
     #[test]
     fn rest_keeps_a_quiet_pair_and_a_silent_socket() {
         let now = prices::now_millis();
-        LAST_FRAME_MS.store(now, Ordering::Relaxed);
+        SPOT_FRAME_MS.store(now, Ordering::Relaxed);
         LAST_TRADE_MS.lock().unwrap().insert("ADA", now - 100);
         LAST_TRADE_MS
             .lock()

@@ -79,6 +79,7 @@ export const GameBoard: React.FC = () => {
     })),
   );
 
+  const marketClosed = useStore((s) => s.closedAssets.includes(s.selectedAsset));
   const { connector } = useAccount();
 
   const [betAmount, setBetAmount] = useState<string>("0.1");
@@ -335,6 +336,8 @@ export const GameBoard: React.FC = () => {
       won: row ? row.won : lastResult.won,
       recordedEndPrice: row?.endPrice || null,
       strikePrice: row?.startPrice || null,
+      priceTop: row?.priceTop ?? null,
+      priceBottom: row?.priceBottom ?? null,
       resolvedAt: lastResult.timestamp,
       network: lastResult.currency ?? null,
     };
@@ -352,6 +355,8 @@ export const GameBoard: React.FC = () => {
         won: bet.won,
         recordedEndPrice: bet.endPrice || null,
         strikePrice: bet.startPrice || null,
+        priceTop: bet.priceTop ?? null,
+        priceBottom: bet.priceBottom ?? null,
         resolvedAt: bet.timestamp,
       })),
     [bets],
@@ -494,7 +499,7 @@ export const GameBoard: React.FC = () => {
                       variant="up"
                       size="lg"
                       onClick={() => handleBet("UP")}
-                      disabled={isPlacingBet}
+                      disabled={isPlacingBet || marketClosed}
                       aria-keyshortcuts="ArrowUp"
                     >
                       <ArrowUp size={18} weight="bold" /> Higher
@@ -503,18 +508,24 @@ export const GameBoard: React.FC = () => {
                       variant="down"
                       size="lg"
                       onClick={() => handleBet("DOWN")}
-                      disabled={isPlacingBet}
+                      disabled={isPlacingBet || marketClosed}
                       aria-keyshortcuts="ArrowDown"
                     >
                       <ArrowDown size={18} weight="bold" /> Lower
                     </Button>
                   </div>
-                  <p className="text-center text-xs text-faint">
-                    <kbd className="font-jet">↑</kbd> /{" "}
-                    <kbd className="font-jet">↓</kbd> to trade ·{" "}
-                    <kbd className="font-jet">1</kbd>–
-                    <kbd className="font-jet">5</kbd> for amount
-                  </p>
+                  {marketClosed ? (
+                    <p className="text-center text-xs text-down">
+                      This market is closed right now
+                    </p>
+                  ) : (
+                    <p className="text-center text-xs text-faint">
+                      <kbd className="font-jet">↑</kbd> /{" "}
+                      <kbd className="font-jet">↓</kbd> to trade ·{" "}
+                      <kbd className="font-jet">1</kbd>–
+                      <kbd className="font-jet">5</kbd> for amount
+                    </p>
+                  )}
                 </>
               ) : (
                 <Button size="lg" onClick={() => setConnectModalOpen(true)}>

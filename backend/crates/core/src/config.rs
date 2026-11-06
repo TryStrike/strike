@@ -70,6 +70,9 @@ pub struct Config {
     /// Upstream quote URLs. Overridable so a test decides what the market did.
     pub binance_endpoint: String,
     pub binance_ws_endpoint: String,
+    pub binance_perp_endpoint: String,
+    pub binance_perp_ws_endpoint: String,
+    pub kraken_endpoint: String,
     pub yahoo_spark_endpoint: String,
     /// How long between samples of every tradable asset.
     pub price_sample_ms: u64,
@@ -161,6 +164,12 @@ impl Config {
                 .unwrap_or_else(|| crate::prices::BINANCE_ENDPOINT.to_string()),
             binance_ws_endpoint: str_var("BINANCE_WS_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::BINANCE_WS_ENDPOINT.to_string()),
+            binance_perp_endpoint: str_var("BINANCE_PERP_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::BINANCE_PERP_ENDPOINT.to_string()),
+            binance_perp_ws_endpoint: str_var("BINANCE_PERP_WS_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::BINANCE_PERP_WS_ENDPOINT.to_string()),
+            kraken_endpoint: str_var("KRAKEN_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::KRAKEN_ENDPOINT.to_string()),
             yahoo_spark_endpoint: str_var("YAHOO_SPARK_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::SPARK_ENDPOINT.to_string()),
             price_sample_ms: parse_num("PRICE_SAMPLE_MS").unwrap_or(1_000),

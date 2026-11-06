@@ -94,7 +94,7 @@ body {
   color: var(--ink);
 }
 
-/* The burst: the new theme grows out of the clicked point in chunky steps. */
+/* The burst: the new theme grows out of the clicked point. */
 ::view-transition-old(root),
 ::view-transition-new(root) {
   animation: none;
@@ -102,7 +102,7 @@ body {
 }
 
 ::view-transition-new(root) {
-  animation: by-burst 0.7s steps(14, end);
+  animation: by-burst 0.3s ease-out;
 }
 
 @keyframes by-burst {

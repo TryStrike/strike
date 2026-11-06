@@ -145,7 +145,7 @@ export const QuickTour: React.FC<{
         {
             target: '[data-tour="asset-selector"]',
             title: 'Pick a market',
-            content: 'Charts follow live Pyth prices across crypto, stocks, metals and forex.',
+            content: 'Charts follow live market prices across crypto, stocks, metals and forex.',
             howTo: [
                 'Open the selector above the chart',
                 'Choose an asset',

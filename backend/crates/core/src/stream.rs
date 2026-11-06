@@ -255,7 +255,13 @@ pub fn prime(id: u64, assets: &[String]) {
     }
     let now = prices::now_millis();
     let frame = prices::price_frame(&quotes, &band_widths(assets, now), now);
-    deliver(id, &[frame]);
+    deliver(
+        id,
+        &[
+            frame,
+            prices::closed_frame(&prices::closed_assets(assets, now), now),
+        ],
+    );
 }
 
 async fn pump() {
@@ -291,7 +297,14 @@ async fn pump() {
             .iter()
             .map(|(id, client)| (*id, client.assets.clone()))
             .collect();
+        let closed = (!bands.is_empty())
+            .then(|| prices::closed_frame(&prices::closed_assets(&union, ts), ts));
         let frames = fan_out(&live, &mut hub.last_sent, &quotes, &bands, ts);
+        if let Some(closed) = closed {
+            for client in hub.clients.values_mut() {
+                client.offer(closed.clone(), |_| closed.clone());
+            }
+        }
         for (id, frame) in frames {
             if let Some(client) = hub.clients.get_mut(&id) {
                 client.offer(frame, |assets| {

@@ -90,7 +90,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   const updateAllPrices = useStore((s) => s.updateAllPrices);
   const setMaxBands = useStore((s) => s.setMaxBands);
-  const feed = usePriceStream(updateAllPrices, { onBands: setMaxBands });
+  const setClosedAssets = useStore((s) => s.setClosedAssets);
+  const feed = usePriceStream(updateAllPrices, { onBands: setMaxBands, onClosed: setClosedAssets });
   useEffect(() => {
     useStore.getState().setPriceFeed(feed);
   }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps

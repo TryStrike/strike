@@ -2,7 +2,7 @@
 
 
 import { useEffect, useRef, useState } from 'react';
-import { startMultiPythPriceFeed } from '@/lib/utils/priceFeed';
+import { startPricePolling } from '@/lib/utils/priceFeed';
 
 export type PriceFeedMode = 'stream' | 'poll';
 
@@ -11,6 +11,7 @@ export interface UsePriceStreamOptions {
   firstTickTimeoutMs?: number;
   maxReconnectBackoffMs?: number;
   onBands?: (bands: Record<string, number>) => void;
+  onClosed?: (closed: string[]) => void;
 }
 
 const DEFAULT_STREAM_PATH = '/api/prices/stream';
@@ -27,10 +28,12 @@ export function usePriceStream(
 
   const onTickRef = useRef(onTick);
   const onBandsRef = useRef(options.onBands);
+  const onClosedRef = useRef(options.onClosed);
   useEffect(() => {
     onTickRef.current = onTick;
     onBandsRef.current = options.onBands;
-  }, [onTick, options.onBands]);
+    onClosedRef.current = options.onClosed;
+  }, [onTick, options.onBands, options.onClosed]);
 
   const [mode, setMode] = useState<PriceFeedMode>('poll');
   const [connected, setConnected] = useState(false);
@@ -52,7 +55,7 @@ export function usePriceStream(
 
     const startPollFallback = () => {
       if (disposed || stopPoll) return;
-      stopPoll = startMultiPythPriceFeed((prices) => {
+      stopPoll = startPricePolling((prices) => {
         if (!disposed) onTickRef.current(prices);
       });
       setMode('poll');
@@ -108,7 +111,7 @@ export function usePriceStream(
         watchdog = clearTimer(watchdog);
         attempt = 0;
 
-        let frame: { prices?: unknown; bands?: unknown };
+        let frame: { prices?: unknown; bands?: unknown; closed?: unknown };
         try {
           frame = JSON.parse(String(event.data));
         } catch (err) {
@@ -127,6 +130,7 @@ export function usePriceStream(
         const prices = frame.prices as Record<string, number>;
         if (Object.keys(prices).length > 0) onTickRef.current(prices);
         if (frame.bands) onBandsRef.current?.(frame.bands as Record<string, number>);
+        if (Array.isArray(frame.closed)) onClosedRef.current?.(frame.closed as string[]);
       };
 
       es.onerror = () => degrade();

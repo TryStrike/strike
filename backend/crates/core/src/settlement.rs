@@ -46,7 +46,7 @@ pub const BET_CUTOFF_MS: i64 = 2_000;
 /// The furthest column or box the chart can reach, and the ring's default span.
 pub const MAX_ROUND_MS: i64 = 900_000;
 /// Yahoo quotes refresh every 15 s at source.
-const SLOW_TICK_TOLERANCE_MS: i64 = 20_000;
+const SLOW_TICK_TOLERANCE_MS: i64 = prices::MAX_QUOTE_AGE_MS;
 /// A band can be at most this share of the recent range. The chart caps a drawn
 /// box at 20% of its height, and a grid row is 10%.
 const BAND_MAX_WIDTH: f64 = 0.25;
@@ -114,7 +114,7 @@ fn positive_number(body: &Value, key: &str) -> Option<f64> {
 }
 
 fn bet_tick_max_age_ms(asset: &str) -> i64 {
-    if prices::is_crypto(asset) {
+    if prices::is_fast(asset) {
         config().bet_tick_max_age_ms
     } else {
         SLOW_TICK_TOLERANCE_MS
@@ -123,7 +123,7 @@ fn bet_tick_max_age_ms(asset: &str) -> i64 {
 
 /// How old the end tick may be, measured back from `end_time`.
 pub fn end_tick_tolerance_ms(asset: &str) -> i64 {
-    if prices::is_crypto(asset) {
+    if prices::is_fast(asset) {
         config().settle_tick_tolerance_ms
     } else {
         SLOW_TICK_TOLERANCE_MS
@@ -199,7 +199,7 @@ fn freeze_band(
         return Err(refuse(400, "invalid_end_time", "Round ends too far ahead"));
     }
 
-    let window = if prices::is_crypto(asset) {
+    let window = if prices::is_fast(asset) {
         FAST_RANGE_WINDOW_MS
     } else {
         SLOW_RANGE_WINDOW_MS
@@ -266,6 +266,14 @@ pub fn freeze_bet(
         .ok_or_else(|| refuse(400, "invalid_direction", "Unknown bet direction"))?;
     let client_strike = positive_number(body, "strikePrice")
         .ok_or_else(|| refuse(400, "invalid_strike", "Missing strike price"))?;
+
+    if !prices::market_open(&asset, now_ms) {
+        return Err(refuse(
+            409,
+            "market_closed",
+            "This market is closed right now",
+        ));
+    }
 
     // Fail closed: no fresh server price, no round.
     let tick = ring
@@ -623,10 +631,17 @@ mod tests {
     fn unknown_inputs_are_refused() {
         let ring = ring(&[100.0]);
         let mut body = classic(1.75, 5, 100.0);
-        body["asset"] = json!("LINK"); // listed, but nothing quotes it
+        body["asset"] = json!("NOPE");
         assert_eq!(
             code(freeze_bet(&body, dec("1"), &ring, NOW).unwrap_err()).1,
             "unsupported_asset"
+        );
+        let mut body = classic(1.75, 5, 100.0);
+        body["asset"] = json!("AAPL");
+        assert_eq!(
+            code(freeze_bet(&body, dec("1"), &ring, NOW).unwrap_err()).1,
+            "market_closed",
+            "no quote time means closed"
         );
         let mut body = classic(1.75, 5, 100.0);
         body["mode"] = json!("nope");

@@ -6,6 +6,7 @@ import { entityUrl, matchesLedger, readSealedEntity, type ArkivEntity } from '@/
 
 interface Seal {
   sealed: boolean;
+  off?: boolean;
   settled?: boolean;
   block?: number;
   key?: string;
@@ -22,7 +23,10 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
     const clock = setInterval(() => setWaited(performance.now() - started), 100);
     const ctrl = new AbortController();
     fetch(`/api/arkiv/bets/${encodeURIComponent(betId)}/seal`, { credentials: 'include', signal: ctrl.signal })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((res) => {
+        if (res.status === 503) return { sealed: false, off: true };
+        return res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`));
+      })
       .then(async (s: Seal) => setSeal(s.sealed && s.key ? { ...s, entity: await readSealedEntity(s.key, ctrl.signal) } : s))
       .catch((err) => {
         if (ctrl.signal.aborted) return;
@@ -47,6 +51,8 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
             <span className="text-down">Could not read the seal ({failed})</span>
           ) : !seal ? (
             <span className="font-jet text-muted">Sealing… {(waited / 1000).toFixed(1)}s</span>
+          ) : seal.off ? (
+            <span className="text-muted">Arkiv sealing is unavailable on this server</span>
           ) : !seal.sealed ? (
             <span className="text-muted">{seal.settled ? 'Queued for the next block' : 'Sealed once the round settles'}</span>
           ) : !seal.entity ? (
