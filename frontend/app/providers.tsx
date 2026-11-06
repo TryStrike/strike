@@ -10,6 +10,7 @@ import { ConnectKitProvider } from 'connectkit';
 import { config as wagmiConfig, arc } from '@/lib/arc/wagmi';
 
 import { WalletConnectModal } from '@/components/wallet/WalletConnectModal';
+import { WorldGate } from '@/components/world/WorldGate';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 import { useThemeSync } from '@/lib/useTheme';
 import { usePriceStream } from '@/lib/hooks/usePriceStream';
@@ -103,6 +104,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
           <WalletSync />
           {children}
           <WalletConnectModal />
+          <WorldGate />
           <ToastProvider />
         </ConnectKitProvider>
       </QueryClientProvider>

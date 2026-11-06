@@ -25,6 +25,7 @@ import {
   type ToolStep,
 } from "@/lib/agent/agentFeed";
 import { useCopilot, type ChatMessage } from "@/lib/copilot/useCopilot";
+import { errorMessage, readApiError } from "@/lib/api/errors";
 
 function SessionStrip({ session }: { session: AgentSession }) {
   const [now, setNow] = useState(() => Date.now());
@@ -182,7 +183,6 @@ type Row =
   | { at: number; key: string; message: ChatMessage }
   | { at: number; key: string; thought: Thought };
 
-/** One line of everything a session did: decisions, tool steps, chat, and how it ended. */
 export default function AgentStream({
   session,
   onAnswer,
@@ -257,9 +257,8 @@ export default function AgentStream({
         useAgentFeed.getState().showSession((await res.json()).session);
         return;
       }
-      const body = await res.json().catch(() => null);
       setStopError(
-        `The agent is still running. ${body?.error ?? `Stop failed with ${res.status}`}`,
+        `The agent is still running. ${errorMessage(await readApiError(res))}`,
       );
     } catch (e) {
       setStopError(

@@ -1,22 +1,17 @@
-//! Checks an IDKit result against its attempt, then has World verify it.
-
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use super::attempt::Attempt;
-use super::request::{hash_to_field, terms_nonce};
-use super::{ACR_PREFIX, ACTION, UNAVAILABLE};
-use crate::config::IdkitApp;
+use super::request::{hash_to_field, signal};
+use super::{ACR_PREFIX, UNAVAILABLE};
+use crate::config::{config, IdkitApp};
 
 #[derive(Debug, PartialEq)]
 pub enum Failure {
-    /// World did not answer. Never an approval.
     Unavailable,
-    /// The token endpoint's OAuth `error`.
     Rejected(String),
-    /// The ID token failed this check.
     Invalid(&'static str),
 }
 
@@ -25,10 +20,7 @@ impl Failure {
         match self {
             Failure::Unavailable => UNAVAILABLE.to_string(),
             Failure::Rejected(code) => super::attempt::could_not_finish(code),
-            Failure::Invalid("acr") => {
-                "Your World ID level is too low for this budget, lower it or verify with Orb"
-                    .to_string()
-            }
+            Failure::Invalid("acr") => "This check needs an Orb verified World ID".to_string(),
             Failure::Invalid(claim) => format!("Approval did not validate ({claim})"),
         }
     }
@@ -40,24 +32,17 @@ pub struct HumanGrant {
     pub iss: String,
     pub sub: String,
     pub acr: String,
+    pub env: String,
 }
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        // developer.world.org's Cloudflare answers 403 HTML to a request without one.
         .user_agent("strike-backend")
         .build()
         .expect("reqwest client builds")
 });
 
-// ---------------------------------------------------------------------------
-// IDKit proof checks and verification
-// ---------------------------------------------------------------------------
-
-/// The proof class of an IDKit credential identifier. `face` is World's old
-/// name for a selfie, `orb` the 3.0 name for proof of human. An Orb proof
-/// with World App's user-presence check passes the orb-face tier.
 fn idkit_class(identifier: &str, presence: bool) -> Option<&'static str> {
     match identifier {
         "selfie" | "face" => Some("selfie"),
@@ -71,7 +56,6 @@ fn presence(result: &Value) -> bool {
     result.get("user_presence_completed") == Some(&Value::Bool(true))
 }
 
-/// A nullifier as 32 byte lowercase 0x hex, from World's hex or decimal form.
 fn nullifier_hex(value: &str) -> Option<String> {
     let mut out = [0u8; 32];
     if let Some(hex) = value.strip_prefix("0x") {
@@ -96,19 +80,15 @@ fn nullifier_hex(value: &str) -> Option<String> {
     Some(format!("0x{}", hex::encode(out)))
 }
 
-/// Everything about an IDKit result that can be checked before World is
-/// asked: environment, action, the signed nonce, the terms signal and the
-/// proof class. `Err` names the field that failed.
 pub fn check_proof(result: &Value, app: &IdkitApp, attempt: &Attempt) -> Result<(), &'static str> {
     let text = |name: &'static str| result.get(name).and_then(Value::as_str).ok_or(name);
-    // A 3.0 proof carries a different nullifier for the same human.
     if text("protocol_version")? != "4.0" {
         return Err("protocol_version");
     }
     if text("environment")? != app.environment {
         return Err("environment");
     }
-    if text("action")? != ACTION {
+    if text("action")? != config().world_action {
         return Err("action");
     }
     if !text("nonce")?.eq_ignore_ascii_case(&attempt.nonce) {
@@ -122,7 +102,7 @@ pub fn check_proof(result: &Value, app: &IdkitApp, attempt: &Attempt) -> Result<
     let signal = format!(
         "0x{}",
         hex::encode(hash_to_field(
-            terms_nonce(&attempt.id, &attempt.message).as_bytes()
+            signal(&attempt.wallet, &attempt.id).as_bytes()
         ))
     );
     for response in responses {
@@ -145,7 +125,6 @@ pub fn check_proof(result: &Value, app: &IdkitApp, attempt: &Attempt) -> Result<
     Ok(())
 }
 
-/// Forwards a checked result to World and turns its answer into a grant.
 pub async fn verify_proof(
     app: &IdkitApp,
     result: &Value,
@@ -179,11 +158,9 @@ pub async fn verify_proof(
         tracing::warn!("[world] verify endpoint said {status} {code}");
         return Err(Failure::Rejected(code.to_string()));
     }
-    // The tier comes from World's answer, never from the flag the browser posted.
     grant_from(&reply, presence(&reply), app, attempt).map_err(Failure::Invalid)
 }
 
-/// The human in World's verify answer: the first proof it accepted.
 fn grant_from(
     reply: &Value,
     presence: bool,
@@ -215,9 +192,10 @@ fn grant_from(
         .ok_or("nullifier")?;
     Ok(HumanGrant {
         attempt_id: attempt.id.clone(),
-        iss: format!("idkit:{}", app.rp_id),
+        iss: format!("idkit:{}:{}", app.rp_id, config().world_action),
         sub,
         acr,
+        env: app.environment.clone(),
     })
 }
 
@@ -234,16 +212,15 @@ mod tests {
             id: "attempt-1".into(),
             wallet: "0x1111111111111111111111111111111111111111".into(),
             message: "terms".into(),
-            nonce: terms_nonce("attempt-1", "terms"),
+            nonce: "0x00ab".into(),
             browser: browser_hash("secret"),
             acr_allowed: full_acr(&CLASSES[1..]),
             status: "pending".into(),
             reason: None,
             acr: None,
-            session_id: None,
             expires_at_ms: NOW_MS + ATTEMPT_TTL_MS,
             created_at_ms: NOW_MS - 20_000,
-            kind: "start".into(),
+            kind: "human".into(),
         }
     }
 
@@ -259,16 +236,17 @@ mod tests {
 
     #[test]
     fn an_idkit_result_must_answer_this_attempt() {
-        let mut attempt = attempt();
-        attempt.nonce = "0x00ab".into();
+        let attempt = attempt();
         let signal = format!(
             "0x{}",
-            hex::encode(hash_to_field(terms_nonce("attempt-1", "terms").as_bytes()))
+            hex::encode(hash_to_field(
+                signal(&attempt.wallet, "attempt-1").as_bytes()
+            ))
         );
         let result = json!({
             "protocol_version": "4.0",
             "environment": "staging",
-            "action": ACTION,
+            "action": "strike-human",
             "nonce": "0x00AB",
             "responses": [{ "identifier": "proof_of_human", "signal_hash": signal, "nullifier": "255" }],
         });
@@ -306,7 +284,8 @@ mod tests {
             ],
         });
         let grant = grant_from(&reply, false, &app(), &attempt).unwrap();
-        assert_eq!(grant.iss, "idkit:rp_test");
+        assert_eq!(grant.iss, "idkit:rp_test:strike-human");
+        assert_eq!(grant.env, "staging");
         assert_eq!(grant.sub, format!("0x{}ff", "0".repeat(62)));
         assert_eq!(grant.acr, format!("{ACR_PREFIX}orb"));
         let mut hex_reply = reply.clone();

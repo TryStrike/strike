@@ -1,24 +1,15 @@
-//! The signed IDKit request a start or checkpoint hands the browser, and the
-//! pending attempt saved for it.
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::humans::{link_of, running};
-use super::{
-    classes_for, full_acr, idkit, ACTION, ATTEMPT_TTL_MS, CHECKPOINT, NOT_PAUSED, SUPERSEDED,
-};
+use super::{classes, full_acr, idkit, ATTEMPT_TTL_MS, SUPERSEDED};
 use crate::address::{canonical, keccak256};
-use crate::agent::{self, refuse, Session, StartTerms};
-use crate::config::IdkitApp;
-use crate::db::{is_unique_violation, Db};
+use crate::config::config;
+use crate::db::Db;
 use crate::error::ApiResult;
-use crate::ledger::Rejection;
 
-/// How long World accepts a signed proof request.
 const RP_TTL_S: u64 = 300;
 
 fn random_b64() -> String {
@@ -27,12 +18,10 @@ fn random_b64() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// What the browser stores is the secret, what the row stores is its hash.
 pub fn browser_hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
-/// keccak256 shifted into the BN254 field, as World hashes signals and actions.
 pub(super) fn hash_to_field(bytes: &[u8]) -> [u8; 32] {
     let hash = keccak256(bytes);
     let mut out = [0u8; 32];
@@ -40,8 +29,6 @@ pub(super) fn hash_to_field(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// `(nonce, signature)` of an RP context, both 0x hex. World checks the
-/// signature against the app's registered signer.
 fn rp_sign(
     key: &k256::ecdsa::SigningKey,
     action: Option<&str>,
@@ -70,189 +57,102 @@ fn rp_sign(
     )
 }
 
-/// The ID token carries this, so an approval is for these exact terms only.
-pub(super) fn terms_nonce(attempt_id: &str, message: &str) -> String {
-    hex::encode(Sha256::digest(format!("{attempt_id}{message}").as_bytes()))
+pub(super) fn signal(wallet: &str, attempt_id: &str) -> String {
+    hex::encode(Sha256::digest(
+        format!("{}{attempt_id}", wallet.to_lowercase()).as_bytes(),
+    ))
 }
 
 pub struct Challenge {
     pub attempt_id: String,
-    /// The signed IDKit request the widget opens.
     pub request: Value,
     pub expires_at_ms: i64,
     pub classes: &'static [&'static str],
-    /// Goes to the browser as the `strike_world` cookie, never stored.
     pub browser_secret: String,
 }
 
 impl Challenge {
-    /// RFC 9470 step-up challenge.
-    pub fn www_authenticate(&self) -> String {
-        format!(
-            "Bearer error=\"insufficient_user_authentication\", max_age=\"0\", acr_values=\"{}\"",
-            full_acr(self.classes).join(" ")
-        )
-    }
-
     pub fn to_json(&self) -> Value {
-        let mut body = json!({
-            "error": "Human check required",
+        json!({
             "attempt": self.attempt_id,
+            "world": self.request,
             "expiresAt": self.expires_at_ms,
             "acr": self.classes,
-        });
-        body["world"] = self.request.clone();
-        body
+        })
     }
 }
 
-/// Saves a pending attempt for a signed, checked YOLO start.
-pub async fn begin(
-    db: &Db,
-    terms: &StartTerms,
-    message: &str,
-    now_ms: i64,
-) -> ApiResult<Result<Challenge, Rejection>> {
+pub async fn begin_human(db: &Db, wallet: &str, orb: bool, now_ms: i64) -> ApiResult<Challenge> {
     let app = idkit()?;
-    let classes = classes_for(terms.budget)?;
-    let expires_at_ms = (now_ms + ATTEMPT_TTL_MS).min(terms.expires_ms);
-    let draft = Draft::new(app, classes, now_ms, expires_at_ms, |_| message.to_string());
-    let (wallet, start_nonce) = (canonical(&terms.wallet), terms.nonce.clone());
+    let wallet = canonical(wallet);
+    let classes = classes(orb);
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).expect("OS randomness");
+    let created_at = (now_ms / 1_000) as u64;
+    let action = &config().world_action;
+    let (nonce, signature) = rp_sign(
+        &app.signing_key,
+        Some(action),
+        &random,
+        created_at,
+        RP_TTL_S,
+    );
+    let request = json!({
+        "app_id": app.app_id,
+        "action": action,
+        "signal": signal(&wallet, &id),
+        "environment": app.environment,
+        "preset": if orb { "orb" } else { "selfie" },
+        "rp_context": {
+            "rp_id": app.rp_id,
+            "nonce": nonce,
+            "created_at": created_at,
+            "expires_at": created_at + RP_TTL_S,
+            "signature": signature,
+        },
+    });
+    let challenge = Challenge {
+        request,
+        attempt_id: id,
+        expires_at_ms: now_ms + ATTEMPT_TTL_MS,
+        classes,
+        browser_secret: random_b64(),
+    };
+    let row = (
+        challenge.attempt_id.clone(),
+        format!(
+            "Strike human check
+Wallet: {wallet}
+Attempt: {}",
+            challenge.attempt_id
+        ),
+        browser_hash(&challenge.browser_secret),
+        full_acr(classes).join(" "),
+        challenge.expires_at_ms,
+    );
     db.write(move |conn| {
-        if let Some(refused) = agent::start_blocked(conn, &start_nonce, &wallet)? {
-            return Ok(Err(refused));
-        }
-        match draft.save(conn, &wallet, "start", None, now_ms) {
-            Err(err) if is_unique_violation(&err) => {
-                Ok(Err(refuse(409, "Start message already used")))
-            }
-            Err(err) => Err(err.into()),
-            Ok(_) => Ok(Ok(draft.challenge)),
-        }
-    })
-    .await
-}
-
-/// Saves a checkpoint for a YOLO session paused until `until_ms`. World lets
-/// only the human linked to its wallet approve it.
-pub async fn begin_checkpoint(
-    db: &Db,
-    session: &Session,
-    until_ms: i64,
-    now_ms: i64,
-) -> ApiResult<Result<Challenge, Rejection>> {
-    let app = idkit()?;
-    let classes = classes_for(session.budget)?;
-    let (session_id, wallet) = (session.id.clone(), session.wallet.clone());
-    db.write(move |conn| {
-        if until_ms <= now_ms || !running(conn, &session_id)? {
-            return Ok(Err(refuse(409, NOT_PAUSED)));
-        }
-        if link_of(conn, &wallet)?.is_none() {
-            return Ok(Err(refuse(409, "No human is linked to this wallet")));
-        }
-        let draft = Draft::new(
-            app,
-            classes,
-            now_ms,
-            (now_ms + ATTEMPT_TTL_MS).min(until_ms),
-            |id| format!("Strike checkpoint\nSession: {session_id}\nAttempt: {id}"),
-        );
-        draft.save(conn, &wallet, CHECKPOINT, Some(&session_id), now_ms)?;
-        Ok(Ok(draft.challenge))
-    })
-    .await
-}
-
-/// A pending attempt before it is saved.
-struct Draft {
-    challenge: Challenge,
-    message: String,
-    /// The signed RP nonce. The terms nonce rides along as the IDKit signal.
-    nonce: String,
-}
-
-impl Draft {
-    /// `message` is what the approval is for, given the attempt id.
-    fn new(
-        app: &IdkitApp,
-        classes: &'static [&'static str],
-        now_ms: i64,
-        expires_at_ms: i64,
-        message: impl FnOnce(&str) -> String,
-    ) -> Self {
-        let id = uuid::Uuid::new_v4().to_string();
-        let message = message(&id);
-        let mut random = [0u8; 32];
-        getrandom::fill(&mut random).expect("OS randomness");
-        let created_at = (now_ms / 1_000) as u64;
-        let (nonce, signature) = rp_sign(
-            &app.signing_key,
-            Some(ACTION),
-            &random,
-            created_at,
-            RP_TTL_S,
-        );
-        let request = json!({
-            "app_id": app.app_id,
-            "action": ACTION,
-            "signal": terms_nonce(&id, &message),
-            "environment": app.environment,
-            "preset": if classes[0] == "selfie" { "selfie" } else { "orb" },
-            "require_user_presence": classes[0] == "orb-face",
-            "rp_context": {
-                "rp_id": app.rp_id,
-                "nonce": nonce,
-                "created_at": created_at,
-                "expires_at": created_at + RP_TTL_S,
-                "signature": signature,
-            },
-        });
-        Draft {
-            challenge: Challenge {
-                request,
-                attempt_id: id,
-                expires_at_ms,
-                classes,
-                browser_secret: random_b64(),
-            },
-            message,
-            nonce,
-        }
-    }
-
-    /// Supersedes the wallet's pending attempt and saves this one.
-    fn save(
-        &self,
-        conn: &Connection,
-        wallet: &str,
-        kind: &str,
-        session_id: Option<&str>,
-        now_ms: i64,
-    ) -> rusqlite::Result<usize> {
         conn.execute(
-            "UPDATE world_attempts SET status = 'expired', reason = ?2, done_at = ?3 \
-             WHERE wallet = ?1 AND status = 'pending'",
+            "UPDATE world_attempts SET status = 'expired', reason = ?2, done_at = ?3              WHERE wallet = ?1 AND status = 'pending'",
             params![wallet, SUPERSEDED, now_ms * 1_000],
         )?;
         conn.execute(
-            "INSERT INTO world_attempts (id, wallet, message, nonce, browser, \
-             acr_allowed, status, expires_at, created_at, kind, session_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10)",
+            "INSERT INTO world_attempts (id, wallet, message, nonce, browser, acr_allowed,              status, expires_at, created_at, kind)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, 'human')",
             params![
-                self.challenge.attempt_id,
+                row.0,
                 wallet,
-                self.message,
-                self.nonce,
-                browser_hash(&self.challenge.browser_secret),
-                full_acr(self.challenge.classes).join(" "),
-                self.challenge.expires_at_ms * 1_000,
-                now_ms * 1_000,
-                kind,
-                session_id
+                row.1,
+                nonce,
+                row.2,
+                row.3,
+                row.4 * 1_000,
+                now_ms * 1_000
             ],
-        )
-    }
+        )?;
+        Ok(())
+    })
+    .await?;
+    Ok(challenge)
 }
 
 #[cfg(test)]

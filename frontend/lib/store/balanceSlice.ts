@@ -2,6 +2,8 @@
 import { StateCreator } from "zustand";
 import type { Store } from "./index";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
+import { ApiFailure, readApiError } from "@/lib/api/errors";
+import { sendGuarded } from "@/lib/world/gate";
 
 export interface BalanceState {
   houseBalance: number;
@@ -38,10 +40,7 @@ export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (se
 
       const response = await fetch(`/api/balance/${address}?currency=${currency}`);
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to fetch balance');
-      }
+      if (!response.ok) throw new ApiFailure(await readApiError(response));
 
       const data = await response.json();
 
@@ -86,25 +85,25 @@ export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (se
     try {
       set({ isLoading: true, error: null });
 
-      const response = await fetch('/api/balance/withdraw', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          userAddress: address,
-          amount,
-          currency: currency,
-          userTier: get().userTier || 'free',
-          signature: security?.signature,
-          signedAt: security?.signedAt,
-        }),
-      });
+      const response = await sendGuarded((stepupId) =>
+        fetch('/api/balance/withdraw', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            userAddress: address,
+            amount,
+            currency: currency,
+            userTier: get().userTier || 'free',
+            signature: security?.signature,
+            signedAt: security?.signedAt,
+            stepupId,
+          }),
+        })
+      );
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to process withdrawal');
-      }
+      if (!response.ok) throw new ApiFailure(await readApiError(response));
 
       const data = await response.json();
 

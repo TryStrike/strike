@@ -1,35 +1,22 @@
-//! Environment-backed configuration for the Strike backend. The root
-//! `.env.local` drives both this service and the Next app.
-
 use std::env;
 use std::sync::OnceLock;
 
-/// Arc Testnet, matching `frontend/lib/arc/config.ts`.
 pub const ARC_DEFAULT_CHAIN_ID: u64 = 5042002;
 pub const ARC_DEFAULT_RPC: &str = "https://rpc.testnet.arc.io";
 pub const ARC_DEFAULT_EXPLORER: &str = "https://explorer.testnet.arc.io";
 pub const ARC_DEFAULT_USDC: &str = "0x3600000000000000000000000000000000000000";
 pub const ARC_DEFAULT_EURC: &str = "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a";
-/// USDC on Arc is 6 decimals; the native gas balance is the same unit at 18.
 pub const USDC_DECIMALS: u32 = 6;
 
-/// The network label the deposit modal echoes back.
 pub const ARC_NETWORK_NAME: &str = "Arc";
 
-/// `ARC_ASSETS` — what this deployment can credit. Adding an asset means adding
-/// its decimals and its token address too, so the list is deliberately short.
 pub const ARC_ASSETS: [&str; 2] = ["USDC", "EURC"];
 
-/// `assetFrom(value)`: upper-cased and matched against the supported list, so
-/// `usdc`, `USDC` and `" usdc "` all mean the same asset and anything else is
-/// not an asset at all.
 pub fn arc_asset(value: Option<&str>) -> Option<&'static str> {
     let raw = value.unwrap_or("").trim().to_uppercase();
     ARC_ASSETS.into_iter().find(|asset| *asset == raw)
 }
 
-/// The Arc token contract for a ledger currency, if this deployment settles it.
-/// Both are Circle tokens with 6 decimals.
 pub fn token_address(currency: &str) -> Option<String> {
     let cfg = config();
     match arc_asset(Some(currency))? {
@@ -52,35 +39,24 @@ fn parse_num<T: std::str::FromStr>(key: &str) -> Option<T> {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Path of the SQLite ledger file.
     pub sqlite_path: Option<String>,
     pub read_pool: usize,
     pub statement_timeout_ms: u64,
-    /// `SQLITE_FULLFSYNC`, on unless set to `OFF`. Forces the drive cache on
-    /// macOS and does nothing on Linux.
     pub sqlite_fullfsync: bool,
-    /// Tick history. Never the ledger file; unset keeps ticks in memory only.
     pub ticks_sqlite_path: Option<String>,
     pub tick_flush_secs: u64,
     pub tick_retention_days: u64,
-    /// Ticks kept in memory per asset.
     pub tick_ring_secs: usize,
-    /// An accepted withdrawal with no hash after this long needs an operator.
     pub withdrawal_stuck_secs: i64,
-    /// Upstream quote URLs. Overridable so a test decides what the market did.
     pub binance_endpoint: String,
     pub binance_ws_endpoint: String,
     pub binance_perp_endpoint: String,
     pub binance_perp_ws_endpoint: String,
     pub kraken_endpoint: String,
     pub yahoo_spark_endpoint: String,
-    /// How long between samples of every tradable asset.
     pub price_sample_ms: u64,
-    /// The newest crypto tick a bet may take its strike from.
     pub bet_tick_max_age_ms: i64,
-    /// How far a client's strike may sit from the server's, in basis points.
     pub bet_price_tolerance_bps: f64,
-    /// How far before `end_time` a crypto tick may be and still settle a round.
     pub settle_tick_tolerance_ms: i64,
     pub balance_internal_secret: Option<String>,
     pub balance_settlement_secret: Option<String>,
@@ -90,61 +66,44 @@ pub struct Config {
     pub arc_usdc: String,
     pub arc_eurc: String,
     pub treasury_address: String,
-    /// `ARKIV_PRIVATE_KEY`. Unset leaves settled bets unsealed.
     pub arkiv_secret_key: Option<String>,
-    /// Bee node or gateway that epoch bundles upload to. Unset: no Swarm archive.
     pub swarm_bee_url: Option<String>,
     /// TestStockMarket on Arc testnet; quotes are signed for this address.
     pub stock_market_address: Option<String>,
     pub swarm_batch_id: Option<String>,
-    /// `ARKIV_RPC_URL`, with `ARKIV_ACCESS_KEY` appended as the path when set.
     pub arkiv_rpc: String,
     pub treasury_secret_key: Option<String>,
     pub banned_wallet_addresses: Vec<String>,
     pub withdrawal_frequency_exempt: Vec<String>,
     pub app_url: Option<String>,
-    /// House ceilings on what one agent session may be started with.
     pub agent_max_per_trade: rust_decimal::Decimal,
     pub agent_max_budget: rust_decimal::Decimal,
     pub agent_max_minutes: i64,
-    /// Backend only. The copilot answers 503 without it.
     pub anthropic_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub jev_endpoint: String,
-    /// Overridable so a test decides what the model says.
     pub anthropic_base_url: String,
-    /// Open stake summed across every running agent.
     pub agent_max_open_stake: rust_decimal::Decimal,
-    /// The largest single bet, manual or agent.
     pub max_stake: rust_decimal::Decimal,
-    /// The most one wallet may have riding on unsettled rounds.
     pub max_wallet_open_stake: rust_decimal::Decimal,
-    /// World ID step-up for YOLO starts. Unset, YOLO starts need no human check.
     pub world_idkit: Option<IdkitApp>,
-    /// Budgets up to this take a selfie check, up to `world_orb_max` an Orb,
-    /// anything above an Orb plus a live face.
-    pub world_selfie_max: rust_decimal::Decimal,
-    pub world_orb_max: rust_decimal::Decimal,
-    /// `WORLD_ACR_FLOOR`: the weakest class any budget accepts.
-    pub world_acr_floor: Option<String>,
-    /// First epoch the round committer commits, so it never backfills history.
+    pub world_action: String,
+    pub dev_no_world: bool,
+    pub world_limits: WorldLimits,
     pub proofs_start_epoch: Option<u64>,
-    /// `NODE_ENV === 'production'` equivalent: strict guard behaviour.
     pub production: bool,
     pub bind_addr: String,
 }
 
 impl Config {
-    /// Reads the environment with the same defaults the TS service used.
-    ///
-    /// Only a malformed World ID signing key or environment panics. A missing
-    /// secret disables the feature it guards (exactly like the `process.env`
-    /// reads did) and a missing `SQLITE_PATH`
-    /// fails at the first query instead, so pure functions stay testable
-    /// without a fully populated environment.
     pub fn from_env() -> Self {
         let node_env = str_var("NODE_ENV").unwrap_or_default();
         let production = node_env == "production";
+        let dev_no_world = str_var("STRIKE_DEV_NO_WORLD").as_deref() == Some("1");
+        assert!(
+            !(production && dev_no_world),
+            "STRIKE_DEV_NO_WORLD=1 is refused when NODE_ENV=production"
+        );
 
         let banned = str_var("BANNED_WALLET_ADDRESSES")
             .map(|v| split_list(&v))
@@ -163,7 +122,6 @@ impl Config {
             tick_flush_secs: parse_num("TICK_FLUSH_SECS").unwrap_or(120),
             tick_retention_days: parse_num("TICK_RETENTION_DAYS").unwrap_or(3),
             tick_ring_secs: parse_num("TICK_RING_SECS").unwrap_or(900),
-            // Two transfers can each wait 180 s for confirmations.
             withdrawal_stuck_secs: parse_num("WITHDRAWAL_STUCK_SECS").unwrap_or(600),
             binance_endpoint: str_var("BINANCE_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::BINANCE_ENDPOINT.to_string()),
@@ -226,10 +184,9 @@ impl Config {
             max_wallet_open_stake: parse_num("MAX_WALLET_OPEN_STAKE")
                 .unwrap_or(rust_decimal::Decimal::from(300)),
             world_idkit: IdkitApp::from_env(),
-            world_selfie_max: parse_num("WORLD_SELFIE_MAX")
-                .unwrap_or(rust_decimal::Decimal::from(10)),
-            world_orb_max: parse_num("WORLD_ORB_MAX").unwrap_or(rust_decimal::Decimal::from(50)),
-            world_acr_floor: str_var("WORLD_ACR_FLOOR"),
+            world_action: str_var("WORLD_ACTION").unwrap_or_else(|| "strike-human".to_string()),
+            dev_no_world,
+            world_limits: WorldLimits::from_env(),
             proofs_start_epoch: parse_num("PROOFS_START_EPOCH"),
             production,
             bind_addr: str_var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
@@ -241,13 +198,55 @@ impl Config {
     }
 }
 
-/// An IDKit app on developer.world.org. The key signs each proof request.
+#[derive(Debug, Clone)]
+pub struct TierCaps {
+    pub open_cap: rust_decimal::Decimal,
+    pub daily_loss: rust_decimal::Decimal,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorldLimits {
+    pub selfie: TierCaps,
+    pub orb: TierCaps,
+    pub cooloff_min: i64,
+    pub stepup_withdraw_over: rust_decimal::Decimal,
+    pub stepup_proposal_over: rust_decimal::Decimal,
+}
+
+impl WorldLimits {
+    fn from_env() -> Self {
+        let usdc = |key: &str, default: i64| {
+            parse_num(key).unwrap_or(rust_decimal::Decimal::from(default))
+        };
+        Self {
+            selfie: TierCaps {
+                open_cap: usdc("WORLD_SELFIE_OPEN_CAP", 5),
+                daily_loss: usdc("WORLD_SELFIE_DAILY_LOSS", 25),
+            },
+            orb: TierCaps {
+                open_cap: usdc("WORLD_ORB_OPEN_CAP", 50),
+                daily_loss: usdc("WORLD_ORB_DAILY_LOSS", 200),
+            },
+            cooloff_min: parse_num("WORLD_COOLOFF_MIN").unwrap_or(30),
+            stepup_withdraw_over: usdc("STEPUP_WITHDRAW_OVER", 25),
+            stepup_proposal_over: usdc("STEPUP_PROPOSAL_OVER", 5),
+        }
+    }
+
+    pub fn caps(&self, tier: &str) -> &TierCaps {
+        if tier == "orb" {
+            &self.orb
+        } else {
+            &self.selfie
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IdkitApp {
     pub app_id: String,
     pub rp_id: String,
     pub signing_key: k256::ecdsa::SigningKey,
-    /// `production` or `staging` (the simulator).
     pub environment: String,
     pub verify_url: String,
 }
@@ -301,7 +300,6 @@ fn split_list(raw: &str) -> Vec<String> {
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-/// Process-wide config, initialised once from the environment.
 pub fn config() -> &'static Config {
     CONFIG.get_or_init(Config::from_env)
 }

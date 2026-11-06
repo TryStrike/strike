@@ -1,7 +1,3 @@
-//! Agent mode: the start message, the momentum signal, sizing, and the session
-//! and decision rows. The task that runs a session lives in the server crate,
-//! next to the bet runner it calls.
-
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{json, Value};
@@ -14,14 +10,12 @@ use crate::money::{from_fixed, to_fixed, MONEY_SCALE};
 use crate::prices;
 use crate::settlement::{binomo_multiplier, PRICE_SCALE};
 use crate::ticks::TickBuffer;
-use crate::world::{self, HumanGrant};
+use crate::{agentpass, world};
 
 pub const CHECK_EVERY_MS: u64 = 5_000;
-/// How long a normal mode proposal waits for the trader's tap.
 pub const PROPOSAL_MS: i64 = 5_000;
 pub const PROPOSAL_EXPIRED: &str = "Proposal expired";
 pub const ROUND_SECONDS: i64 = 30;
-/// No new trade once a 30 s round could outlive the session.
 pub const CLOSING_MS: i64 = 35_000;
 const LOOKBACK_MS: i64 = 15_000;
 const RANGE_MS: i64 = 120_000;
@@ -39,8 +33,18 @@ pub const HOUSE_LIMIT: &str = "House agent limit reached";
 pub const SERVER_RESTART: &str = "server restart";
 pub const WAITING_FOR_HUMAN: &str = "Waiting for a human";
 pub const HUMAN_CHECK_DENIED: &str = "human check denied";
-/// How long a paused YOLO agent waits for its human to step up.
+pub const HUMAN_CHECK_EXPIRED: &str = "human check expired";
+pub const HUMAN_BANNED: &str = "This human is banned";
+pub const HUMAN_REQUIRED: &str = "Verify you are human with World ID first";
 pub const HUMAN_WAIT_MS: i64 = 2 * 60 * 1000;
+pub const CHASE_MS: i64 = 60_000;
+
+pub fn human_wait_ms() -> i64 {
+    std::env::var("HUMAN_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(HUMAN_WAIT_MS)
+}
 
 fn stake_floor() -> Decimal {
     Decimal::new(10, 2)
@@ -60,8 +64,6 @@ pub struct StartTerms {
     pub nonce: String,
 }
 
-/// The exact text the trader signs. Parsing re-renders it and demands the same
-/// bytes back, so there is one spelling per set of terms.
 pub fn start_message(t: &StartTerms) -> String {
     format!(
         "Strike agent session\nWallet: {}\nChain: {}\nAsset: {}\nMode: {}\nBudget: {} USDC\n\
@@ -85,6 +87,10 @@ fn malformed() -> Rejection {
 
 pub(crate) fn refuse(status: u16, message: &str) -> Rejection {
     (status, json!({ "error": message }))
+}
+
+fn coded(status: u16, code: &str, message: &str) -> Rejection {
+    agentpass::refusal(status, code, message)
 }
 
 pub fn parse_start(message: &str) -> Result<StartTerms, Rejection> {
@@ -123,8 +129,6 @@ pub fn parse_start(message: &str) -> Result<StartTerms, Rejection> {
     Ok(terms)
 }
 
-/// Everything the server refuses a start for, apart from the signature and the
-/// rows that already exist.
 pub fn check_start(t: &StartTerms, now_ms: i64) -> Result<(), Rejection> {
     let cfg = config();
     if !t.wallet.starts_with("0x") || !crate::address::is_address(&t.wallet) {
@@ -199,10 +203,6 @@ pub fn check_start(t: &StartTerms, now_ms: i64) -> Result<(), Rejection> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Signal and sizing
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, PartialEq)]
 pub enum Signal {
     Trade {
@@ -216,7 +216,6 @@ pub enum Signal {
     Skip(&'static str),
 }
 
-/// Price now against price 15 s ago, scaled by the 2 minute range.
 pub fn signal(ring: &TickBuffer, asset: &str, now_ms: i64) -> Signal {
     let max_age = config().bet_tick_max_age_ms;
     let Some(now) = ring.latest(asset) else {
@@ -284,9 +283,6 @@ pub fn stop_loss_headroom(session: &Session, open: Decimal) -> Decimal {
     session.stop_loss - realized_loss - open
 }
 
-/// The smallest of the per trade cap, budget left and stop-loss headroom, floored to
-/// USDC's 6 decimals. `Err` carries the reason the session has to stop.
-/// Headroom counts open stakes, so a loss in flight can't overshoot it.
 pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> {
     let left = session.budget - session.spent;
     if left <= Decimal::ZERO {
@@ -307,12 +303,46 @@ pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> 
     Ok(stake)
 }
 
-/// A YOLO agent that has lost half its stop-loss pauses for its human.
-pub fn needs_human(session: &Session) -> bool {
-    session.mode == "yolo" && -session.realized_pnl * Decimal::TWO >= session.stop_loss
+fn checkpoints_due(session: &Session) -> i64 {
+    let quarters = (-session.realized_pnl * Decimal::from(4) / session.stop_loss)
+        .floor()
+        .to_string()
+        .parse::<i64>()
+        .unwrap_or(0);
+    (quarters - 1).clamp(0, 2)
 }
 
-/// The body the manual bet route takes, with the strike from the server tick.
+pub fn needs_human(session: &Session) -> bool {
+    session.mode == "yolo"
+        && session.stop_loss > Decimal::ZERO
+        && checkpoints_due(session) > session.checks_passed
+}
+
+pub type LastLoss = (String, Decimal, i64);
+
+pub fn chasing(last: Option<&LastLoss>, stake: Decimal, now_ms: i64) -> bool {
+    last.is_some_and(|(_, lost, at)| now_ms - at <= CHASE_MS && stake > *lost)
+}
+
+pub async fn last_loss(db: &Db, session_id: &str) -> ApiResult<Option<LastLoss>> {
+    let id = session_id.to_string();
+    db.read(move |conn| {
+        let last: Option<(String, i64, i64, i64)> = conn
+            .query_row(
+                "SELECT id, stake, pnl, created_at FROM agent_decisions \
+                 WHERE session_id = ?1 AND verdict = 'placed' AND result IS NOT NULL \
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        Ok(last
+            .filter(|(_, _, pnl, _)| *pnl < 0)
+            .map(|(id, stake, _, at)| (id, money(stake), at / 1_000 + ROUND_SECONDS * 1_000)))
+    })
+    .await
+}
+
 pub fn bet_body(
     session: &Session,
     decision_id: &str,
@@ -336,10 +366,6 @@ pub fn bet_body(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Rows
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
@@ -357,6 +383,9 @@ pub struct Session {
     pub realized_pnl: Decimal,
     pub wins: i64,
     pub losses: i64,
+    pub paused_until_ms: Option<i64>,
+    pub pause_stepup_id: Option<String>,
+    pub checks_passed: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +430,9 @@ impl Session {
             "realizedPnl": money_json(self.realized_pnl),
             "wins": self.wins,
             "losses": self.losses,
+            "pausedUntil": self.paused_until_ms,
+            "pauseStepupId": self.pause_stepup_id,
+            "checksPassed": self.checks_passed,
         })
     }
 }
@@ -428,7 +460,6 @@ impl Decision {
     }
 }
 
-/// The numbers behind a proposal, as they stood when it was decided.
 pub fn trace(session: &Session, signal: &str, jev_needed: Option<f64>) -> Value {
     json!({
         "signal": signal,
@@ -439,7 +470,8 @@ pub fn trace(session: &Session, signal: &str, jev_needed: Option<f64>) -> Value 
 }
 
 const SESSION_COLUMNS: &str = "id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
-     starts_at, ends_at, status, stopped_reason, spent, realized_pnl, \
+     starts_at, ends_at, status, stopped_reason, spent, realized_pnl, paused_until, \
+     pause_stepup_id, checks_passed, \
      (SELECT count(*) FROM agent_decisions d WHERE d.session_id = agent_sessions.id AND d.result = 'win'), \
      (SELECT count(*) FROM agent_decisions d WHERE d.session_id = agent_sessions.id AND d.result = 'loss')";
 const DECISION_COLUMNS: &str =
@@ -447,7 +479,6 @@ const DECISION_COLUMNS: &str =
      (SELECT r.strike_price FROM bet_rounds r WHERE r.bet_id = agent_decisions.bet_id), \
      (SELECT r.end_time FROM bet_rounds r WHERE r.bet_id = agent_decisions.bet_id)";
 
-/// Stored like a multiplier, at 4 decimals.
 fn confidence_fixed(confidence: f64) -> i64 {
     (confidence * 10_000.0).round() as i64
 }
@@ -475,8 +506,11 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         stopped_reason: row.get(10)?,
         spent: money(row.get(11)?),
         realized_pnl: money(row.get(12)?),
-        wins: row.get(13)?,
-        losses: row.get(14)?,
+        paused_until_ms: row.get::<_, Option<i64>>(13)?.map(|us| us / 1_000),
+        pause_stepup_id: row.get(14)?,
+        checks_passed: row.get(15)?,
+        wins: row.get(16)?,
+        losses: row.get(17)?,
     })
 }
 
@@ -531,7 +565,6 @@ fn load_decision(conn: &Connection, id: &str) -> ApiResult<Decision> {
     )?)
 }
 
-/// Why the rows that exist refuse a start, or `None`.
 pub(crate) fn start_blocked(
     conn: &Connection,
     nonce: &str,
@@ -543,7 +576,7 @@ pub(crate) fn start_blocked(
         |r| r.get(0),
     )?;
     if used {
-        return Ok(Some(refuse(409, "Start message already used")));
+        return Ok(Some(coded(409, "duplicate", "Start message already used")));
     }
     let active: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE wallet = ?1 AND status = 'running')",
@@ -551,22 +584,71 @@ pub(crate) fn start_blocked(
         |r| r.get(0),
     )?;
     if active {
-        return Ok(Some(refuse(
+        return Ok(Some(coded(
             409,
+            "agent_running",
             "This wallet already has an active agent session",
         )));
     }
     Ok(None)
 }
 
-/// Creates the session, or says why it can't. The checks and the insert share
-/// the single writer, so two starts can't both pass them. A YOLO session
-/// carries the human that approved it, whose attempt is spent in the same write.
+fn human_start_blocked(
+    conn: &Connection,
+    t: &StartTerms,
+    wallet: &str,
+    human_id: &str,
+) -> rusqlite::Result<Option<Rejection>> {
+    if let Some(refused) = start_blocked(conn, &t.nonce, wallet)? {
+        return Ok(Some(refused));
+    }
+    let mut wallets = world::wallets_of_human(conn, human_id)?;
+    wallets.push(wallet.to_string());
+    if world::any_banned(conn, &wallets)? {
+        return Ok(Some(coded(403, "banned", HUMAN_BANNED)));
+    }
+    let running: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE status = 'running' AND wallet IN ({}))",
+            vec!["?"; wallets.len()].join(", ")
+        ),
+        rusqlite::params_from_iter(&wallets),
+        |r| r.get(0),
+    )?;
+    if running {
+        return Ok(Some(coded(
+            409,
+            "agent_running",
+            "This human already runs an agent",
+        )));
+    }
+    Ok(None)
+}
+
+pub fn start_key(t: &StartTerms) -> String {
+    agentpass::message_key(&start_message(t))
+}
+
+pub async fn start_precheck(
+    db: &Db,
+    t: &StartTerms,
+    human_id: &str,
+) -> ApiResult<Option<Rejection>> {
+    let (t, wallet, human_id) = (
+        t.clone(),
+        crate::address::canonical(&t.wallet),
+        human_id.to_string(),
+    );
+    db.read(move |conn| Ok(human_start_blocked(conn, &t, &wallet, &human_id)?))
+        .await
+}
+
 pub async fn create_session(
     db: &Db,
     t: StartTerms,
     now_ms: i64,
-    human: Option<HumanGrant>,
+    human_id: &str,
+    stepup_id: Option<String>,
 ) -> ApiResult<Result<Session, Rejection>> {
     let id = uuid::Uuid::new_v4().to_string();
     let wallet = crate::address::canonical(&t.wallet);
@@ -575,21 +657,24 @@ pub async fn create_session(
         fixed(t.max_per_trade)?,
         fixed(t.stop_loss)?,
     );
-    if t.mode == "yolo" && human.is_none() {
-        if world::enabled() {
-            return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
-        }
-        if config().production {
-            return Ok(Err(refuse(503, world::NOT_CONFIGURED)));
-        }
-    }
+    let (human_id, key) = (human_id.to_string(), start_key(&t));
     db.write(move |conn| {
-        let refused = match &human {
-            Some(grant) => world::claim(conn, grant, &wallet, &t.nonce, now_ms)?,
-            None => start_blocked(conn, &t.nonce, &wallet)?,
-        };
-        if let Some(refused) = refused {
+        if let Some(refused) = human_start_blocked(conn, &t, &wallet, &human_id)? {
             return Ok(Err(refused));
+        }
+        if t.mode == "yolo" {
+            let Some(stepup) = &stepup_id else {
+                return Ok(Err(coded(
+                    401,
+                    "step_up_required",
+                    "A YOLO agent needs your approval in World App",
+                )));
+            };
+            if let Err(refused) =
+                agentpass::consume(conn, stepup, &human_id, "yolo_start", &key, now_ms)?
+            {
+                return Ok(Err(refused));
+            }
         }
         conn.execute(
             "INSERT INTO agent_sessions (id, wallet, asset, mode, budget, max_per_trade, stop_loss,              starts_at, ends_at, nonce, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')",
@@ -606,15 +691,11 @@ pub async fn create_session(
                 t.nonce
             ],
         )?;
-        if let Some(grant) = &human {
-            world::approve(conn, grant, &wallet, &id, now_ms)?;
-        }
         Ok(Ok(load_session(conn, &id)?))
     })
     .await
 }
 
-/// The wallet's own session, or `None` when that id isn't theirs.
 pub async fn session_for(db: &Db, id: &str, wallet: &str) -> ApiResult<Option<Session>> {
     let (id, wallet) = (id.to_string(), wallet.to_string());
     db.read(move |conn| {
@@ -631,7 +712,6 @@ pub async fn session_for(db: &Db, id: &str, wallet: &str) -> ApiResult<Option<Se
     .await
 }
 
-/// The newest `limit` decisions, oldest first.
 pub async fn recent_decisions(db: &Db, session_id: &str, limit: i64) -> ApiResult<Vec<Decision>> {
     let id = session_id.to_string();
     db.read(move |conn| {
@@ -648,11 +728,10 @@ pub async fn recent_decisions(db: &Db, session_id: &str, limit: i64) -> ApiResul
     .await
 }
 
-/// Stops a running session. `None` when it was already stopped, so the first
-/// reason is the one that stays.
 pub async fn stop_session(db: &Db, id: &str, reason: &str) -> ApiResult<Option<Session>> {
     let (id, reason) = (id.to_string(), reason.to_string());
     db.write(move |conn| {
+        end_pause(conn, Some(&id), &reason)?;
         let changed = conn.execute(
             "UPDATE agent_sessions SET status = 'stopped', stopped_reason = ?2 \
              WHERE id = ?1 AND status = 'running'",
@@ -671,9 +750,6 @@ pub async fn stop_session(db: &Db, id: &str, reason: &str) -> ApiResult<Option<S
     .await
 }
 
-/// No task survives a restart, so no session may claim to be running. A
-/// reservation the crash left without a bet id gets it back from the ledger,
-/// keyed by the decision id it was placed under, or is released.
 pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     db.write(|conn| {
         conn.execute(
@@ -698,6 +774,7 @@ pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
             "UPDATE agent_decisions SET verdict = 'skipped', reason = ?1 WHERE verdict = 'awaiting'",
             [SERVER_RESTART],
         )?;
+        end_pause(conn, None, SERVER_RESTART)?;
         Ok(conn.execute(
             "UPDATE agent_sessions SET status = 'stopped', stopped_reason = ?1 WHERE status = 'running'",
             [SERVER_RESTART],
@@ -706,14 +783,113 @@ pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     .await
 }
 
-/// A proposed trade and the numbers behind it.
+fn end_pause(conn: &Connection, session_id: Option<&str>, reason: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE stepups SET status = 'cancelled', reason = ?2 \
+         WHERE status IN ('pending', 'approved') AND id IN (SELECT pause_stepup_id \
+           FROM agent_sessions WHERE status = 'running' AND (?1 IS NULL OR id = ?1))",
+        params![session_id, reason],
+    )?;
+    conn.execute(
+        "UPDATE agent_sessions SET paused_until = NULL, pause_stepup_id = NULL \
+         WHERE status = 'running' AND (?1 IS NULL OR id = ?1)",
+        [session_id],
+    )?;
+    Ok(())
+}
+
+pub async fn pause(
+    db: &Db,
+    session_id: &str,
+    until_ms: i64,
+    stepup_id: Option<&str>,
+) -> ApiResult<Option<Session>> {
+    let (id, stepup) = (session_id.to_string(), stepup_id.map(str::to_string));
+    db.write(move |conn| {
+        let changed = conn.execute(
+            "UPDATE agent_sessions SET paused_until = ?2, pause_stepup_id = ?3 \
+             WHERE id = ?1 AND status = 'running'",
+            params![id, until_ms * 1_000, stepup],
+        )?;
+        Ok(match changed {
+            0 => None,
+            _ => Some(load_session(conn, &id)?),
+        })
+    })
+    .await
+}
+
+pub async fn repoint_pause(db: &Db, session_id: &str, stepup_id: &str) -> ApiResult<bool> {
+    let (id, stepup) = (session_id.to_string(), stepup_id.to_string());
+    db.write(move |conn| {
+        Ok(conn.execute(
+            "UPDATE agent_sessions SET pause_stepup_id = ?2 \
+             WHERE id = ?1 AND status = 'running' AND paused_until IS NOT NULL",
+            [&id, &stepup],
+        )? > 0)
+    })
+    .await
+}
+
+pub async fn resume(
+    db: &Db,
+    session_id: &str,
+    now_ms: i64,
+) -> ApiResult<Result<Session, Rejection>> {
+    let id = session_id.to_string();
+    db.write(move |conn| {
+        let session = load_session(conn, &id)?;
+        let (Some(_), Some(stepup)) = (session.paused_until_ms, &session.pause_stepup_id) else {
+            return Ok(Err(coded(
+                409,
+                "not_paused",
+                "The agent is not waiting for a human",
+            )));
+        };
+        let Some(human) = world::human_of_wallet(conn, &session.wallet)? else {
+            return Ok(Err(coded(403, "human_required", HUMAN_REQUIRED)));
+        };
+        let (kind, key): (String, String) = conn.query_row(
+            "SELECT kind, coalesce(json_extract(subject, '$.key'), '') FROM stepups WHERE id = ?1",
+            [stepup],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let Err(refused) = agentpass::consume(conn, stepup, &human.id, &kind, &key, now_ms)? {
+            return Ok(Err(refused));
+        }
+        let passed = match kind.as_str() {
+            "agent_checkpoint" => (session.checks_passed + 1).max(checkpoints_due(&session)),
+            _ => session.checks_passed,
+        };
+        conn.execute(
+            "UPDATE agent_sessions SET paused_until = NULL, pause_stepup_id = NULL, \
+             checks_passed = ?2 WHERE id = ?1",
+            params![id, passed],
+        )?;
+        Ok(Ok(load_session(conn, &id)?))
+    })
+    .await
+}
+
+pub async fn extend_proposal(db: &Db, decision_id: &str, until_ms: i64) -> ApiResult<()> {
+    let id = decision_id.to_string();
+    db.write(move |conn| {
+        conn.execute(
+            "UPDATE agent_decisions SET expires_at = max(expires_at, ?2) \
+             WHERE id = ?1 AND verdict = 'awaiting'",
+            params![id, until_ms * 1_000],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
 pub struct Proposed {
     pub direction: &'static str,
     pub stake: Decimal,
     pub trace: Value,
 }
 
-/// A skip or a block, folded into the previous row when that was the same one.
 pub async fn record_note(
     db: &Db,
     session_id: &str,
@@ -764,15 +940,15 @@ pub async fn record_note(
 }
 
 pub enum Reserve {
-    /// The stake is held: counted in `spent` and in open stake, not yet a bet.
     Held(Decimal),
     Blocked,
     Stop(&'static str),
     /// The session stopped, or the proposal was answered or expired, first.
     Gone,
+    Paused,
+    Refused(Rejection),
 }
 
-/// Placed stakes whose round hasn't settled, for one session or every agent.
 fn open_stake(conn: &Connection, session_id: Option<&str>) -> rusqlite::Result<Decimal> {
     conn.query_row(
         "SELECT coalesce(sum(d.stake), 0) FROM agent_decisions d \
@@ -785,9 +961,6 @@ fn open_stake(conn: &Connection, session_id: Option<&str>) -> rusqlite::Result<D
     .map(money)
 }
 
-/// Sizes the trade and holds its stake in one write, so the house cap is
-/// checked and taken atomically across every agent. Open stake is every placed
-/// decision whose round hasn't settled, held ones included.
 pub struct Reservation<'a> {
     pub decision_id: &'a str,
     pub direction: &'a str,
@@ -795,6 +968,7 @@ pub struct Reservation<'a> {
     pub proposal: bool,
     pub confidence: Option<f64>,
     pub trace: Option<&'a Value>,
+    pub stepup: Option<&'a str>,
 }
 
 pub async fn reserve(
@@ -810,6 +984,7 @@ pub async fn reserve(
         proposal,
         confidence,
         trace,
+        stepup,
     } = reservation;
     let confidence = confidence.map(confidence_fixed);
     let trace = trace.map(Value::to_string);
@@ -819,21 +994,55 @@ pub async fn reserve(
         direction.to_string(),
         reason.to_string(),
     );
+    let stepup = stepup.map(str::to_string);
     let cap = config().agent_max_open_stake;
     db.write(move |conn| {
         let session = load_session(conn, &session_id)?;
         if session.status != "running" {
             return Ok(Reserve::Gone);
         }
+        if session.paused_until_ms.is_some() {
+            return Ok(Reserve::Paused);
+        }
         if now_ms >= session.ends_at_ms {
             return Ok(Reserve::Stop(TIME_UP));
         }
-        let stake = match stake(&session, open_stake(conn, Some(&session_id))?) {
+        let Some(human) = world::human_of_wallet(conn, &session.wallet)? else {
+            return Ok(Reserve::Stop(HUMAN_REQUIRED));
+        };
+        if world::any_banned(conn, &world::wallets_of_human(conn, &human.id)?)? {
+            return Ok(Reserve::Stop(HUMAN_BANNED));
+        }
+        let mut stake = match stake(&session, open_stake(conn, Some(&session_id))?) {
             Ok(stake) => stake,
             Err(reason) => return Ok(Reserve::Stop(reason)),
         };
+        if proposal {
+            let proposed = load_decision(conn, &id)?;
+            if proposed.verdict != "awaiting" {
+                return Ok(Reserve::Gone);
+            }
+            stake = stake.min(proposed.stake.unwrap_or(Decimal::ZERO));
+        }
         if open_stake(conn, None)? + stake > cap {
             return Ok(Reserve::Blocked);
+        }
+        match &stepup {
+            Some(stepup) => {
+                if let Err(refused) =
+                    agentpass::consume(conn, stepup, &human.id, "proposal", &id, now_ms)?
+                {
+                    return Ok(Reserve::Refused(refused));
+                }
+            }
+            None if proposal && stake > config().world_limits.stepup_proposal_over => {
+                return Ok(Reserve::Refused(coded(
+                    401,
+                    "step_up_required",
+                    "Approve this stake in World App first",
+                )));
+            }
+            None => {}
         }
         let held = fixed(stake)?;
         if proposal {
@@ -909,7 +1118,6 @@ pub async fn record_proposal(
     .await
 }
 
-/// Answers a proposal that is still waiting. `None` when it already wasn't.
 pub async fn resolve(
     db: &Db,
     decision_id: &str,
@@ -935,7 +1143,6 @@ pub async fn decision(db: &Db, decision_id: &str) -> ApiResult<Decision> {
     db.read(move |conn| load_decision(conn, &id)).await
 }
 
-/// The decision when it belongs to this wallet's session, `None` otherwise.
 pub async fn decision_for(
     db: &Db,
     decision_id: &str,
@@ -963,7 +1170,6 @@ pub async fn decision_for(
     .await
 }
 
-/// The held stake became a bet.
 pub async fn confirm(db: &Db, decision_id: &str, bet_id: &str) -> ApiResult<(Decision, Session)> {
     let (id, bet_id) = (decision_id.to_string(), bet_id.to_string());
     db.write(move |conn| {
@@ -979,13 +1185,10 @@ pub async fn confirm(db: &Db, decision_id: &str, bet_id: &str) -> ApiResult<(Dec
 }
 
 pub enum Release {
-    /// Forget the row, so the skip that follows folds as usual.
     Drop,
-    /// Keep the row with this verdict and reason.
     Mark(&'static str, String),
 }
 
-/// The bet path refused the held stake: give it back to the budget.
 pub async fn release(
     db: &Db,
     decision_id: &str,
@@ -1101,9 +1304,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn half_the_stop_loss_lost_pauses_yolo_only() {
-        let session = |mode: &str, pnl: i64| Session {
+    fn session(mode: &str, pnl: Decimal, checks_passed: i64) -> Session {
+        Session {
             id: "s".into(),
             wallet: "w".into(),
             asset: "BTC".into(),
@@ -1116,37 +1318,257 @@ mod tests {
             status: "running".into(),
             stopped_reason: None,
             spent: Decimal::ZERO,
-            realized_pnl: Decimal::from(pnl),
+            realized_pnl: pnl,
+            paused_until_ms: None,
+            pause_stepup_id: None,
+            checks_passed,
             wins: 0,
             losses: 0,
-        };
-        assert!(!needs_human(&session("yolo", -4)));
-        assert!(needs_human(&session("yolo", -5)));
-        assert!(!needs_human(&session("yolo", 3)));
-        assert!(!needs_human(&session("normal", -9)));
+        }
+    }
+
+    #[test]
+    fn a_yolo_loss_pauses_at_half_the_stop_loss_and_again_at_three_quarters() {
+        let due = |pnl: i64, checks| needs_human(&session("yolo", Decimal::from(pnl), checks));
+        assert!(!due(-4, 0));
+        assert!(due(-5, 0));
+        assert!(!due(3, 0));
+        assert!(!needs_human(&session("normal", Decimal::from(-9), 0)));
+        assert!(!due(-7, 1));
+        assert!(needs_human(&session("yolo", Decimal::new(-75, 1), 1)));
+        assert!(!due(-9, 2));
+        let deep = session("yolo", Decimal::from(-8), 0);
+        assert_eq!(checkpoints_due(&deep), 2);
+    }
+
+    #[test]
+    fn a_bigger_stake_within_a_minute_of_a_loss_is_a_chase() {
+        let last: LastLoss = ("d".into(), Decimal::from(2), 1_000_000);
+        assert!(chasing(Some(&last), Decimal::from(3), 1_030_000));
+        assert!(!chasing(Some(&last), Decimal::from(2), 1_030_000));
+        assert!(!chasing(Some(&last), Decimal::from(3), 1_061_000));
+        assert!(!chasing(None, Decimal::from(3), 1_030_000));
     }
 
     #[test]
     fn both_modes_stake_the_per_trade_cap() {
-        let session = |mode: &str| Session {
-            id: "s".into(),
-            wallet: "w".into(),
-            asset: "BTC".into(),
-            mode: mode.into(),
-            budget: Decimal::ONE,
-            max_per_trade: Decimal::new(2, 1),
-            stop_loss: Decimal::new(8, 1),
-            starts_at_ms: 0,
-            ends_at_ms: 1,
-            status: "running".into(),
-            stopped_reason: None,
-            spent: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
-            wins: 0,
-            losses: 0,
-        };
         for mode in ["normal", "yolo"] {
-            assert_eq!(stake(&session(mode), Decimal::ZERO), Ok(Decimal::new(2, 1)));
+            let s = Session {
+                budget: Decimal::ONE,
+                max_per_trade: Decimal::new(2, 1),
+                stop_loss: Decimal::new(8, 1),
+                ..session(mode, Decimal::ZERO, 0)
+            };
+            assert_eq!(stake(&s, Decimal::ZERO), Ok(Decimal::new(2, 1)));
+        }
+    }
+
+    async fn paused_world() -> (Db, String, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("pause-{}.sqlite", uuid::Uuid::new_v4()));
+        let db = Db::open(&path, 1, 5_000).unwrap();
+        let wallet = "0x1111111111111111111111111111111111111111";
+        db.write(move |conn| {
+            conn.execute("INSERT INTO humans (id, created_at) VALUES ('h1', 0)", [])?;
+            conn.execute(
+                "INSERT INTO human_wallets (wallet, human_id, linked_at) VALUES (?1, 'h1', 0)",
+                [wallet],
+            )?;
+            conn.execute(
+                "INSERT INTO human_limits (human_id, tier) VALUES ('h1', 'orb')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let t = StartTerms {
+            mode: "normal".into(),
+            max_per_trade: Decimal::from(8),
+            ..terms()
+        };
+        let session = create_session(&db, t, 1_000, "h1", None)
+            .await
+            .unwrap()
+            .unwrap();
+        (db, session.id, path)
+    }
+
+    async fn approved(db: &Db, id: &str, kind: &str, key: &str, now_ms: i64) {
+        let (id, kind, key) = (id.to_string(), kind.to_string(), key.to_string());
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO stepups (id, human_id, wallet, kind, subject, status, started_at, \
+                 expires_at, approved_at) VALUES (?1, 'h1', 'w', ?2, ?3, 'approved', ?4, ?5, ?4)",
+                params![
+                    id,
+                    kind,
+                    json!({ "key": key }).to_string(),
+                    now_ms * 1_000,
+                    (now_ms + 300_000) * 1_000
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    fn trade(id: &str) -> Reservation<'_> {
+        Reservation {
+            decision_id: id,
+            direction: "UP",
+            reason: "test",
+            proposal: false,
+            confidence: None,
+            trace: None,
+            stepup: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_stepup_of_this_pause_resumes_it_and_nothing_trades_meanwhile() {
+        let (db, id, path) = paused_world().await;
+        let now = 2_000;
+        approved(
+            &db,
+            "old",
+            "agent_checkpoint",
+            &format!("{id}:checkpoint:0"),
+            now,
+        )
+        .await;
+        approved(
+            &db,
+            "new",
+            "agent_checkpoint",
+            &format!("{id}:checkpoint:1"),
+            now,
+        )
+        .await;
+
+        assert_eq!(resume(&db, &id, now).await.unwrap().unwrap_err().0, 409);
+
+        pause(&db, &id, now + 60_000, Some("new"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reserve(&db, &id, trade("d1"), now).await.unwrap(),
+            Reserve::Paused
+        ));
+
+        db.write(|conn| {
+            conn.execute(
+                "UPDATE stepups SET status = 'pending', approved_at = NULL WHERE id = 'new'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let waiting = resume(&db, &id, now).await.unwrap().unwrap_err();
+        assert_eq!(waiting.1["code"], "stepup_pending");
+        db.write(move |conn| {
+            conn.execute(
+                "UPDATE stepups SET status = 'approved', approved_at = ?1 WHERE id = 'new'",
+                [now * 1_000],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let resumed = resume(&db, &id, now).await.unwrap().unwrap();
+        assert_eq!(resumed.paused_until_ms, None);
+        assert_eq!(resumed.checks_passed, 1);
+        let old: String = db
+            .read(|conn| {
+                Ok(
+                    conn.query_row("SELECT status FROM stepups WHERE id = 'old'", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(old, "approved");
+
+        pause(&db, &id, now + 60_000, Some("new"))
+            .await
+            .unwrap()
+            .unwrap();
+        let again = resume(&db, &id, now).await.unwrap().unwrap_err();
+        assert_eq!(
+            (again.0, again.1["code"].as_str()),
+            (409, Some("stepup_used"))
+        );
+
+        approved(&db, "last", "agent_checkpoint", "k", now).await;
+        assert!(repoint_pause(&db, &id, "last").await.unwrap());
+        stop_session(&db, &id, HUMAN_CHECK_DENIED)
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = load(&db, &id).await;
+        assert_eq!(stopped.paused_until_ms, None);
+        let last: String = db
+            .read(|conn| {
+                Ok(
+                    conn.query_row("SELECT status FROM stepups WHERE id = 'last'", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(last, "cancelled");
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    async fn load(db: &Db, id: &str) -> Session {
+        let id = id.to_string();
+        db.read(move |conn| load_session(conn, &id)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_big_proposal_places_only_with_its_own_approved_stepup() {
+        let (db, id, path) = paused_world().await;
+        let now = 2_000;
+        let proposed = Proposed {
+            direction: "UP",
+            stake: Decimal::from(8),
+            trace: json!({}),
+        };
+        let decision = record_proposal(&db, &id, proposed, "up", None, now)
+            .await
+            .unwrap()
+            .expect("the session is running");
+        let place = |stepup| Reservation {
+            proposal: true,
+            stepup,
+            ..trade(&decision.id)
+        };
+        let Reserve::Refused((401, body)) = reserve(&db, &id, place(None), now).await.unwrap()
+        else {
+            panic!("a big stake placed without approval");
+        };
+        assert_eq!(body["code"], "step_up_required");
+        approved(&db, "other", "proposal", "another-decision", now).await;
+        assert!(matches!(
+            reserve(&db, &id, place(Some("other")), now).await.unwrap(),
+            Reserve::Refused((403, _))
+        ));
+        approved(&db, "mine", "proposal", &decision.id, now).await;
+        let Reserve::Held(stake) = reserve(&db, &id, place(Some("mine")), now).await.unwrap()
+        else {
+            panic!("the approved stake was not held");
+        };
+        assert_eq!(stake, Decimal::from(8));
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
     }
 

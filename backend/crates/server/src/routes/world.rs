@@ -1,54 +1,112 @@
-//! `/api/world/*`: the IDKit proof post that turns a verified human into a
-//! YOLO session, and the attempt read behind the agent panel's chip. Nothing
-//! here logs a proof or nullifier.
-
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use axum::body::Bytes;
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{json, Value};
 
-use strike_core::agent;
+use strike_core::address;
 use strike_core::bets::now_ms;
 use strike_core::config::config;
-use strike_core::crypto::{self, AGENT_COOKIE};
-use strike_core::db::{self, Db};
-use strike_core::error::ApiError;
-use strike_core::world::{self, Attempt, Failure, HumanGrant, WORLD_COOKIE};
+use strike_core::db;
+use strike_core::error::{status_of, ApiError, ApiResult};
+use strike_core::world::{self, Attempt, Failure, WORLD_COOKIE};
 
-use crate::agent as live;
-use crate::http::{self, Cookie};
-use crate::routes::agent::{start_session, AGENTS_NOT_CONFIGURED};
+use crate::http::{self, require_wallet_session, Cookie, JsonBody};
 
 pub fn routes() -> Router {
     Router::new()
+        .route("/api/world/config", get(world_config))
+        .route("/api/world/human", get(human))
+        .route("/api/world/human/start", post(start))
         .route("/api/world/attempts/{id}", get(attempt))
         .route("/api/world/attempts/{id}/proof", post(proof))
 }
 
-/// The agent cookie on approval. `Err(Some)` is an outcome to record,
-/// `Err(None)` one the session write already recorded.
-type Outcome = Result<Result<Cookie, Option<(&'static str, String)>>, ApiError>;
-
-/// A paused agent whose human said no, or whose checkpoint another human
-/// answered, stops. A failed or expired check leaves it waiting out its pause.
-async fn end_paused(database: &Db, attempt: &Attempt, status: &str) {
-    if attempt.kind != world::CHECKPOINT || !matches!(status, "denied" | "mismatch") {
-        return;
-    }
-    if let Some(session_id) = &attempt.session_id {
-        live::stop(database, session_id, agent::HUMAN_CHECK_DENIED).await;
-    }
+async fn world_config() -> Json<Value> {
+    let cfg = config();
+    let limits = &cfg.world_limits;
+    let app = cfg.world_idkit.as_ref();
+    Json(json!({
+        "enabled": app.is_some(),
+        "devBypass": world::dev_bypass(),
+        "appId": app.map(|a| &a.app_id),
+        "environment": app.map(|a| &a.environment),
+        "action": cfg.world_action,
+        "tiers": {
+            "selfie": { "openCap": limits.selfie.open_cap, "dailyLoss": limits.selfie.daily_loss },
+            "orb": { "openCap": limits.orb.open_cap, "dailyLoss": limits.orb.daily_loss },
+        },
+        "cooloffMin": limits.cooloff_min,
+        "stepup": {
+            "withdrawOver": limits.stepup_withdraw_over,
+            "proposalOver": limits.stepup_proposal_over,
+        },
+        "agentPass": {
+            "enabled": strike_core::agentpass::enabled(),
+        },
+    }))
 }
 
-/// Attempts whose proof is out at World. A duplicate post (a reload, a double
-/// tap) leaves the first to finish instead of verifying the proof twice.
-// ponytail: per process, a claim column on world_attempts if the API ever runs twice.
+fn wallet_param(raw: Option<&str>) -> ApiResult<String> {
+    raw.filter(|w| address::is_address(w))
+        .map(address::canonical)
+        .ok_or_else(|| {
+            ApiError::coded("invalid_body", "A wallet address is required")
+                .with("field", json!("wallet"))
+        })
+}
+
+#[derive(Deserialize)]
+struct HumanQuery {
+    wallet: Option<String>,
+}
+
+async fn human(headers: HeaderMap, Query(query): Query<HumanQuery>) -> ApiResult<Json<Value>> {
+    let wallet = wallet_param(query.wallet.as_deref())?;
+    require_wallet_session(&headers, &wallet)?;
+    Ok(Json(
+        world::human_status(db::db().await?, &wallet, now_ms()).await?,
+    ))
+}
+
+async fn start(headers: HeaderMap, JsonBody(body): JsonBody<Value>) -> ApiResult<Response> {
+    let wallet = wallet_param(body["userAddress"].as_str())?;
+    require_wallet_session(&headers, &wallet)?;
+    if world::dev_bypass() {
+        return Err(ApiError::coded(
+            "dev_bypass",
+            "Human checks are off on this dev server, every wallet counts as verified",
+        ));
+    }
+    let orb = match body.get("tier") {
+        None | Some(Value::Null) => false,
+        Some(tier) if tier == "orb" => true,
+        Some(_) => {
+            return Err(
+                ApiError::coded("invalid_body", "tier must be \"orb\" or absent")
+                    .with("field", json!("tier")),
+            )
+        }
+    };
+    let challenge = world::begin_human(db::db().await?, &wallet, orb, now_ms()).await?;
+    Ok(http::json_with_cookie(
+        challenge.to_json(),
+        Cookie {
+            name: WORLD_COOKIE,
+            value: challenge.browser_secret,
+            max_age: world::ATTEMPT_TTL_MS / 1_000,
+            same_site: "Lax",
+            http_only: true,
+        },
+    ))
+}
+
 static REDEEMING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
 struct Redeeming(String);
@@ -69,103 +127,23 @@ impl Drop for Redeeming {
     }
 }
 
-/// The terms a still live start attempt would create, `None` for a checkpoint.
-fn live_terms(
+async fn decide(
+    body: &Value,
     attempt: &Attempt,
-    terms: Option<agent::StartTerms>,
-    now: i64,
-) -> Result<Option<agent::StartTerms>, (&'static str, String)> {
-    let fail = |reason: &str| Err(("failed", reason.to_string()));
-    if attempt.expires_at_ms <= now {
-        return Err(("expired", world::EXPIRED.to_string()));
-    }
-    if attempt.kind == world::CHECKPOINT {
-        return Ok(None);
-    }
-    let Some(terms) = terms else {
-        return fail("Start message no longer parses");
-    };
-    if let Err((_, body)) = agent::check_start(&terms, now) {
-        return fail(body["error"].as_str().unwrap_or("Start refused"));
-    }
-    Ok(Some(terms))
-}
-
-/// Spends a verified human on its attempt: resumes the paused agent, or
-/// starts the session the terms describe.
-async fn finish(
-    database: &'static Db,
-    attempt: &Attempt,
-    terms: Option<agent::StartTerms>,
-    grant: HumanGrant,
-) -> Outcome {
-    let Some(terms) = terms else {
-        match world::resume(database, grant, now_ms()).await? {
-            Ok(session_id) => live::resume(&session_id),
-            Err(status) => end_paused(database, attempt, status).await,
-        }
-        return Ok(Err(None));
-    };
-    match start_session(database, terms, now_ms(), Some(grant)).await? {
-        Ok((_, cookie)) => Ok(Ok(cookie)),
-        Err(_) => Ok(Err(None)),
-    }
-}
-
-/// The IDKit widget's result, or `{ "error": code }`, for the attempt this
-/// browser started. Answers the attempt as it ends up.
-async fn proof(
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    raw: Bytes,
-) -> Result<Response, ApiError> {
-    let body: Value = serde_json::from_slice(&raw)
-        .ok()
-        .filter(Value::is_object)
-        .ok_or_else(|| ApiError::bad_request("Body must be the IDKit result or { error }"))?;
-    let database = db::db().await?;
-    let secret = http::cookie(&headers, WORLD_COOKIE);
-    let now = now_ms();
-    let found = world::attempt_for(database, &id, secret.as_deref(), None, now).await?;
-    let attempt = found.ok_or_else(no_attempt)?;
-    let mut cookies = vec![];
-    if attempt.status == "pending" {
-        match decide_proof(database, &body, &attempt, now).await? {
-            Ok(cookie) => cookies = vec![cookie, http::cleared_cookie(WORLD_COOKIE, "Lax")],
-            Err(Some((status, reason))) => {
-                tracing::info!("[world] attempt {} {status}: {reason}", attempt.id);
-                if world::deny(database, &attempt.id, status, &reason, now).await? {
-                    end_paused(database, &attempt, status).await;
-                }
-            }
-            Err(None) => {}
-        }
-    }
-    let settled = world::attempt_for(database, &id, secret.as_deref(), None, now_ms())
-        .await?
-        .ok_or_else(no_attempt)?;
-    Ok(http::json_with_cookies(settled.to_json(), &cookies))
-}
-
-async fn decide_proof(database: &'static Db, body: &Value, attempt: &Attempt, now: i64) -> Outcome {
+) -> ApiResult<Result<(), Option<(&'static str, String)>>> {
     let fail = |reason: String| Ok(Err(Some(("failed", reason))));
-    let Ok(app) = world::idkit() else {
-        return fail(world::NOT_CONFIGURED.to_string());
+    let app = match world::idkit() {
+        Ok(app) => app,
+        Err(_) => return fail(world::NOT_CONFIGURED.to_string()),
     };
-    if !config().is_settlement_signing_configured() {
-        return fail(AGENTS_NOT_CONFIGURED.to_string());
-    }
-    let terms = agent::parse_start(&attempt.message).ok();
     if let Some(error) = body.get("error") {
         return Ok(Err(Some(world::idkit_error_outcome(
             error.as_str().unwrap_or("generic_error"),
-            terms.as_ref().map(|t| t.budget),
         ))));
     }
-    let terms = match live_terms(attempt, terms, now) {
-        Ok(terms) => terms,
-        Err(outcome) => return Ok(Err(Some(outcome))),
-    };
+    if attempt.expires_at_ms <= now_ms() {
+        return Ok(Err(Some(("expired", world::EXPIRED.to_string()))));
+    }
     if let Err(field) = world::check_proof(body, app, attempt) {
         return fail(Failure::Invalid(field).reason());
     }
@@ -176,27 +154,83 @@ async fn decide_proof(database: &'static Db, body: &Value, attempt: &Attempt, no
         Ok(grant) => grant,
         Err(failure) => return fail(failure.reason()),
     };
-    finish(database, attempt, terms, grant).await
+    match world::finish_human(db::db().await?, grant, now_ms()).await? {
+        Ok(_) => Ok(Ok(())),
+        Err(_) => Ok(Err(None)),
+    }
+}
+
+fn attempt_code(attempt: &Attempt) -> Option<&'static str> {
+    let reason = attempt.reason.as_deref().unwrap_or_default();
+    Some(match attempt.status.as_str() {
+        "approved" => return None,
+        "pending" => "attempt_pending",
+        "expired" => "attempt_expired",
+        "mismatch" => "human_mismatch",
+        "denied" if reason == world::BANNED_HUMAN => "banned",
+        "denied" => "attempt_denied",
+        "failed" if reason == world::UNAVAILABLE => "world_unavailable",
+        "failed" if reason == world::NOT_CONFIGURED => "world_unconfigured",
+        _ => "attempt_failed",
+    })
+}
+
+fn attempt_response(attempt: &Attempt, cookies: &[Cookie]) -> Response {
+    let mut body = attempt.to_json();
+    let status = match attempt_code(attempt) {
+        None => StatusCode::OK,
+        Some(code) => {
+            body["code"] = json!(code);
+            body["error"] = json!(attempt
+                .reason
+                .as_deref()
+                .unwrap_or("Human check not finished"));
+            if status_of(code) >= 500 {
+                body["retryable"] = json!(true);
+            }
+            StatusCode::from_u16(status_of(code)).unwrap_or(StatusCode::BAD_REQUEST)
+        }
+    };
+    let mut response = http::json_with_cookies(body, cookies);
+    *response.status_mut() = status;
+    response
+}
+
+async fn proof(Path(id): Path<String>, headers: HeaderMap, raw: Bytes) -> ApiResult<Response> {
+    let body: Value = serde_json::from_slice(&raw)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| {
+            ApiError::coded("invalid_body", "Body must be the IDKit result or { error }")
+        })?;
+    let database = db::db().await?;
+    let secret = http::cookie(&headers, WORLD_COOKIE);
+    let found = world::attempt_for(database, &id, secret.as_deref(), now_ms()).await?;
+    let attempt = found.ok_or_else(no_attempt)?;
+    if attempt.status == "pending" {
+        if let Err(Some((status, reason))) = decide(&body, &attempt).await? {
+            tracing::info!("[world] attempt {} {status}: {reason}", attempt.id);
+            world::deny(database, &attempt.id, status, &reason, now_ms()).await?;
+        }
+    }
+    let settled = world::attempt_for(database, &id, secret.as_deref(), now_ms())
+        .await?
+        .ok_or_else(no_attempt)?;
+    let cookies = match settled.status.as_str() {
+        "pending" => vec![],
+        _ => vec![http::cleared_cookie(WORLD_COOKIE, "Lax")],
+    };
+    Ok(attempt_response(&settled, &cookies))
 }
 
 fn no_attempt() -> ApiError {
-    ApiError::json(StatusCode::NOT_FOUND, "No such human check")
+    ApiError::coded("not_found", "No such human check")
 }
 
-/// Readable by the browser that started the attempt, or by the agent cookie
-/// of the session it created. Anything else is a 404.
-async fn attempt(Path(id): Path<String>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+async fn attempt(Path(id): Path<String>, headers: HeaderMap) -> ApiResult<Response> {
     let secret = http::cookie(&headers, WORLD_COOKIE);
-    let session = crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref())
-        .map(|claims| claims.session_id);
-    world::attempt_for(
-        db::db().await?,
-        &id,
-        secret.as_deref(),
-        session.as_deref(),
-        now_ms(),
-    )
-    .await?
-    .map(|attempt| Json(attempt.to_json()))
-    .ok_or_else(no_attempt)
+    let attempt = world::attempt_for(db::db().await?, &id, secret.as_deref(), now_ms())
+        .await?
+        .ok_or_else(no_attempt)?;
+    Ok(Json(attempt.to_json()).into_response())
 }

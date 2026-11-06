@@ -1,12 +1,9 @@
-//! HTTP plumbing shared by every handler: cookies, guards, and response
-//! assembly. The Next.js routes are the specification — the status codes,
-//! bodies and cookie attributes here reproduce them byte for byte, because the
-//! browser bundle is unchanged during the migration.
-
+use axum::extract::{FromRequest, Request};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Router;
-use serde_json::{Map, Value};
+use axum::{Json, Router};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Map, Value};
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -14,13 +11,7 @@ use strike_core::config::config;
 use strike_core::crypto::{self, BALANCE_SESSION_COOKIE};
 use strike_core::error::ApiError;
 
-/// The header the browser may send with the raw internal secret, which the TS
-/// guard answers with a 401 that tells the caller to use the session endpoint.
 const BROWSER_KEY_HEADER: &str = "x-strike-balance-key";
-
-// ---------------------------------------------------------------------------
-// Cookies
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct Cookie {
@@ -33,7 +24,6 @@ pub struct Cookie {
 
 impl Cookie {
     fn render(&self) -> String {
-        // `Secure` follows NODE_ENV=production, like the TS routes.
         let secure = if config().production { "; Secure" } else { "" };
         let http_only = if self.http_only { "; HttpOnly" } else { "" };
         format!(
@@ -43,7 +33,6 @@ impl Cookie {
     }
 }
 
-/// Reads one cookie out of the request's `Cookie:` header.
 pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     for raw in headers.get_all(HeaderName::from_static("cookie")) {
         let Ok(all) = raw.to_str() else { continue };
@@ -62,7 +51,6 @@ pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-/// A JSON response that also sets a cookie.
 pub fn json_with_cookie(body: Value, cookie: Cookie) -> Response {
     json_with_cookies(body, &[cookie])
 }
@@ -79,7 +67,6 @@ pub fn json_with_cookies(body: Value, cookies: &[Cookie]) -> Response {
     (headers, axum::Json(body)).into_response()
 }
 
-/// The cookie value that clears a session cookie (Max-Age=0).
 pub fn cleared_cookie(name: &'static str, same_site: &'static str) -> Cookie {
     Cookie {
         name,
@@ -90,12 +77,6 @@ pub fn cleared_cookie(name: &'static str, same_site: &'static str) -> Cookie {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Guards
-// ---------------------------------------------------------------------------
-
-/// `assertBalanceApiAuthorized()`. `Ok(())` means "continue"; the error carries
-/// the exact status and message the TS route returns.
 pub fn require_balance_session(headers: &HeaderMap) -> Result<(), ApiError> {
     let secret = config().balance_internal_secret.clone().unwrap_or_default();
 
@@ -119,16 +100,14 @@ pub fn require_balance_session(headers: &HeaderMap) -> Result<(), ApiError> {
     }
 
     if header_str(headers, BROWSER_KEY_HEADER).as_deref() == Some(secret.as_str()) {
-        return Err(ApiError::unauthorized(
+        return Err(session_required(
             "Use POST /api/balance/session for browser auth or Bearer for server callers.",
         ));
     }
 
-    Err(ApiError::unauthorized("Unauthorized"))
+    Err(session_required("Unauthorized"))
 }
 
-/// `require_balance_session`, and a browser session may only act for the wallet
-/// that signed it in. Server callers with the Bearer secret may name any wallet.
 pub fn require_wallet_session(headers: &HeaderMap, wallet: &str) -> Result<(), ApiError> {
     require_balance_session(headers)?;
     let secret = config().balance_internal_secret.clone().unwrap_or_default();
@@ -140,16 +119,31 @@ pub fn require_wallet_session(headers: &HeaderMap, wallet: &str) -> Result<(), A
     if signed_in.as_deref() == Some(strike_core::address::canonical(wallet).as_str()) {
         return Ok(());
     }
-    Err(ApiError::unauthorized(
+    Err(session_required(
         "This session is signed in for a different wallet",
     ))
+}
+
+fn session_required(message: &str) -> ApiError {
+    ApiError::unauthorized(message).with("code", json!("session_required"))
+}
+
+pub struct JsonBody<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for JsonBody<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(body)| Self(body))
+            .map_err(|rejection| ApiError::coded("invalid_body", rejection.body_text()))
+    }
 }
 
 pub fn bearer(headers: &HeaderMap) -> Option<String> {
     let raw = header_str(headers, "authorization")?;
     let (_, token) = raw.split_once(char::is_whitespace)?;
-    // The TS strips only the leading "Bearer "; any further whitespace is part
-    // of the credential the caller sent.
     Some(token.trim().to_string())
 }
 
@@ -161,16 +155,8 @@ pub fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-// ---------------------------------------------------------------------------
-// Response headers
-// ---------------------------------------------------------------------------
-
-/// JSON and CSV only, so nothing on `/api` needs to load or frame anything.
 const API_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
-/// What every API response carries, 404s and the price stream included. These set
-/// headers only and leave the body alone. Browsers calling from `origin` get CORS;
-/// without one, only same-origin callers work, which is every page of this app.
 pub fn with_api_headers(router: Router, origin: Option<&str>) -> Router {
     let set = |name: &'static str, value: &'static str| {
         SetResponseHeaderLayer::if_not_present(
@@ -206,16 +192,10 @@ pub fn with_api_headers(router: Router, origin: Option<&str>) -> Router {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bodies
-// ---------------------------------------------------------------------------
-
-/// `NextResponse.json(body, { status })` for the shapes that are not errors.
 pub fn json_status(status: StatusCode, body: Value) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-/// `NextResponse.json({ ok: false, error })` bodies used by the admin family.
 pub fn ok_false_error(message: &str) -> Value {
     Value::Object(Map::from_iter([
         ("ok".to_string(), Value::Bool(false)),
@@ -260,8 +240,6 @@ mod tests {
             Some("payload.sig")
         );
         assert_eq!(cookie(&map, "missing"), None);
-        // A prefix collision must not match: `strike_balance_gate_x` is a
-        // different cookie.
         let tricky = headers(&[("cookie", "strike_balance_gate_x=zzz")]);
         assert_eq!(cookie(&tricky, BALANCE_SESSION_COOKIE), None);
         let empty = headers(&[("cookie", "strike_balance_gate=")]);

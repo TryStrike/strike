@@ -6,6 +6,7 @@ import {
 } from '@/lib/store/historySlice';
 import type { BetRecord } from '@/lib/types/bet';
 import type { HistoryView } from './historyQuery';
+import { needsSession, readApiError } from '@/lib/api/errors';
 
 export function rowsToBetRecords(rows: BetHistoryRow[], max = 50): BetRecord[] {
   return rows.slice(0, max).map((row) => ({
@@ -74,7 +75,7 @@ export async function loadHistoryViewPage(
   let res: Response;
   try {
     res = await send();
-    if (res.status === 401) {
+    if (needsSession(await readApiError(res.clone()))) {
       const { ensureBalanceSession } = await import('@/lib/balance/balanceClientHeaders');
       await ensureBalanceSession();
       res = await send();

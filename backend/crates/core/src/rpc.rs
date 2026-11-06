@@ -1,21 +1,3 @@
-//! The ledger functions: `place_bet_locked`, the four balance functions,
-//! the ban checks and [`settle_round`].
-//!
-//! Every call is one savepoint in a write batch on the writer connection, so
-//! `SELECT ... FOR UPDATE` has no equivalent here: the write lock is already held
-//! when the first statement runs. The functions are plain sync code, which is
-//! what keeps a network call from ever happening inside one.
-//!
-//! The balance functions end in `EXCEPTION WHEN OTHERS`, which undoes their own
-//! writes and answers `{success: false, error: SQLERRM}`. [`guarded`] is that
-//! block: a savepoint, because `place_bet_locked` and `settle_round` call
-//! them mid-transaction and must keep going. `RAISE EXCEPTION` is an `Err`, which
-//! aborts the transaction and reaches the caller with the same text.
-//!
-//! Amounts stay `Decimal` at the precision they arrived with, as plpgsql's
-//! unconstrained NUMERIC did. Rounding happens only at a column write, and
-//! `new_balance` in the response is the unrounded sum, as it was.
-
 use std::collections::HashMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -29,8 +11,8 @@ use crate::money::{
     self, decimal_json, fixed_json, from_fixed, parse_decimal, to_fixed, MONEY_SCALE,
 };
 use crate::settlement::{decide, EndTick, Outcome, Terms, MULTIPLIER_SCALE, PRICE_SCALE};
+use crate::world;
 
-/// Named parameters per function, for the same refusal an unknown argument got.
 const FUNCTIONS: &[(&str, &[&str])] = &[
     (
         "place_bet_locked",
@@ -91,8 +73,6 @@ const FUNCTIONS: &[(&str, &[&str])] = &[
     ("is_wallet_globally_banned", &["p_address"]),
 ];
 
-/// Named arguments, type-checked before the transaction opens: a bad cast failed
-/// before the function body ran.
 pub struct Args(HashMap<String, Value>);
 
 impl Args {
@@ -118,7 +98,6 @@ impl Args {
         self.0.get(name).and_then(json_bind_text)
     }
 
-    /// `DEFAULT 'BOT'` applies to an omitted argument, not to an explicit NULL.
     fn text_or(&self, name: &str, default: &str) -> Option<String> {
         match self.0.get(name) {
             None => Some(default.to_string()),
@@ -130,8 +109,6 @@ impl Args {
         self.text(name).map(|t| parse_decimal(&t)).transpose()
     }
 
-    /// The frozen round. Absent only for a ledger-level call: the bet route always
-    /// sends it, and a bet without one can never be settled.
     fn terms(&self) -> ApiResult<Option<Terms>> {
         self.0
             .get("p_round")
@@ -142,7 +119,6 @@ impl Args {
             .transpose()
     }
 
-    /// `None` is settlement's "no usable price".
     fn end_tick(&self) -> Option<EndTick> {
         Some(EndTick {
             price: self.0.get("p_end_price")?.as_i64()?,
@@ -164,12 +140,10 @@ impl Args {
     }
 }
 
-/// Runs one function. Called on the writer thread.
 pub fn dispatch(conn: &mut Connection, function: &str, args: &Args) -> ApiResult<Value> {
     match function {
         "place_bet_locked" => {
             let amount = args.decimal("p_bet_amount")?;
-            // `DEFAULT 0` for an omitted ceiling.
             let max_payout = match args.0.contains_key("p_max_payout") {
                 true => args.decimal("p_max_payout")?,
                 false => Some(Decimal::ZERO),
@@ -264,7 +238,6 @@ pub fn dispatch(conn: &mut Connection, function: &str, args: &Args) -> ApiResult
     }
 }
 
-/// An `Err` or a panic rolls back when `tx` drops.
 fn in_transaction<T>(
     conn: &mut Connection,
     body: impl FnOnce(&Connection) -> ApiResult<T>,
@@ -275,8 +248,6 @@ fn in_transaction<T>(
     Ok(out)
 }
 
-/// What a balance function answered. `new_balance` is the exact sum, which the
-/// JSON form cannot carry.
 struct Balance {
     json: Value,
     success: bool,
@@ -299,7 +270,6 @@ fn credited(new_balance: Decimal) -> Balance {
     }
 }
 
-/// The `EXCEPTION WHEN OTHERS` block.
 fn guarded(
     conn: &Connection,
     body: impl FnOnce(&Connection) -> ApiResult<Balance>,
@@ -319,9 +289,6 @@ fn guarded(
     }
 }
 
-/// SQLERRM for the failures a balance function can actually hit. The deposit
-/// route matches `/duplicate key|unique/` here, so a replayed hash must keep
-/// reading as a duplicate.
 fn sqlerrm(err: &ApiError) -> String {
     let ApiError::Db(rusqlite::Error::SqliteFailure(_, Some(message))) = err else {
         return err.to_string();
@@ -353,8 +320,6 @@ fn sqlerrm(err: &ApiError) -> String {
     message.clone()
 }
 
-/// `CASE WHEN trim(p) LIKE '0x%' THEN lower(trim(p)) ELSE trim(p) END`. Postgres
-/// `trim` strips spaces only, and `LIKE` here is case-sensitive.
 pub fn normalize_ban_address(p: &str) -> String {
     let trimmed = p.trim_matches(' ');
     if trimmed.starts_with("0x") {
@@ -564,7 +529,6 @@ fn credit_balance_for_payout(
     credit_balance(conn, user, amount, currency, bet_id, "payout")
 }
 
-/// A `payout` or a `refund`: the same credit under the audit name that says which.
 fn credit_balance(
     conn: &Connection,
     user: Option<&str>,
@@ -583,7 +547,6 @@ fn credit_balance(
 
         let (old, new) = match balance_of(c, user, currency)? {
             None => {
-                // Row is missing, e.g. the first win after an account wipe.
                 c.prepare_cached(
                     "INSERT INTO user_balances (user_address, currency, balance) \
                      VALUES (?1, ?2, ?3)",
@@ -670,8 +633,6 @@ fn update_balance_for_withdrawal(
     })
 }
 
-/// `update_balance_for_withdrawal` inside a caller's transaction, for the accept
-/// flow that claims the request in the same commit.
 pub(crate) fn debit_for_withdrawal(
     conn: &Connection,
     user: Option<&str>,
@@ -711,7 +672,6 @@ fn place_bet_locked(
         }));
     };
 
-    // Lock first. A unique violation means this exact request was already seen.
     let locked = conn
         .prepare_cached(
             "INSERT INTO balance_audit_log \
@@ -736,7 +696,6 @@ fn place_bet_locked(
         Ok(_) => {}
     }
 
-    // No money moved: voiding the lock leaves the request id unspent.
     let void_lock = || {
         conn.prepare_cached(
             "DELETE FROM balance_audit_log \
@@ -744,6 +703,21 @@ fn place_bet_locked(
         )?
         .execute(params![idempotency_key])
     };
+
+    let stake = amount.unwrap_or(Decimal::ZERO);
+    if let Some(refusal) =
+        world::bet_refusal(conn, user.unwrap_or_default(), stake, now_us() / 1_000)?
+    {
+        void_lock()?;
+        return Ok(json!({
+            "success": false,
+            "duplicate": false,
+            "error": refusal.message,
+            "code": refusal.code,
+            "until": refusal.until,
+            "new_balance": 0,
+        }));
+    }
 
     let open: i64 = conn
         .prepare_cached(
@@ -809,7 +783,6 @@ fn place_bet_locked(
     Ok(placed)
 }
 
-/// Fails the bet, debit included, if the round cannot be written.
 fn insert_round(
     conn: &Connection,
     bet_id: &str,
@@ -845,7 +818,6 @@ fn insert_round(
     Ok(())
 }
 
-/// What the player sees of a frozen round; `Null` for a bet with no round.
 fn round_view(conn: &Connection, bet_id: &str) -> ApiResult<Value> {
     let view = conn
         .prepare_cached(
@@ -862,7 +834,6 @@ fn round_view(conn: &Connection, bet_id: &str) -> ApiResult<Value> {
     Ok(view.unwrap_or(Value::Null))
 }
 
-/// The `EXCEPTION WHEN unique_violation` arm: replay the original bet.
 fn duplicate_bet(conn: &Connection, idempotency_key: &str) -> ApiResult<Value> {
     type Row = (
         Option<String>,
@@ -890,7 +861,6 @@ fn duplicate_bet(conn: &Connection, idempotency_key: &str) -> ApiResult<Value> {
         .optional()?;
 
     let Some((bet_id, token, balance_after, max_payout, user, currency)) = row else {
-        // The conflict came from a settlement lock, not the bet request.
         return Ok(json!({
             "success": false,
             "duplicate": true,
@@ -920,7 +890,6 @@ fn duplicate_bet(conn: &Connection, idempotency_key: &str) -> ApiResult<Value> {
     Ok(replay)
 }
 
-/// `RAISE EXCEPTION`: aborts everything, the payout lock included.
 fn raise(message: String) -> ApiError {
     ApiError::Other(message)
 }
@@ -932,7 +901,6 @@ struct Round {
     end_time: i64,
     created_at: i64,
     terms: Terms,
-    /// `(outcome, payout, end_price)` once settled.
     settled: Option<(String, i64, Option<i64>)>,
 }
 
@@ -991,10 +959,6 @@ fn settled_json(
     })
 }
 
-/// One settlement per bet, ever: the row's outcome decides who got here first, the
-/// payout lock and the claim keep the audit trail, and the credit, the result and
-/// the history row commit together or not at all. The outcome comes from the
-/// frozen terms and `end`; the caller supplies no amount.
 fn settle_round(
     conn: &Connection,
     bet_id: Option<&str>,
@@ -1057,7 +1021,6 @@ fn settle_round(
         if credit.success {
             new_balance = Some(credit.json["new_balance"].clone());
         } else if credit.json["error"] == json!(BANNED) {
-            // Terminal, or the sweep would retry a ban every second forever.
             (outcome, payout) = (Outcome::Withheld, 0);
         } else {
             let error = credit.json["error"].as_str().unwrap_or("unknown");
@@ -1082,7 +1045,6 @@ fn settle_round(
         bet_id
     ])?;
 
-    // A tie and a refund read as a returned stake, the shape history already shows.
     let won = !matches!(outcome, Outcome::Loss | Outcome::Withheld);
     conn.prepare_cached(
         "INSERT INTO bet_history \
@@ -1130,7 +1092,6 @@ mod tests {
         assert_eq!(normalize_ban_address("  0xABC "), "0xabc");
         assert_eq!(normalize_ban_address("0XABC"), "0XABC");
         assert_eq!(normalize_ban_address(" Csx2cq3q "), "Csx2cq3q");
-        // trim() strips spaces only.
         assert_eq!(normalize_ban_address("\t0xABC"), "\t0xABC");
     }
 
@@ -1173,7 +1134,6 @@ mod tests {
             "null value in column \"balance\" of relation \"user_balances\" violates \
              not-null constraint"
         );
-        // A too-large balance reports the Postgres overflow text.
         let overflow = crate::money::OVERFLOW;
         assert_eq!(sqlerrm(&ApiError::Other(overflow.to_string())), overflow);
     }

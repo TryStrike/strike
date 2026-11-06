@@ -1,6 +1,3 @@
-//! Money behaviour against a real SQLite file: the ported ledger functions under
-//! concurrency, failure and process death.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -18,7 +15,6 @@ use strike_core::withdrawals::{
 const USER: &str = "0xaaaa000000000000000000000000000000000001";
 const USDC: &str = "USDC";
 
-/// A database in its own directory, removed on drop.
 struct TempDb {
     dir: PathBuf,
     db: Arc<Db>,
@@ -26,6 +22,9 @@ struct TempDb {
 
 impl TempDb {
     fn new() -> Self {
+        std::env::set_var("STRIKE_DEV_NO_WORLD", "1");
+        std::env::set_var("WORLD_ORB_OPEN_CAP", "1000000");
+        std::env::set_var("WORLD_ORB_DAILY_LOSS", "1000000");
         let dir = std::env::temp_dir().join(format!("strike-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Arc::new(Db::open(dir.join("test.sqlite"), 4, 8_000).unwrap());
@@ -89,7 +88,6 @@ async fn place_bet(db: &Db, user: &str, amount: &str, key: &str, bet_id: &str) -
 
 const PRICE_100: i64 = 10_000_000_000;
 
-/// Settles at `end_price`, or with no usable price at all.
 async fn settle_at(db: &Db, bet_id: &str, end_price: Option<i64>) -> Result<Value, ApiError> {
     db.call_rpc(
         "settle_round",
@@ -104,12 +102,10 @@ async fn settle_at(db: &Db, bet_id: &str, end_price: Option<i64>) -> Result<Valu
     .await
 }
 
-/// A winning end for the UP round `place_bet` opens.
 async fn settle(db: &Db, bet_id: &str) -> Result<Value, ApiError> {
     settle_at(db, bet_id, Some(PRICE_100 + 1)).await
 }
 
-/// `(outcome, payout, end_price, end_source)` as stored.
 async fn stored_round(db: &Db, bet_id: &str) -> (Option<String>, i64, Option<i64>, Option<String>) {
     let id = bet_id.to_string();
     db.read(move |c| {
@@ -137,7 +133,6 @@ async fn withdraw(db: &Db, amount: &str, hash: &str) -> Value {
     .unwrap()
 }
 
-/// The raw stored integer: comparisons below never touch a float.
 async fn balance(db: &Db, user: &str) -> i64 {
     let user = user.to_string();
     db.read(move |c| {
@@ -164,8 +159,6 @@ async fn audit_count(db: &Db, operation: &str) -> i64 {
     .unwrap()
 }
 
-/// Stored balance must equal the signed sum of the audit rows, and each row's
-/// before/after must chain.
 async fn assert_reconciles(db: &Db, user: &str) {
     let owner = user.to_string();
     let (ledger, last_after, chained) = db
@@ -217,7 +210,6 @@ async fn parallel_identical_bets_debit_once() {
     for i in 0..64 {
         let db = t.db.clone();
         tasks.push(tokio::spawn(async move {
-            // Same request id every time; the bet id differs per attempt.
             place_bet(&db, USER, "10", "request-1", &format!("bet-{i}")).await
         }));
     }
@@ -263,7 +255,6 @@ async fn parallel_bets_cannot_overdraw() {
     }
     assert_eq!(won, 3);
     assert_eq!(balance(&t.db, USER).await, units(1));
-    // Failed attempts voided their lock rows.
     assert_eq!(audit_count(&t.db, "bet_lock").await, 3);
     assert_reconciles(&t.db, USER).await;
 }
@@ -312,7 +303,6 @@ async fn deposit_replay_credits_once() {
         if result["success"] == json!(true) {
             credited += 1;
         } else {
-            // The route turns exactly this text into its 409.
             assert_eq!(
                 result["error"],
                 json!(
@@ -365,12 +355,10 @@ async fn failed_settlements_roll_everything_back() {
     place_bet(&t.db, USER, "10", "r1", "bet-1").await;
     let before = balance(&t.db, USER).await;
 
-    // An unknown bet: nothing to lock.
     let err = settle(&t.db, "no-such-bet").await.unwrap_err();
     assert_eq!(err.to_string(), "strike_unknown_bet:no-such-bet");
     assert_eq!(audit_count(&t.db, "payout_lock").await, 0);
 
-    // A round whose end is still ahead cannot settle, however it is called.
     let id = "bet-open".to_string();
     t.db.write(move |c| {
         c.execute(
@@ -411,7 +399,6 @@ async fn a_loss_pays_nothing_and_is_final() {
     assert_eq!(balance(&t.db, USER).await, units(90));
     assert_eq!(audit_count(&t.db, "payout").await, 0);
 
-    // A later end price cannot change a settled round.
     let again = settle(&t.db, "bet-1").await.unwrap();
     assert_eq!(again["duplicate"], json!(true));
     assert_eq!(again["outcome"], json!("loss"));
@@ -494,7 +481,6 @@ async fn the_debit_and_the_round_commit_together() {
     deposit(&t.db, USER, "100", "0xdep1").await;
     place_bet(&t.db, USER, "10", "r1", "bet-1").await;
 
-    // The round insert fails on its primary key: the second debit must undo.
     let clash =
         t.db.call_rpc(
             "place_bet_locked",
@@ -549,12 +535,10 @@ async fn a_panic_mid_transaction_rolls_back_and_the_writer_lives_on() {
     assert!(result.is_err());
     assert_eq!(balance(&t.db, USER).await, units(50));
 
-    // The writer still works.
     deposit(&t.db, USER, "1", "0xdep2").await;
     assert_eq!(balance(&t.db, USER).await, units(51));
 }
 
-/// Child half of the crash test. Does nothing unless the parent re-ran it.
 #[test]
 fn crash_child() {
     let Ok(path) = std::env::var("STRIKE_CRASH_DB") else {
@@ -572,7 +556,6 @@ fn crash_child() {
            VALUES ('ghost', 'deposit', 1);",
     )
     .unwrap();
-    // Dies with the second transaction open, no destructors, no rollback.
     std::process::abort();
 }
 
@@ -634,7 +617,6 @@ async fn a_mixed_load_reconciles_to_the_last_fixed_point_unit() {
         task.await.unwrap();
     }
 
-    // Exact arithmetic on the side, in integers: 50 of each branch.
     let fixed = |text: &str| to_fixed(text.parse::<Decimal>().unwrap(), MONEY_SCALE).unwrap();
     let expected =
         units(1000) + 50 * fixed("0.00000001") + 50 * (fixed("2.34567899") - fixed("1.23456789"))
@@ -680,7 +662,6 @@ async fn return_shapes_and_refusals_match_the_sql_functions() {
         json!({"success": false, "error": "User not found", "new_balance": 0})
     );
 
-    // Frozen accounts report their balance alongside the refusal.
     let user = USER.to_string();
     db.write(move |c| {
         c.execute(
@@ -707,7 +688,6 @@ async fn return_shapes_and_refusals_match_the_sql_functions() {
     );
     assert_eq!(audit_count(db, "bet_lock").await, 0, "lock voided");
 
-    // A missing request id never touches the ledger.
     let missing = db
         .call_rpc(
             "place_bet_locked",
@@ -726,7 +706,6 @@ async fn return_shapes_and_refusals_match_the_sql_functions() {
         json!("Bet placement requires an idempotency key")
     );
 
-    // A bet with no stored token replays as a conflict, not a success.
     let other = "0xbbbb000000000000000000000000000000000002";
     deposit(db, other, "5", "0xd2").await;
     let no_token = db
@@ -787,7 +766,6 @@ async fn overflow_is_refused_and_changes_nothing() {
     assert_eq!(balance(&t.db, USER).await, units(922_337_203));
     assert_eq!(audit_count(&t.db, "deposit").await, 1);
 
-    // Unparseable money never reaches the function body.
     let err =
         t.db.call_rpc(
             "update_balance_for_deposit",
@@ -804,13 +782,10 @@ async fn overflow_is_refused_and_changes_nothing() {
 async fn sub_scale_amounts_round_only_at_the_column() {
     let t = TempDb::new();
     deposit(&t.db, USER, "1", "0xd1").await;
-    // Above the balance before rounding, so the exact comparison refuses it,
-    // as plpgsql's unconstrained NUMERIC did.
     let bet = place_bet(&t.db, USER, "1.00000000004", "r1", "b1").await;
     assert_eq!(bet["error"], json!("Insufficient balance"));
     assert_eq!(balance(&t.db, USER).await, units(1));
 
-    // The response keeps the exact sum; the column keeps 10 places.
     let credited = deposit(&t.db, USER, "0.12345678905", "0xd2").await;
     assert_eq!(credited["new_balance"], json!(1.12345678905));
     assert_eq!(balance(&t.db, USER).await, 11_234_567_891);
@@ -821,7 +796,6 @@ async fn statements_read_and_write_like_postgres() {
     let t = TempDb::new();
     let db = &t.db;
 
-    // SELECT on the read pool is really read-only.
     let (rows, changed) = db
         .run(
             "INSERT INTO user_sessions (wallet_address) VALUES (CAST($1 AS text)) RETURNING id, network, started_at",
@@ -856,7 +830,6 @@ async fn statements_read_and_write_like_postgres() {
     .await
     .unwrap();
 
-    // Defaults come through in the API's shape.
     let (rows, _) = db
         .run("SELECT * FROM bet_history WHERE id = ?1", vec![v("c")])
         .await
@@ -868,7 +841,6 @@ async fn statements_read_and_write_like_postgres() {
     let keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
     assert_eq!(keys[..3], ["id", "wallet_address", "asset"]);
 
-    // Postgres puts NULLs first on DESC; the ported ORDER BY must say so.
     let (rows, _) = db
         .run(
             "SELECT id FROM bet_history ORDER BY resolved_at DESC NULLS FIRST",
@@ -879,7 +851,6 @@ async fn statements_read_and_write_like_postgres() {
     let order: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
     assert_eq!(order, ["c", "b", "a"]);
 
-    // ILIKE: case-insensitive; `like`: not.
     let count =
         |sql: &'static str| async move { db.run(sql, vec![v("0xw")]).await.unwrap().0.len() };
     assert_eq!(
@@ -891,12 +862,10 @@ async fn statements_read_and_write_like_postgres() {
         1
     );
 
-    // A mistyped column is an error, not a string literal.
     assert!(db
         .run("SELECT \"nope\" FROM bet_history", vec![])
         .await
         .is_err());
-    // STRICT refuses a float in a money column.
     let float = db
         .run(
             "UPDATE bet_history SET amount = ?1 WHERE id = ?2",
@@ -904,7 +873,6 @@ async fn statements_read_and_write_like_postgres() {
         )
         .await;
     assert!(float.is_err());
-    // Readers cannot write even when handed a write by mistake.
     let misrouted = db
         .read(|c| {
             c.execute("DELETE FROM bet_history", [])?;
@@ -912,7 +880,6 @@ async fn statements_read_and_write_like_postgres() {
         })
         .await;
     assert!(misrouted.is_err());
-    // The CHECK carried over.
     let negative = db
         .write(|c| {
             c.execute(
@@ -925,7 +892,6 @@ async fn statements_read_and_write_like_postgres() {
     assert!(matches!(negative, Err(ApiError::Db(_))));
 }
 
-/// The deposit route's claim statement, as it writes it, typed binds included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn the_deposit_lock_is_claimed_once() {
     let t = TempDb::new();
@@ -964,8 +930,6 @@ async fn the_deposit_lock_is_claimed_once() {
     assert_eq!(claimed, 1);
 }
 
-// -- withdrawal races --------------------------------------------------------
-
 fn queue_request(amount: f64, signed_at: i64, signature: &str) -> QueueRequest {
     QueueRequest {
         user_key: USER.to_string(),
@@ -993,7 +957,6 @@ async fn request_count(db: &Db, status: &str) -> i64 {
     .unwrap()
 }
 
-/// Seeds `count` pending rows of `amount` directly, as the queue would.
 async fn seed_requests(db: &Db, count: i64, amount: i64) {
     db.write(move |c| {
         for i in 0..count {
@@ -1009,8 +972,6 @@ async fn seed_requests(db: &Db, count: i64, amount: i64) {
     .unwrap();
 }
 
-/// What the accept route does, with a counter in place of the treasury. The
-/// write queue is idle during the fake transfer, proving nothing holds it.
 async fn accept(db: Arc<Db>, id: i64, amount: &str, paid: Arc<AtomicI64>, fail: bool) -> Claim {
     let claim = claim_and_debit(&db, id, json!(USER), amount.to_string(), USDC.to_string())
         .await
@@ -1051,7 +1012,6 @@ async fn parallel_withdraw_requests_cannot_pass_the_cap() {
             Err((status, _)) => assert_eq!(status, 400),
         }
     }
-    // Cap 108: 40 + 40 fits, a third would be 120.
     assert_eq!(created, 2);
     assert_eq!(request_count(&t.db, "pending").await, 2);
 }
@@ -1065,7 +1025,6 @@ async fn a_replayed_intent_queues_one_row() {
     for i in 0..32 {
         let db = t.db.clone();
         tasks.push(tokio::spawn(async move {
-            // Half respell the signature: same intent, different bytes.
             let signature = if i % 2 == 0 { "0xabc1b" } else { "0xABC00" };
             queue(&db, queue_request(10.0, 777, signature)).await
         }));
@@ -1083,7 +1042,6 @@ async fn a_replayed_intent_queues_one_row() {
     assert_eq!((created, replayed), (1, 31));
     assert_eq!(request_count(&t.db, "pending").await, 1);
 
-    // The unique key holds without the route's check, too.
     let dup = t
         .db
         .write(|c| {
@@ -1106,7 +1064,6 @@ async fn parallel_accepts_pay_only_what_was_debited() {
 
     let paid = Arc::new(AtomicI64::new(0));
     let mut tasks = Vec::new();
-    // Every row accepted four times over, all at once.
     for round in 0..32 {
         let (db, paid) = (t.db.clone(), paid.clone());
         let id = round % 8 + 1;
@@ -1128,7 +1085,6 @@ async fn parallel_accepts_pay_only_what_was_debited() {
     );
     assert_eq!(balance(&t.db, USER).await, units(20));
     assert_eq!(audit_count(&t.db, "withdrawal").await, 2);
-    // Refused rows stayed payable by a later, funded accept.
     assert_eq!(request_count(&t.db, "pending").await, 6);
     assert_eq!(request_count(&t.db, "accepted").await, 2);
     assert_reconciles(&t.db, USER).await;
@@ -1157,7 +1113,6 @@ async fn one_request_accepted_in_parallel_debits_and_pays_once() {
     assert_eq!(paid.load(Ordering::SeqCst), 1);
     assert_eq!(balance(&t.db, USER).await, units(90));
     assert_reconciles(&t.db, USER).await;
-    // The audit row ends with the real hash, not the placeholder.
     assert_eq!(audit_hash(&t.db).await, "0xpaid1");
 }
 
@@ -1196,12 +1151,10 @@ async fn a_failed_transfer_parks_keeps_the_debit_and_cannot_pay_again() {
     );
     assert_reconciles(&t.db, USER).await;
 
-    // Retrying the request is refused and moves nothing.
     let retry = accept(t.db.clone(), 1, "30", paid.clone(), false).await;
     assert_eq!(retry, Claim::NotPending);
     assert_eq!(paid.load(Ordering::SeqCst), 0);
     assert_eq!(balance(&t.db, USER).await, units(70));
-    // A late finalize of a parked row changes nothing either.
     assert!(!finalize(&t.db, 1, "0xlate".into(), None).await.unwrap());
 }
 
@@ -1219,7 +1172,6 @@ async fn a_refused_debit_leaves_the_request_pending() {
     assert_eq!(balance(&t.db, USER).await, units(10));
 }
 
-/// Holds the writer until released, so jobs sent meanwhile land in one batch.
 async fn queue_behind_a_gate(
     db: &Arc<Db>,
 ) -> (tokio::task::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
@@ -1255,7 +1207,6 @@ async fn user_count(db: &Db) -> i64 {
         .unwrap()
 }
 
-/// Lets queued `write` calls reach the channel before the gate opens.
 async fn let_queue() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
@@ -1307,14 +1258,12 @@ async fn one_failure_or_panic_rolls_back_only_itself_in_a_batch() {
     assert!(panicking.await.unwrap().is_err());
 
     assert_eq!(user_count(&t.db).await, 2);
-    // The gate's own commit, then all four in one.
     assert_eq!(t.db.writer_stats().0 - batches_before, 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_commit_fails_every_caller_in_the_batch() {
     let t = TempDb::new();
-    // A deferred foreign key is checked at COMMIT and nowhere earlier.
     t.db.write(|c| {
         c.execute_batch(
             "CREATE TABLE parent (id INTEGER PRIMARY KEY) STRICT; \
@@ -1349,7 +1298,6 @@ async fn a_failed_commit_fails_every_caller_in_the_batch() {
     assert!(violator.await.unwrap().is_err());
     assert_eq!(user_count(&t.db).await, 0);
 
-    // The writer survives, and the next batch commits.
     t.db.write(insert_user("after".to_string())).await.unwrap();
     assert_eq!(user_count(&t.db).await, 1);
 }
@@ -1364,7 +1312,6 @@ async fn a_transaction_lost_mid_batch_fails_everyone_in_it_and_nobody_after() {
     };
     let before = spawn("before");
     let_queue().await;
-    // What SQLite does by itself on disk-full and I/O errors.
     let killer = {
         let db = t.db.clone();
         tokio::spawn(async move {
@@ -1396,7 +1343,6 @@ async fn no_caller_is_answered_before_its_batch_is_committed() {
             tokio::spawn(async move {
                 let user = format!("u{n}");
                 db.write(insert_user(user.clone())).await.unwrap();
-                // A reader sees only committed data, so the row must be there.
                 db.read(move |c| {
                     Ok(c.query_row(
                         "SELECT count(*) FROM user_balances WHERE user_address = ?1",
@@ -1440,14 +1386,12 @@ async fn stuck_rows_are_reported_and_left_alone() {
     assert!(stuck(&t.db, 0).await.unwrap().is_empty(), "not old enough");
     assert_eq!(stuck(&t.db, later).await.unwrap(), ids);
 
-    // A paid row and a parked row are resolved, so neither counts.
     assert!(finalize(&t.db, ids[0], "0xpaid".to_string(), None)
         .await
         .unwrap());
     assert!(park(&t.db, ids[1], "note".to_string()).await.unwrap());
     assert_eq!(stuck(&t.db, later).await.unwrap(), vec![ids[2]]);
 
-    // Reporting changed nothing.
     assert_eq!(request_count(&t.db, "accepted").await, 2);
     assert_eq!(balance(&t.db, USER).await, units(70));
 }

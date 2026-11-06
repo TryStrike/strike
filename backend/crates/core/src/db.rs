@@ -1,35 +1,3 @@
-//! SQLite transport.
-//!
-//! One writer thread owns the only write connection; handlers send it a closure
-//! and await the reply, so writes queue instead of failing with `SQLITE_BUSY`,
-//! and async tasks never block on disk. Because a write job is a sync closure, it
-//! cannot await anything: the type system keeps every RPC and treasury transfer
-//! outside the write lock. Reads run on a small pool of read-only connections
-//! through `spawn_blocking`.
-//!
-//! Durability: `synchronous=FULL` in WAL mode, `fullfsync=ON` where the OS has
-//! it (`SQLITE_FULLFSYNC=OFF` turns that off). A commit is fsynced before anyone
-//! it covers is answered, so a committed ledger write survives process crash, OS
-//! crash and power loss. `NORMAL` would be faster and still survive a process
-//! crash, but a power cut could lose the last commits, and a lost debit after an
-//! on-chain payout is money gone.
-//!
-//! Group commit: the writer drains whatever is queued into one `BEGIN IMMEDIATE`
-//! transaction, gives each job its own savepoint so a failure or panic undoes
-//! only that job, commits once, and only then answers every caller. The batch
-//! grows with load and needs no timer. A failed COMMIT answers everyone with an
-//! error. Jobs use `conn.savepoint()` where they need all-or-nothing: they always
-//! run inside the batch, so a job cannot open a transaction of its own.
-//!
-//! Wire-compatibility with the TS layer, which the browser still sees:
-//!   * NUMERIC  -> JSON number, see `crate::money`;
-//!   * BIGINT   -> JSON number;
-//!   * TIMESTAMPTZ -> ISO-8601 string with millisecond precision;
-//!   * BOOLEAN  -> JSON boolean.
-//!
-//! Handlers keep the `CAST($n AS type)` notation: the type there and in the bind
-//! list is what this module converts by. [`sqlite_sql`] turns it into `?n`.
-
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -49,14 +17,9 @@ use crate::rpc;
 use crate::schema::{decode_kind, numeric_scale, Decode};
 
 pub const SCHEMA_SQL: &str = include_str!("../../../schema.sql");
-/// Splits [`SCHEMA_SQL`]: what follows it runs on a brand-new database only.
 const SEED_MARKER: &str = "-- SEED";
-/// Changes after version 1, oldest first; entry `n` moves a file to `n + 2`. The
-/// baseline in [`SCHEMA_SQL`] is frozen: a new column goes here.
 const MIGRATIONS: &[&str] = &[
-    // 2: usernames, access codes and the waitlist had no reader or writer left.
     "DROP TABLE IF EXISTS user_profiles; DROP TABLE IF EXISTS access_codes; DROP TABLE IF EXISTS waitlist;",
-    // 3: agent mode sessions and the decisions they make.
     "CREATE TABLE agent_sessions (
        id             TEXT PRIMARY KEY,
        wallet         TEXT NOT NULL,
@@ -91,7 +54,6 @@ const MIGRATIONS: &[&str] = &[
        expires_at INTEGER
      ) STRICT;
      CREATE INDEX agent_decisions_by_session ON agent_decisions(session_id, created_at);",
-    // 4: each settled round is sealed on Arkiv; a settled round with no seal row is the outbox.
     "CREATE TABLE IF NOT EXISTS arkiv_seals ( \
        bet_id    TEXT PRIMARY KEY REFERENCES bet_rounds(bet_id), \
        tx        TEXT NOT NULL, \
@@ -100,7 +62,6 @@ const MIGRATIONS: &[&str] = &[
        block     INTEGER \
      ) STRICT; \
      CREATE INDEX IF NOT EXISTS arkiv_seals_by_tx ON arkiv_seals (tx);",
-    // 5: World ID human checks that unlock YOLO agents.
     "CREATE TABLE world_attempts (
        id           TEXT PRIMARY KEY,
        wallet       TEXT NOT NULL,
@@ -124,7 +85,6 @@ const MIGRATIONS: &[&str] = &[
        linked_at INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX world_links_by_human ON world_links(iss, sub);",
-    // 6: house commitments of settled round epochs on Arc.
     "CREATE TABLE round_commits (
        epoch            INTEGER PRIMARY KEY,
        root             TEXT NOT NULL,
@@ -133,15 +93,10 @@ const MIGRATIONS: &[&str] = &[
        created_at       INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
      ) STRICT;
      CREATE INDEX bet_rounds_by_end ON bet_rounds(end_time);",
-    // 7: a World ID check also resumes a YOLO agent paused for its human.
     "ALTER TABLE world_attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'start' CHECK (kind IN ('start', 'checkpoint'));",
-    // 8: referrals were dropped with the admin dashboard.
     "DROP TABLE IF EXISTS user_referrals;",
-    // 9: one wallet's open stake, read on every bet.
     "CREATE INDEX bet_rounds_open_by_wallet ON bet_rounds(user_address) WHERE outcome IS NULL;",
-    // 10: the numbers behind a decision, snapshotted when it was made.
     "ALTER TABLE agent_decisions ADD COLUMN trace TEXT;",
-    // 11: every signal the agent rule sees, settled on paper.
     "CREATE TABLE signal_shadow (
        id           TEXT PRIMARY KEY,
        asset        TEXT NOT NULL,
@@ -160,7 +115,6 @@ const MIGRATIONS: &[&str] = &[
        outcome      TEXT CHECK (outcome IN ('win', 'loss', 'tie'))
      ) STRICT;
      CREATE INDEX signal_shadow_by_asset ON signal_shadow(asset, signal_at);",
-    // 12: browser keys a wallet delegated to write its own bets on Arkiv, and the gas we sent them.
     "CREATE TABLE arkiv_keys (
        key        TEXT PRIMARY KEY,
        wallet     TEXT NOT NULL,
@@ -169,28 +123,95 @@ const MIGRATIONS: &[&str] = &[
        created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
      ) STRICT;
      CREATE INDEX arkiv_keys_by_wallet ON arkiv_keys(wallet, created_at);",
-    // 13: where each committed epoch is archived: its Swarm bundle and its Arkiv entity.
     "ALTER TABLE round_commits ADD COLUMN swarm_ref TEXT;
      ALTER TABLE round_commits ADD COLUMN arkiv_key TEXT;",
     // 14: the paper model's win chance for each signal.
     "ALTER TABLE signal_shadow ADD COLUMN model_p REAL;",
+    // 15: World humans: one human per nullifier, its wallets, caps and Agent Pass step-ups.
+    //     Replaces the YOLO-only world tables; everyone verifies again.
+    "DROP TABLE world_links;
+     DROP TABLE world_attempts;
+     CREATE TABLE world_attempts (
+       id           TEXT PRIMARY KEY,
+       wallet       TEXT NOT NULL,
+       message      TEXT NOT NULL UNIQUE,
+       nonce        TEXT NOT NULL,
+       browser      TEXT NOT NULL,
+       acr_allowed  TEXT NOT NULL,
+       status       TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired', 'mismatch', 'failed')),
+       reason       TEXT,
+       acr          TEXT,
+       expires_at   INTEGER NOT NULL,
+       done_at      INTEGER,
+       created_at   INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER)),
+       kind         TEXT NOT NULL DEFAULT 'human' CHECK (kind IN ('human'))
+     ) STRICT;
+     CREATE TABLE humans (
+       id         TEXT PRIMARY KEY,
+       created_at INTEGER NOT NULL
+     ) STRICT;
+     CREATE TABLE human_ids (
+       iss       TEXT NOT NULL,
+       sub       TEXT NOT NULL,
+       human_id  TEXT NOT NULL,
+       acr       TEXT,
+       env       TEXT,
+       linked_at INTEGER NOT NULL,
+       PRIMARY KEY (iss, sub)
+     ) STRICT;
+     CREATE INDEX human_ids_by_human ON human_ids(human_id);
+     CREATE TABLE human_wallets (
+       wallet    TEXT PRIMARY KEY,
+       human_id  TEXT NOT NULL REFERENCES humans(id),
+       linked_at INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX human_wallets_by_human ON human_wallets(human_id);
+     CREATE TABLE human_limits (
+       human_id      TEXT PRIMARY KEY,
+       tier          TEXT NOT NULL CHECK (tier IN ('selfie', 'orb')),
+       cooloff_until INTEGER
+     ) STRICT;
+     CREATE TABLE stepups (
+       id                  TEXT PRIMARY KEY,
+       human_id            TEXT NOT NULL,
+       wallet              TEXT NOT NULL,
+       kind                TEXT NOT NULL CHECK (kind IN ('yolo_start', 'agent_checkpoint', 'agent_chase', 'proposal', 'withdraw')),
+       subject             TEXT NOT NULL,
+       status              TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired', 'mismatch', 'failed', 'used', 'cancelled')),
+       reason              TEXT,
+       device_code_hash    TEXT,
+       device_code_enc     TEXT,
+       user_code           TEXT,
+       verify_uri          TEXT,
+       verify_uri_complete TEXT,
+       interval_ms         INTEGER,
+       acr_required        TEXT,
+       started_at          INTEGER NOT NULL,
+       expires_at          INTEGER NOT NULL,
+       approved_at         INTEGER,
+       used_at             INTEGER,
+       sub                 TEXT,
+       acr                 TEXT,
+       amr                 TEXT,
+       session_id          TEXT
+     ) STRICT;
+     CREATE INDEX stepups_by_human ON stepups(human_id, status);
+     CREATE INDEX stepups_by_session ON stepups(session_id);
+     ALTER TABLE agent_sessions ADD COLUMN paused_until INTEGER;
+     ALTER TABLE agent_sessions ADD COLUMN pause_stepup_id TEXT;
+     ALTER TABLE agent_sessions ADD COLUMN checks_passed INTEGER NOT NULL DEFAULT 0;
+     CREATE INDEX bet_rounds_settled_by_wallet ON bet_rounds(user_address, settled_at) WHERE outcome IS NOT NULL;",
 ];
-/// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MMAP_BYTES: i64 = 256 * 1024 * 1024;
 const CACHE_KIB: i64 = 64 * 1024;
 const STATEMENT_CACHE: usize = 256;
-/// Queued write jobs before `send` applies backpressure to handlers.
 const WRITE_QUEUE: usize = 4096;
-/// Most jobs in one commit: keeps a batch's latency bounded under a deep queue.
 const MAX_BATCH: usize = 256;
-/// VM steps between statement-deadline checks.
 const PROGRESS_STEPS: i32 = 10_000;
 
-/// What a job left behind. `answer` gets the commit's outcome and replies to the
-/// caller, which is why it runs after the commit and not inside the job.
 struct Ran {
     ok: bool,
     answer: Box<dyn FnOnce(Result<(), String>) + Send>,
@@ -198,7 +219,6 @@ struct Ran {
 
 type WriteJob = Box<dyn FnOnce(&mut Connection) -> Ran + Send>;
 
-/// Commits and jobs since start; `jobs / batches` is the average batch size.
 #[derive(Default)]
 struct WriterStats {
     batches: AtomicU64,
@@ -207,11 +227,9 @@ struct WriterStats {
 
 struct Reader {
     conn: Connection,
-    /// Milliseconds on the process clock after which the running query aborts.
     deadline_ms: Arc<AtomicI64>,
 }
 
-/// A handle to one database file: one writer thread plus a read pool.
 pub struct Db {
     path: Arc<str>,
     writer: mpsc::Sender<WriteJob>,
@@ -236,7 +254,6 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
-    // Without this a mistyped "column" silently becomes a string literal.
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
     register_like(conn)
@@ -257,10 +274,6 @@ fn open_writer(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Brings a file to [`SCHEMA_VERSION`] using `PRAGMA user_version`, which commits
-/// with the transaction. A file at version 0 with tables predates versioning: it
-/// gets the DDL it may lack, but it has seen the seed, and running it again could
-/// undo an admin's decision.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version == SCHEMA_VERSION {
@@ -301,8 +314,6 @@ fn baseline_ddl() -> &'static str {
 
 const JOB_SAVEPOINT: &str = "group_job";
 
-/// Runs one group of jobs as one transaction, then answers them all. A job that
-/// never ran is dropped, and dropping its reply is an error for its caller.
 fn run_batch(conn: &mut Connection, jobs: Vec<WriteJob>, stats: &WriterStats) {
     let mut ran: Vec<Ran> = Vec::with_capacity(jobs.len());
     stats.jobs.fetch_add(jobs.len() as u64, Ordering::Relaxed);
@@ -335,8 +346,6 @@ fn run_batch(conn: &mut Connection, jobs: Vec<WriteJob>, stats: &WriterStats) {
             ran.push(job);
         }
 
-        // SQLite rolls the whole transaction back itself on some errors (disk
-        // full, I/O), which takes every earlier job in the batch with it.
         let kept = !conn.is_autocommit()
             && conn
                 .execute_batch(&if ok {
@@ -389,7 +398,6 @@ fn open_reader(path: &str) -> rusqlite::Result<Reader> {
 }
 
 impl Db {
-    /// Opens or creates the file and brings its schema up to date.
     pub fn open(
         path: impl AsRef<Path>,
         readers: usize,
@@ -436,7 +444,6 @@ impl Db {
         })
     }
 
-    /// `(commits, jobs)` since the process started.
     pub fn writer_stats(&self) -> (u64, u64) {
         (
             self.stats.batches.load(Ordering::Relaxed),
@@ -444,10 +451,6 @@ impl Db {
         )
     }
 
-    /// Runs `job` on the writer thread and answers once its commit is durable.
-    /// The closure is the whole critical section. It already runs in a
-    /// transaction, and an `Err` undoes everything it wrote; to undo while still
-    /// answering `Ok`, hold a `conn.savepoint()` and drop it.
     pub async fn write<T: Send + 'static>(
         &self,
         job: impl FnOnce(&mut Connection) -> ApiResult<T> + Send + 'static,
@@ -470,7 +473,6 @@ impl Db {
             .map_err(|_| ApiError::Other("sqlite write was not committed".to_string()))?
     }
 
-    /// Runs `job` on a pooled read-only connection.
     pub async fn read<T: Send + 'static>(
         &self,
         job: impl FnOnce(&Connection) -> ApiResult<T> + Send + 'static,
@@ -487,7 +489,6 @@ impl Db {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let taken = pool.lock().map_err(|_| poisoned())?.pop();
-            // None only after a job panicked and took its connection with it.
             let reader = match taken {
                 Some(reader) => reader,
                 None => open_reader(&path)?,
@@ -503,8 +504,6 @@ impl Db {
         .map_err(|e| ApiError::Other(format!("sqlite read task failed: {e}")))?
     }
 
-    /// One statement with already-converted params: SELECT goes to a reader,
-    /// anything else (INSERT ... RETURNING included) to the writer.
     pub async fn run(&self, sql: &str, params: Vec<Param>) -> ApiResult<(Vec<Value>, u64)> {
         let sql = sqlite_sql(sql);
         if is_read(&sql) {
@@ -521,8 +520,6 @@ impl Db {
         Ok(self.run(sql, params).await?.0)
     }
 
-    /// `callRpc()` from the TS layer: named arguments to a ledger function. Each
-    /// call is one savepoint in a write batch, see `crate::rpc`.
     pub async fn call_rpc(&self, fn_name: &str, params: &[(&str, &Value)]) -> ApiResult<Value> {
         if !is_identifier(fn_name) {
             return Err(ApiError::internal(format!(
@@ -551,7 +548,6 @@ fn is_read(sql: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case("SELECT"))
 }
 
-/// Rows of one statement as JSON, for code already on a connection.
 pub fn query_rows(conn: &Connection, sql: &str, params: Vec<Param>) -> ApiResult<Vec<Value>> {
     Ok(run_statement(conn, sql, params, false)?.0)
 }
@@ -584,7 +580,6 @@ fn run_statement(
 
 static DB: OnceCell<Db> = OnceCell::const_new();
 
-/// The process-wide database, opened on first use.
 pub async fn db() -> ApiResult<&'static Db> {
     DB.get_or_try_init(|| async {
         let cfg = config();
@@ -600,7 +595,6 @@ pub async fn db() -> ApiResult<&'static Db> {
     .await
 }
 
-/// JSON for one cell, decoded by the column's name (see `crate::schema`).
 fn cell_json(column: &str, cell: ValueRef<'_>) -> Value {
     match cell {
         ValueRef::Null => Value::Null,
@@ -628,8 +622,6 @@ pub fn now_us() -> i64 {
     chrono::Utc::now().timestamp_micros()
 }
 
-/// The timestamp spellings Postgres accepted from this codebase; a value with no
-/// zone is UTC, the session zone the server ran in.
 pub fn parse_timestamp_us(text: &str) -> Option<i64> {
     use chrono::{DateTime, NaiveDate, NaiveDateTime};
     let text = text.trim();
@@ -649,19 +641,12 @@ pub fn parse_timestamp_us(text: &str) -> Option<i64> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// LIKE
-// ---------------------------------------------------------------------------
-
 enum LikeToken {
     AnyRun,
     AnyChar,
     Literal(char),
 }
 
-/// Postgres `LIKE`: `%`, `_`, and `\` escaping by default. SQLite's own LIKE
-/// folds ASCII only, has no default escape, and folds when Postgres LIKE would
-/// not, so both operators are registered as functions instead.
 fn like_match(value: &str, pattern: &str, fold_case: bool) -> Result<bool, &'static str> {
     let (value, pattern) = if fold_case {
         (value.to_lowercase(), pattern.to_lowercase())
@@ -735,14 +720,8 @@ fn register_like(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Hand-written SQL with typed binds
-// ---------------------------------------------------------------------------
-
-/// `(logical type of the placeholder, value)`, one entry per `$n`.
 pub type TypedBind<'a> = (&'a str, &'a Value);
 
-/// The highest `$n` placeholder in a statement.
 pub fn highest_placeholder(sql: &str) -> usize {
     let bytes = sql.as_bytes();
     let mut idx = 0;
@@ -767,8 +746,6 @@ pub fn highest_placeholder(sql: &str) -> usize {
     highest
 }
 
-/// `CAST($n AS any type)` and bare `$n` both become `?n`. The value was already
-/// converted by type, and a real SQLite CAST to `uuid` would mangle it.
 pub fn sqlite_sql(sql: &str) -> String {
     const CAST: &str = "CAST($";
     let mut out = String::with_capacity(sql.len());
@@ -792,7 +769,6 @@ pub fn sqlite_sql(sql: &str) -> String {
         out.push_str(&rest[digits_at..digits_at + digits]);
         rest = &rest[digits_at + digits..];
         if is_cast {
-            // Past the type, which may have its own parentheses.
             let mut depth = 1;
             let end = rest.char_indices().find_map(|(i, c)| {
                 match c {
@@ -812,8 +788,6 @@ pub fn sqlite_sql(sql: &str) -> String {
 fn arguments(sql: &str, binds: &[TypedBind]) -> ApiResult<Vec<Param>> {
     let highest = highest_placeholder(sql);
     if highest != binds.len() {
-        // A mismatch would bind the wrong column or leave a placeholder
-        // unbound; fail loudly at the call site instead.
         return Err(ApiError::internal(format!(
             "query has {highest} placeholders but {} binds",
             binds.len()
@@ -831,13 +805,11 @@ pub async fn fetch_one(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<Option<V
     Ok(fetch(sql, binds).await?.into_iter().next())
 }
 
-/// Rows affected, for UPDATE/DELETE/INSERT.
 pub async fn execute(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<u64> {
     let params = arguments(sql, binds)?;
     Ok(db().await?.run(sql, params).await?.1)
 }
 
-/// A single scalar, e.g. `SELECT count(*)`.
 pub async fn fetch_scalar(sql: &str, binds: &[TypedBind<'_>]) -> ApiResult<Value> {
     let first = fetch_one(sql, binds)
         .await?
@@ -849,12 +821,10 @@ pub async fn call_rpc(fn_name: &str, params: &[(&str, &Value)]) -> ApiResult<Val
     db().await?.call_rpc(fn_name, params).await
 }
 
-/// JSON value -> the text form of a bind. `None` is SQL NULL.
 pub fn json_bind_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
         Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
-        // serde_json prints integers exactly and floats in round-trip form.
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) => Some(s.clone()),
         other => Some(other.to_string()),
@@ -878,7 +848,6 @@ fn integer_param(type_name: &str, text: &str, min: i64, max: i64) -> ApiResult<P
     Ok(Param::Integer(parsed))
 }
 
-/// The accepted spellings of the Postgres boolean input function.
 fn boolean_param(text: &str) -> ApiResult<Param> {
     match text.trim().to_lowercase().as_str() {
         "t" | "tr" | "tru" | "true" | "y" | "ye" | "yes" | "on" | "1" => Ok(Param::Integer(1)),
@@ -889,9 +858,6 @@ fn boolean_param(text: &str) -> ApiResult<Param> {
     }
 }
 
-/// Converts `value` to the storage form of `type_name`, refusing anything
-/// Postgres' cast would have refused. Arrays are refused rather than guessed at,
-/// since a wrong guess here silently changes the money math.
 pub fn typed_param(type_name: &str, value: &Value) -> ApiResult<Param> {
     if type_name.ends_with("[]") {
         return Err(ApiError::internal(format!(
@@ -929,9 +895,6 @@ pub fn typed_param(type_name: &str, value: &Value) -> ApiResult<Param> {
     }
 }
 
-/// Types reach SQL only from `crate::schema`, never from a client. Still: allow
-/// only the characters a real type expression can contain, so a future code path
-/// cannot smuggle SQL through a type name.
 pub fn is_safe_type_expression(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -942,8 +905,6 @@ pub fn is_safe_type_expression(value: &str) -> bool {
         })
 }
 
-/// Untyped fallback for callers that already know the Rust type of a value.
-/// Numbers keep their integer/float identity; objects and arrays go out as JSON text.
 pub fn untyped_param(value: &Value) -> Param {
     match value {
         Value::Null => Param::Null,
@@ -957,8 +918,6 @@ pub fn untyped_param(value: &Value) -> Param {
     }
 }
 
-/// The ledger functions answer `{"success": bool, ...}`; scalars get wrapped so
-/// handlers can read one shape.
 pub fn rpc_object(value: Value) -> Map<String, Value> {
     match value {
         Value::Object(map) => map,
@@ -983,8 +942,6 @@ pub fn is_identifier(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-/// The Postgres code of a constraint failure, e.g. "23505" for unique
-/// violations, so the cause logged by handlers keeps its meaning.
 pub fn pg_error_code(err: &rusqlite::Error) -> Option<String> {
     use rusqlite::ffi;
     let code = err.sqlite_error()?.extended_code;
@@ -1101,7 +1058,6 @@ mod tests {
         ));
         assert!(typed_param("bytea", &json!("not-hex")).is_err());
         assert!(typed_param("text[]", &json!(["a"])).is_err());
-        // NULL is bindable for every cast target.
         assert_eq!(typed_param("uuid", &Value::Null).unwrap(), Param::Null);
     }
 
@@ -1177,7 +1133,6 @@ mod tests {
             ),
             "VALUES (?12, ?3)"
         );
-        // A repeated placeholder stays one parameter; reuse must not shift binds.
         assert_eq!(
             sqlite_sql("(code LIKE CAST($1 AS text) OR w LIKE CAST($1 AS text))"),
             "(code LIKE ?1 OR w LIKE ?1)"
@@ -1195,7 +1150,6 @@ mod tests {
         let like = |v, p| like_match(v, p, false).unwrap();
         let ilike = |v, p| like_match(v, p, true).unwrap();
         assert!(like("0xAbC", "0xA%"));
-        // LIKE is case-sensitive, unlike SQLite's built-in.
         assert!(!like("0xAbC", "0xa%"));
         assert!(ilike("0xAbC", "0xa%"));
         assert!(ilike("0XABC", "%abc"));
@@ -1206,7 +1160,6 @@ mod tests {
         assert!(ilike("", "%"));
         assert!(!ilike("", "_"));
         assert!(ilike("aXbXc", "a%b%c"));
-        // `\` escapes by default.
         assert!(ilike("50%", "50\\%"));
         assert!(!ilike("500", "50\\%"));
         assert!(ilike("a_b", "a\\_b"));
@@ -1278,7 +1231,6 @@ mod tests {
 
     #[test]
     fn a_file_made_by_the_sql_alone_counts_as_seeded() {
-        // What `strike-data init` and the migration tool do.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
         assert_eq!((banned(&conn), version(&conn)), (1, 1));

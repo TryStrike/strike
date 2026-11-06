@@ -1,30 +1,3 @@
-//! The two atomic steps of a withdrawal.
-//!
-//! Queueing: the replay check, the cap and the insert are one write job on the
-//! single writer, so parallel requests see each other's pending rows. A signed
-//! intent is one row, enforced by `idx_wr_signed_intent` on
-//! (user, currency, signed_at). The key is not the signature: the same intent
-//! has several valid spellings (v 0/1 or 27/28, hex case, another nonce), and
-//! amounts differing below 1e-8 sign the same message.
-//!
-//! Accepting: [`claim_and_debit`] commits the claim and the ledger debit together
-//! BEFORE any transfer, and fails closed. The route then sends the transfer with
-//! no database lock held, and calls [`finalize`] or parks the row. There is no
-//! way back to `pending`:
-//!   * `accepted`, `tx_hash` NULL: debited, transfer in flight or its outcome
-//!     unknown (a crash leaves it here). Nothing retries it.
-//!   * `accepted`, `tx_hash` set: paid.
-//!   * `paid_needs_reconciliation`: debited, transfer failed or unknown. The debit
-//!     stands; an operator decides. Nothing re-credits it.
-//!
-//! Past `WITHDRAWAL_STUCK_SECS` the first state means something died: [`stuck`]
-//! lists those rows, [`watch_stuck`] logs them, and an admin read counts them.
-//! None of that changes a row.
-//!
-//! The debit's audit row carries the placeholder hash `withdrawal:<id>` until
-//! [`finalize`] writes the real one, and its unique index makes a second debit of
-//! one request impossible.
-
 use rusqlite::types::Value as Param;
 use rusqlite::{params, params_from_iter, Connection};
 use rust_decimal::prelude::ToPrimitive;
@@ -37,13 +10,11 @@ use crate::error::ApiResult;
 use crate::ledger::{self, Rejection};
 use crate::money::parse_decimal;
 use crate::rpc;
+use crate::world;
 
 pub struct QueueRequest {
-    /// Canonical address the row is stored under.
     pub user_key: String,
-    /// Every legacy spelling of the wallet, for the totals.
     pub variants: Vec<String>,
-    /// The spelling of the funded balance row, whose tier sets the fee.
     pub ledger_address: String,
     pub currency: String,
     pub amount: Value,
@@ -55,7 +26,6 @@ pub struct QueueRequest {
 
 #[derive(Debug)]
 pub enum Queued {
-    /// The intent already has a row; nothing was written.
     Replay(Value),
     Created {
         id: Value,
@@ -74,7 +44,6 @@ fn text_params(first: &[&str], variants: &[String]) -> Vec<Param> {
         .collect()
 }
 
-/// `?from, ?from+1, ...`; an empty list renders NULL, which matches nothing.
 fn placeholders(from: usize, count: usize) -> String {
     if count == 0 {
         return "NULL".to_string();
@@ -117,14 +86,10 @@ fn existing_intent(conn: &Connection, request: &QueueRequest) -> ApiResult<Optio
     Ok(rows.into_iter().next())
 }
 
-/// Auto-pay policy: withdrawals pay with no human review, so these caps are the
-/// only brake. Over either one the request is refused up front, never queued.
 pub const MAX_PER_REQUEST_USDC: i128 = 50;
 pub const MAX_PER_DAY_USDC: i128 = 200;
 const DAY_US: i64 = 86_400_000_000;
 
-/// The two auto-pay caps against `amount` and what this wallet already moved,
-/// or is moving, in the last 24 hours (anything not rejected).
 fn auto_pay_caps(amount: &Value, today: &[Value]) -> Result<(), Rejection> {
     let unit = 10i128.pow(USDC_DECIMALS);
     let null = Value::Null;
@@ -143,18 +108,22 @@ fn auto_pay_caps(amount: &Value, today: &[Value]) -> Result<(), Rejection> {
     if amount > MAX_PER_REQUEST_USDC * unit {
         return Err((
             400,
-            ledger::error_body(&format!(
-                "Withdrawals are capped at {MAX_PER_REQUEST_USDC} USDC per request."
-            )),
+            ledger::coded_body(
+                "withdraw_cap",
+                &format!("Withdrawals are capped at {MAX_PER_REQUEST_USDC} USDC per request."),
+            ),
         ));
     }
     if spent + amount > MAX_PER_DAY_USDC * unit {
         let left = (MAX_PER_DAY_USDC * unit - spent).max(0) as f64 / unit as f64;
         return Err((
             429,
-            ledger::error_body(&format!(
-                "Withdrawals are capped at {MAX_PER_DAY_USDC} USDC per day. You can withdraw {left} more in the next 24 hours."
-            )),
+            ledger::coded_body(
+                "daily_cap",
+                &format!(
+                    "Withdrawals are capped at {MAX_PER_DAY_USDC} USDC per human per day. You can withdraw {left} more in the next 24 hours."
+                ),
+            ),
         ));
     }
     Ok(())
@@ -166,6 +135,29 @@ fn queue_in_transaction(
 ) -> ApiResult<Result<Queued, Rejection>> {
     if let Some(existing) = existing_intent(conn, request)? {
         return Ok(Ok(Queued::Replay(existing)));
+    }
+    if let Err(code) = world::gate_ready() {
+        let mut body = ledger::coded_body(code, world::NOT_CONFIGURED);
+        body["retryable"] = json!(true);
+        return Ok(Err((503, body)));
+    }
+    let Some(human) = world::human_of_wallet(conn, &request.user_key)? else {
+        return Ok(Err((
+            403,
+            ledger::coded_body("human_required", "Verify with World ID before withdrawing"),
+        )));
+    };
+    let mut human_wallets = world::wallets_of_human(conn, &human.id)?;
+    if world::any_banned(conn, &human_wallets)? {
+        return Ok(Err((
+            403,
+            ledger::coded_body("banned", world::BANNED_HUMAN),
+        )));
+    }
+    for variant in &request.variants {
+        if !human_wallets.contains(variant) {
+            human_wallets.push(variant.clone());
+        }
     }
 
     let n = request.variants.len();
@@ -181,8 +173,6 @@ fn queue_in_transaction(
         )
     };
     let deposits = audit_amounts("deposit")?;
-    // A debit lands here the moment a request is accepted, so accepted rows need
-    // no separate count below.
     let withdrawn = audit_amounts("withdrawal")?;
     let pending = query_rows(
         conn,
@@ -203,27 +193,32 @@ fn queue_in_transaction(
         return Ok(Err(rejection));
     }
 
-    let today = query_rows(
-        conn,
-        &format!(
-            "SELECT amount FROM withdrawal_requests \
+    let since = now_us() - DAY_US;
+    let today_sql = |columns: &str| {
+        format!(
+            "SELECT {columns} FROM withdrawal_requests \
              WHERE currency = ?1 AND status != 'rejected' AND requested_at > ?2 AND user_address IN ({})",
-            placeholders(3, n)
-        ),
-        {
-            let mut params = vec![
-                Param::Text(request.currency.clone()),
-                Param::Integer(now_us() - DAY_US),
-            ];
-            params.extend(request.variants.iter().map(|v| Param::Text(v.clone())));
-            params
-        },
-    )?;
-    if let Err(rejection) = auto_pay_caps(&request.amount, &today) {
-        return Ok(Err(rejection));
+            placeholders(3, human_wallets.len())
+        )
+    };
+    let today_params = || {
+        let mut params = vec![Param::Text(request.currency.clone()), Param::Integer(since)];
+        params.extend(human_wallets.iter().map(|v| Param::Text(v.clone())));
+        params
+    };
+    let today = query_rows(conn, &today_sql("amount"), today_params())?;
+    if let Err((status, mut body)) = auto_pay_caps(&request.amount, &today) {
+        if status == 429 {
+            let oldest = count_of(
+                conn,
+                &today_sql(&format!("coalesce(min(requested_at), {since})")),
+                today_params(),
+            )?;
+            body["retryAfter"] = json!(((oldest - since) / 1_000_000).max(1));
+        }
+        return Ok(Err((status, body)));
     }
 
-    // Abuse detection is global: every currency, completed plus pending.
     let withdrawal_count = count_of(
         conn,
         &format!(
@@ -292,7 +287,6 @@ fn queue_in_transaction(
     }))
 }
 
-/// Replay check, cap and insert as one transaction.
 pub async fn queue(db: &Db, request: QueueRequest) -> Result<Queued, Rejection> {
     db.write(move |conn| {
         let tx = conn.savepoint()?;
@@ -302,7 +296,6 @@ pub async fn queue(db: &Db, request: QueueRequest) -> Result<Queued, Rejection> 
     })
     .await
     .unwrap_or_else(|err| {
-        // Fail closed: a totals read that errored must not let a request through.
         tracing::error!("[withdraw] failed to queue withdrawal request: {err}");
         Err(ledger::withdraw_insert_failed())
     })
@@ -310,18 +303,11 @@ pub async fn queue(db: &Db, request: QueueRequest) -> Result<Queued, Rejection> 
 
 #[derive(Debug, PartialEq)]
 pub enum Claim {
-    /// Committed: the row is `accepted` and the ledger is debited. Only this
-    /// result may lead to a transfer.
     Debited { new_balance: Value },
-    /// Another call took it; nothing changed.
     NotPending,
-    /// The debit refused (insufficient, frozen, banned). Rolled back, so the row
-    /// is still `pending`.
     Refused(String),
 }
 
-/// Claims `id` and debits the ledger in one committed transaction. Runs on the
-/// writer and returns before any network call can start.
 pub async fn claim_and_debit(
     db: &Db,
     id: i64,
@@ -354,7 +340,7 @@ pub async fn claim_and_debit(
                 .as_str()
                 .unwrap_or("Debit failed")
                 .to_string();
-            return Ok(Claim::Refused(error)); // `tx` drops: claim and debit undone.
+            return Ok(Claim::Refused(error));
         }
         tx.commit()?;
         Ok(Claim::Debited {
@@ -364,7 +350,6 @@ pub async fn claim_and_debit(
     .await
 }
 
-/// Records a sent payout. `Ok(false)`: the row was no longer `accepted`.
 pub async fn finalize(
     db: &Db,
     id: i64,
@@ -394,8 +379,6 @@ pub async fn finalize(
     .await
 }
 
-/// Parks a claimed row. The debit stands, nothing is re-credited, and a parked
-/// row can never be accepted again. `Ok(false)`: the row was not `accepted`.
 pub async fn park(db: &Db, id: i64, note: String) -> ApiResult<bool> {
     db.write(move |conn| {
         let parked = conn
@@ -410,8 +393,6 @@ pub async fn park(db: &Db, id: i64, note: String) -> ApiResult<bool> {
     .await
 }
 
-/// Ids of rows debited before `decided_before_us` that never got a hash and were
-/// never parked. Read-only: their transfers may have gone out.
 pub async fn stuck(db: &Db, decided_before_us: i64) -> ApiResult<Vec<i64>> {
     db.read(move |conn| {
         let mut statement = conn.prepare_cached(
@@ -426,12 +407,10 @@ pub async fn stuck(db: &Db, decided_before_us: i64) -> ApiResult<Vec<i64>> {
     .await
 }
 
-/// The cutoff for a stuck row, right now.
 pub fn stuck_cutoff_us() -> i64 {
     now_us() - config().withdrawal_stuck_secs * 1_000_000
 }
 
-/// Logs stuck rows once a minute for the life of the process.
 pub async fn watch_stuck() {
     let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
     loop {

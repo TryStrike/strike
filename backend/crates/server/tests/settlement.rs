@@ -1,6 +1,3 @@
-//! The payout path over real HTTP: the real binary, a throwaway database, and a
-//! Binance-shaped feed in this process, so a test decides what the market did.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,7 +22,6 @@ const WALLET: &str = "0x1111111111111111111111111111111111111111";
 const UNIT: i64 = 10_000_000_000;
 const PRICE_UNIT: i64 = 100_000_000;
 
-/// `{ "BTCUSDT": 100.0 }`; `down` answers 503 to everything.
 #[derive(Default)]
 struct Market {
     prices: HashMap<String, f64>,
@@ -105,11 +101,11 @@ fn spawn_server(dir: &Path, feed_url: &str, port: u16, env: &[(&str, &str)]) -> 
         .env("BIND_ADDR", format!("127.0.0.1:{port}"))
         .env("BALANCE_INTERNAL_SECRET", SECRET)
         .env("BALANCE_SETTLEMENT_SECRET", SETTLEMENT_SECRET)
+        .env("STRIKE_DEV_NO_WORLD", "1")
         .env("BINANCE_ENDPOINT", format!("{feed_url}/ticker"))
         .env("YAHOO_SPARK_ENDPOINT", format!("{feed_url}/spark"))
         .env("BINANCE_PERP_ENDPOINT", format!("{feed_url}/perp"))
         .env("KRAKEN_ENDPOINT", format!("{feed_url}/kraken"))
-        // One missed sample is an outage here, so a test needs no 5 s wait.
         .env("SETTLE_TICK_TOLERANCE_MS", "1500")
         .envs(env.iter().copied())
         .stdout(Stdio::null())
@@ -119,7 +115,6 @@ fn spawn_server(dir: &Path, feed_url: &str, port: u16, env: &[(&str, &str)]) -> 
 }
 
 impl Server {
-    /// A server, a funded wallet, and time for the first price sample to land.
     async fn start(btc: f64) -> (Self, Feed, String) {
         Self::start_with(btc, &[]).await
     }
@@ -143,13 +138,11 @@ impl Server {
         (server, feed, feed_url)
     }
 
-    /// A hard stop: nothing is flushed, which is what a crash does.
     fn kill(&mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
 
-    /// Same database, empty rings.
     async fn restart(&mut self, feed_url: &str) {
         let port = free_port();
         self.child = spawn_server(&self.dir, feed_url, port, &self.env);
@@ -157,7 +150,6 @@ impl Server {
         self.wait_up(feed_url).await;
     }
 
-    /// `(outcome, settled_by, end_source)`, the permanent record.
     fn round(&self, bet: &Value) -> (Option<String>, Option<String>, Option<String>) {
         self.sqlite()
             .query_row(
@@ -168,11 +160,6 @@ impl Server {
             .unwrap()
     }
 
-    /// `free_port` releases the port before the child binds it, so under
-    /// parallel tests another process can take it first. The child then exits,
-    /// and a health check could even reach that other server, so health only
-    /// counts while this child is alive, and an exited child boots again on a
-    /// fresh port.
     async fn wait_up(&mut self, feed_url: &str) {
         for _ in 0..5 {
             for _ in 0..3000 {
@@ -215,7 +202,6 @@ impl Server {
             .unwrap();
     }
 
-    /// In units of 1e-10, so nothing here compares a float.
     fn balance(&self) -> i64 {
         self.sqlite()
             .query_row(
@@ -275,7 +261,6 @@ impl Server {
         self.post("/api/balance/win", body).await
     }
 
-    /// Nothing here claims: only the server can write this row.
     async fn wait_settled(&self, bet: &Value) {
         for _ in 0..200 {
             if self.history(bet).is_some() {
@@ -291,7 +276,6 @@ fn request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// The up/down round the classic game places: 10 USDC at the 5 s tier.
 fn classic(direction: &str, strike: f64) -> Value {
     json!({
         "userAddress": WALLET, "betAmount": 10, "currency": "USDC", "asset": "BTC",
@@ -305,12 +289,9 @@ async fn after_the_next_sample() {
     tokio::time::sleep(Duration::from_millis(1300)).await;
 }
 
-/// Past a 5 s round whose price moved at the first sample.
 async fn round_over() {
     tokio::time::sleep(Duration::from_millis(4000)).await;
 }
-
-// -- the exploit -------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bet_followed_by_an_immediate_claim_is_not_paid() {
@@ -386,7 +367,6 @@ async fn an_inflated_win_amount_changes_nothing() {
 async fn client_prices_never_reach_the_outcome() {
     let (s, feed, _) = Server::start(100.0).await;
 
-    // A strike the feed never printed is refused before any money moves.
     let (status, reply) = s.post("/api/balance/bet", classic("UP", 50.0)).await;
     assert_ne!(status, StatusCode::OK, "{reply}");
     assert_eq!(s.balance(), 100 * UNIT);
@@ -396,7 +376,6 @@ async fn client_prices_never_reach_the_outcome() {
     set_price(&feed, 90.0);
     round_over().await;
 
-    // The loser claims with prices that would make it a winner.
     let lying = json!({
         "userAddress": WALLET, "winAmount": 17.5, "currency": "USDC",
         "betId": bet["betId"], "settlementToken": bet["settlementToken"],
@@ -414,8 +393,6 @@ async fn client_prices_never_reach_the_outcome() {
     );
 }
 
-// -- settlement without a client ---------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_sweep_pays_a_winner_nobody_claimed() {
     let (s, feed, _) = Server::start(100.0).await;
@@ -432,7 +409,6 @@ async fn the_sweep_pays_a_winner_nobody_claimed() {
     assert_eq!(settled_by.as_deref(), Some("sweep"));
     assert_eq!(source.as_deref(), Some("binance"));
 
-    // A claim afterwards is told the result and moves nothing.
     let (status, reply) = s.claim(&bet, 17.5).await;
     assert_eq!(status, StatusCode::OK, "{reply}");
     assert_eq!(reply["duplicate"], json!(true));
@@ -503,8 +479,6 @@ async fn the_proof_carries_the_server_record() {
     assert_eq!(proof["bet"]["recorded_end_price"], json!(110));
 }
 
-// -- the refund rule ---------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_outage_across_the_end_refunds_the_stake() {
     let (s, feed, _) = Server::start(100.0).await;
@@ -551,8 +525,6 @@ async fn a_round_still_open_across_a_restart_settles_on_its_price() {
     assert_eq!(s.balance(), 90 * UNIT + 175 * UNIT / 10);
 }
 
-// -- what a bet is refused for -----------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bet_on_a_stale_feed_is_refused_before_money_moves() {
     let (s, feed, _) = Server::start(100.0).await;
@@ -589,7 +561,6 @@ async fn a_request_cannot_put_a_price_in_the_feed() {
     let query = format!("{}/api/prices/latest?asset=BTC&price=1", s.url);
     s.http.get(query).send().await.unwrap();
 
-    // The feed still says 100, so a strike of 1 is refused and 100 is taken.
     let (status, reply) = s.post("/api/balance/bet", classic("UP", 1.0)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{reply}");
     assert_eq!(reply["code"], "price_moved");
@@ -597,9 +568,6 @@ async fn a_request_cannot_put_a_price_in_the_feed() {
     assert_eq!(bet["strikePrice"], json!(100.0));
 }
 
-// -- bands -------------------------------------------------------------------
-
-/// A 3 s box round on `[bottom, top]`.
 fn band(top: f64, bottom: f64, multiplier: f64, ahead_ms: i64) -> Value {
     json!({
         "userAddress": WALLET, "betAmount": 10, "currency": "USDC", "asset": "BTC",
@@ -611,7 +579,6 @@ fn band(top: f64, bottom: f64, multiplier: f64, ahead_ms: i64) -> Value {
     })
 }
 
-/// Leaves a 2-wide range in the last 30 s, with the price back at 100.
 async fn make_the_market_move(feed: &Feed) {
     set_price(feed, 102.0);
     after_the_next_sample().await;
@@ -657,8 +624,6 @@ async fn a_forged_or_late_band_is_refused() {
     assert_eq!(s.balance(), 100 * UNIT);
 }
 
-// -- agent -------------------------------------------------------------------
-
 fn key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
 }
@@ -686,7 +651,6 @@ fn usdc(whole: i64) -> Decimal {
     Decimal::from(whole)
 }
 
-/// Yolo on BTC, 5 USDC a trade out of 5, valid for a minute from now.
 fn yolo(signer: &SigningKey) -> StartTerms {
     StartTerms {
         wallet: address_of(signer),
@@ -702,7 +666,6 @@ fn yolo(signer: &SigningKey) -> StartTerms {
     }
 }
 
-/// `(event, data)` frames off an SSE body.
 struct SseFeed {
     res: reqwest::Response,
     buffer: String,
@@ -732,7 +695,6 @@ impl SseFeed {
         }
     }
 
-    /// The first frame of `event` that `wanted` accepts, within `secs`.
     async fn until(&mut self, event: &str, secs: u64, wanted: impl Fn(&Value) -> bool) -> Value {
         let found = tokio::time::timeout(Duration::from_secs(secs), async {
             while let Some((name, data)) = self.next().await {
@@ -749,20 +711,34 @@ impl SseFeed {
 }
 
 impl Server {
-    /// `(status, body, agent cookie)`.
     async fn start_agent(
         &self,
         signer: &SigningKey,
         terms: &StartTerms,
     ) -> (StatusCode, Value, Option<String>) {
         let message = start_message(terms);
-        let res = self
+        let mut body = json!({ "message": message, "signature": sign(signer, &message) });
+        let mut res = self
             .http
             .post(format!("{}/api/agent/start", self.url))
-            .json(&json!({ "message": message, "signature": sign(signer, &message) }))
+            .json(&body)
             .send()
             .await
             .unwrap();
+        if res.status() == StatusCode::UNAUTHORIZED {
+            let reply: Value = res.json().await.unwrap_or(Value::Null);
+            if reply["code"] != "step_up_required" {
+                return (StatusCode::UNAUTHORIZED, reply, None);
+            }
+            body["stepupId"] = reply["stepup"]["id"].clone();
+            res = self
+                .http
+                .post(format!("{}/api/agent/start", self.url))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+        }
         let status = res.status();
         let cookie = res
             .headers()
@@ -821,7 +797,6 @@ async fn a_price_move_makes_a_yolo_agent_place_a_bet_on_the_feed() {
     let session = decisions.until("session", 5, |_| true).await;
     assert_eq!(session["status"], "running", "{session}");
 
-    // Fifteen seconds of a flat 100, then a jump the 2 minute range can't hide.
     tokio::time::sleep(Duration::from_millis(16_000)).await;
     set_price(&feed, 101.0);
 
@@ -859,7 +834,6 @@ async fn another_wallets_token_cannot_stop_or_read_a_session() {
     let (_, b, bob_cookie) = s.start_agent(&bob, &yolo(&bob)).await;
     let (alice_cookie, bob_cookie) = (alice_cookie.unwrap(), bob_cookie.unwrap());
 
-    // Alice's claims with a signature that isn't the server's.
     let (claims, sig) = alice_cookie.rsplit_once('.').unwrap();
     let flipped = if sig.ends_with('A') { "B" } else { "A" };
     let forged = format!("{claims}.{}{flipped}", &sig[..sig.len() - 1]);
@@ -950,7 +924,6 @@ async fn a_start_is_refused_with_the_reason() {
         assert!(cookie.is_none());
     }
 
-    // Signed by someone else.
     let (status, reply, _) = s.start_agent(&key(11), &yolo(&trader)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{reply}");
 
@@ -970,13 +943,11 @@ async fn a_start_is_refused_with_the_reason() {
     assert_eq!(reply["error"], "Start message already used");
 }
 
-/// Fifteen seconds of a flat 100, then a move to 101 the agent trades UP.
 async fn jump_after_history(feed: &Feed) {
     tokio::time::sleep(Duration::from_millis(16_000)).await;
     set_price(feed, 101.0);
 }
 
-/// The first decision whose verdict is one of `verdicts`, within `secs`.
 async fn first_verdict(decisions: &mut SseFeed, verdicts: &[&str], secs: u64) -> Value {
     decisions
         .until("decision", secs, |d| {
@@ -985,7 +956,6 @@ async fn first_verdict(decisions: &mut SseFeed, verdicts: &[&str], secs: u64) ->
         .await
 }
 
-/// A fake jev that gives every proposal `score`.
 async fn jev_server(btc: f64, score: f64) -> (Server, Feed) {
     let app = axum::Router::new().route(
         "/",
@@ -1115,8 +1085,6 @@ async fn a_loss_stops_the_agent_at_the_stop_loss_with_one_bet_open_at_a_time() {
 
     jump_after_history(&feed).await;
     let placed = first_verdict(&mut decisions, &["placed"], 15).await;
-    // Back under the strike: the round loses, and the drop is a fresh DOWN
-    // signal the agent must not trade while the first bet is open.
     set_price(&feed, 100.0);
 
     let settled = tokio::time::timeout(Duration::from_secs(45), async {
@@ -1232,7 +1200,6 @@ async fn the_house_cap_holds_across_agents() {
     assert_eq!(blocked["reason"], "House agent limit reached", "{blocked}");
 }
 
-/// Normal mode on BTC, 1 USDC a trade out of 5.
 fn normal(signer: &SigningKey) -> StartTerms {
     StartTerms {
         mode: "normal".into(),
@@ -1241,7 +1208,6 @@ fn normal(signer: &SigningKey) -> StartTerms {
     }
 }
 
-/// A funded trader in normal mode with a proposal waiting on the feed.
 async fn awaiting_proposal(
     s: &Server,
     feed: &Feed,
@@ -1323,11 +1289,8 @@ async fn another_wallet_cannot_approve_or_reject_a_proposal() {
     assert_eq!(s.balance_of(&address_of(&alice)), 100 * UNIT);
 }
 
-// -- copilot -----------------------------------------------------------------
-
 const CLAUDE_KEY: &str = "test-anthropic-key";
 
-/// Every request body the fake Messages API received.
 type Claude = Arc<Mutex<Vec<Value>>>;
 
 fn sse(events: &[Value]) -> String {
@@ -1347,8 +1310,6 @@ fn block(index: usize, start: Value, deltas: &[Value]) -> Vec<Value> {
     events
 }
 
-/// A thinking block, then `tools` as parallel calls, the way Haiku answered
-/// the smoke test. Each input arrives split across two deltas.
 fn tool_turn(tools: &[(&str, Value)]) -> String {
     let mut events = vec![
         json!({ "type": "message_start", "message": { "id": "msg_1", "type": "message", "role": "assistant", "content": [] } }),
@@ -1378,7 +1339,6 @@ fn tool_turn(tools: &[(&str, Value)]) -> String {
     sse(&events)
 }
 
-/// The tool calls the fake model makes for a question, by keyword.
 fn script(question: &str) -> Vec<(&'static str, Value)> {
     if question.contains("loop") {
         return vec![("get_market_movers", json!({}))];
@@ -1474,7 +1434,6 @@ async fn copilot_server(btc: f64) -> (Server, Feed, Claude) {
 }
 
 impl Server {
-    /// The agent cookie of a normal session, which has no watcher calling Claude.
     async fn asker(&self) -> String {
         let trader = key(90);
         self.fund(&address_of(&trader), 100);
@@ -1485,7 +1444,6 @@ impl Server {
         self.start_agent(&trader, &terms).await.2.unwrap()
     }
 
-    /// `(status, frames)`: the whole SSE answer, or a JSON error as one frame.
     async fn ask(&self, cookie: &str, question: &str) -> (StatusCode, Vec<(String, Value)>) {
         let res = self
             .http
@@ -1755,7 +1713,6 @@ async fn the_copilot_takes_ten_questions_a_minute() {
     );
 }
 
-/// The tool results the server sent back on the second turn, by tool name.
 fn results_of(claude: &Claude) -> HashMap<String, Value> {
     let bodies = claude.lock().unwrap().clone();
     let replay = &bodies[1]["messages"];
@@ -1851,7 +1808,6 @@ async fn ui_tools_become_typed_actions_and_none_touches_money() {
     );
 }
 
-/// A trader whose agent session has stopped, with one settled manual bet.
 async fn trader_with_history(s: &Server, feed: &Feed, signer: &SigningKey) -> (String, Value) {
     let wallet = address_of(signer);
     s.fund(&wallet, 100);

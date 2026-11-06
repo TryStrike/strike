@@ -1,19 +1,3 @@
-//! Column catalog.
-//!
-//! STRICT tables store NUMERIC, TIMESTAMPTZ and BOOLEAN all as INTEGER, so the
-//! file alone cannot say how a value is read or written. This list keeps the
-//! logical types, because handlers write them into `CAST($n AS <type>)`
-//! placeholders.
-//!
-//! Two consumers:
-//!   * binds: `db::typed_param` converts a JSON value by its declared type;
-//!   * results: `db` decodes a column by its name, see [`decode_kind`]. Every
-//!     SELECT in the codebase returns plain columns, so the name is enough; the
-//!     `one_decode_per_column_name` test refuses a schema where it would not be.
-//!
-//! `schema_matches_the_sql_file` in `db.rs` checks this list against
-//! `backend/schema.sql`.
-
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -24,7 +8,6 @@ const PRICE: &str = "numeric(20,8)";
 const MULTIPLIER: &str = "numeric(10,4)";
 const TS: &str = "timestamp with time zone";
 
-/// `(table, column, logical type)` in table column order.
 pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("user_balances", "user_address", "text"),
     ("user_balances", "currency", "text"),
@@ -130,6 +113,9 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_sessions", "spent", MONEY),
     ("agent_sessions", "realized_pnl", MONEY),
     ("agent_sessions", "created_at", TS),
+    ("agent_sessions", "paused_until", TS),
+    ("agent_sessions", "pause_stepup_id", "text"),
+    ("agent_sessions", "checks_passed", "bigint"),
     ("agent_decisions", "id", "text"),
     ("agent_decisions", "session_id", "text"),
     ("agent_decisions", "created_at", TS),
@@ -179,16 +165,46 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("world_attempts", "status", "text"),
     ("world_attempts", "reason", "text"),
     ("world_attempts", "acr", "text"),
-    ("world_attempts", "session_id", "text"),
     ("world_attempts", "expires_at", TS),
     ("world_attempts", "done_at", TS),
     ("world_attempts", "created_at", TS),
     ("world_attempts", "kind", "text"),
-    ("world_links", "wallet", "text"),
-    ("world_links", "iss", "text"),
-    ("world_links", "sub", "text"),
-    ("world_links", "acr", "text"),
-    ("world_links", "linked_at", TS),
+    ("humans", "id", "text"),
+    ("humans", "created_at", TS),
+    ("human_ids", "iss", "text"),
+    ("human_ids", "sub", "text"),
+    ("human_ids", "human_id", "text"),
+    ("human_ids", "acr", "text"),
+    ("human_ids", "env", "text"),
+    ("human_ids", "linked_at", TS),
+    ("human_wallets", "wallet", "text"),
+    ("human_wallets", "human_id", "text"),
+    ("human_wallets", "linked_at", TS),
+    ("human_limits", "human_id", "text"),
+    ("human_limits", "tier", "text"),
+    ("human_limits", "cooloff_until", TS),
+    ("stepups", "id", "text"),
+    ("stepups", "human_id", "text"),
+    ("stepups", "wallet", "text"),
+    ("stepups", "kind", "text"),
+    ("stepups", "subject", "text"),
+    ("stepups", "status", "text"),
+    ("stepups", "reason", "text"),
+    ("stepups", "device_code_hash", "text"),
+    ("stepups", "device_code_enc", "text"),
+    ("stepups", "user_code", "text"),
+    ("stepups", "verify_uri", "text"),
+    ("stepups", "verify_uri_complete", "text"),
+    ("stepups", "interval_ms", "bigint"),
+    ("stepups", "acr_required", "text"),
+    ("stepups", "started_at", TS),
+    ("stepups", "expires_at", TS),
+    ("stepups", "approved_at", TS),
+    ("stepups", "used_at", TS),
+    ("stepups", "sub", "text"),
+    ("stepups", "acr", "text"),
+    ("stepups", "amr", "text"),
+    ("stepups", "session_id", "text"),
     ("round_commits", "epoch", "bigint"),
     ("round_commits", "root", "text"),
     ("round_commits", "rounds", "bigint"),
@@ -198,7 +214,6 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("round_commits", "arkiv_key", "text"),
 ];
 
-/// How an INTEGER cell in a result set becomes JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decode {
     Numeric(u32),
@@ -206,7 +221,6 @@ pub enum Decode {
     Timestamp,
 }
 
-/// Scale of `numeric(p,s)`; a bare `numeric` is a money value.
 pub fn numeric_scale(type_name: &str) -> Option<u32> {
     let rest = type_name.strip_prefix("numeric")?;
     if rest.is_empty() {
@@ -229,7 +243,6 @@ fn decode_of(type_name: &str) -> Option<Decode> {
     }
 }
 
-/// The non-plain decoding for a result column, by name.
 pub fn decode_kind(column: &str) -> Option<Decode> {
     static BY_NAME: OnceLock<HashMap<&'static str, Decode>> = OnceLock::new();
     BY_NAME
@@ -247,7 +260,6 @@ pub fn decode_kind(column: &str) -> Option<Decode> {
 pub struct Schema;
 
 impl Schema {
-    /// The logical type of a column, used by the browser query gateway.
     pub fn column_type(&self, table: &str, column: &str) -> Option<&str> {
         COLUMNS
             .iter()
@@ -260,7 +272,6 @@ impl Schema {
     }
 }
 
-/// Kept async and fallible so call sites read like the catalog load they were.
 pub async fn get() -> ApiResult<&'static Schema> {
     Ok(&Schema)
 }

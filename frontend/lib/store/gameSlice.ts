@@ -6,6 +6,8 @@ import { playWinSound, playLoseSound } from "@/lib/utils/sounds";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 import { useToastStore } from "@/lib/hooks/useToast";
 import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
+import { ApiFailure, needsSession, readApiError } from "@/lib/api/errors";
+import { sendGuarded } from "@/lib/world/gate";
 
 export type GameMode = "binomo" | "box";
 
@@ -169,7 +171,6 @@ const DEFAULT_TARGET_CELLS: TargetCell[] = [
 ];
 
 const ROUND_CLOCK_GRACE_MS = 400;
-/** Bets answer in milliseconds, so this is a hung request, not a slow one. */
 const BET_TIMEOUT_MS = 6_000;
 const FAST_CLAIMS = 8;
 const CLAIM_RETRY_MS = 1000;
@@ -204,13 +205,14 @@ async function claimRound(
         }),
       });
       if (res.ok) return await res.json();
-      if (res.status === 401 && !sessionRefreshed) {
+      const err = await readApiError(res);
+      if (needsSession(err) && !sessionRefreshed) {
         sessionRefreshed = true;
         await ensureBalanceSession();
         continue;
       }
-      if (res.status >= 400 && res.status < 500 && res.status !== 409) {
-        console.error("[settle] claim refused", bet.id, res.status);
+      if (res.status >= 400 && res.status < 500 && res.status !== 409 && res.status !== 429) {
+        console.error("[settle] claim refused", bet.id, res.status, err.code, err.error);
         return null;
       }
     } catch (err) {
@@ -452,7 +454,6 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         endTime?: number;
       },
     ) => {
-      // A double click, a key bounce or a touch plus click must not place two bets.
       if (get().isPlacingBet || Date.now() - lastBetAttemptAt < BET_DEBOUNCE_MS) return;
       lastBetAttemptAt = Date.now();
 
@@ -555,16 +556,8 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
             if (err?.name === "TimeoutError") return send();
             throw err;
           });
-        let response = await sendOrRetry();
-        if (response.status === 401) {
-          await ensureBalanceSession();
-          response = await sendOrRetry();
-        }
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => null);
-          throw new Error(errorData?.error || "Failed to place bet");
-        }
+        const response = await sendGuarded(sendOrRetry);
+        if (!response.ok) throw new ApiFailure(await readApiError(response));
 
         const data = await response.json();
 
@@ -615,7 +608,6 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         };
 
         addActiveBet(activeBet);
-        // The player's own key records the bet on Arkiv, off the bet path and with no popup.
         void import("@/lib/arkivBets")
           .then(({ recordBetOnArkiv }) => recordBetOnArkiv(userAddress, activeBet))
           .catch((err) => console.warn("[arkiv] could not record bet", activeBet.id, err));

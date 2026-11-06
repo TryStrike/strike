@@ -43,6 +43,8 @@ import {
 import { shortenAddress } from "@/lib/utils/address";
 import { calculateFeeAmount, getFeePercentLabel } from "@/lib/fees/platformFee";
 import { GatewayDeposit } from "./GatewayDeposit";
+import { needsSession } from "@/lib/api/errors";
+import { HumanStatus } from "@/components/world/HumanStatus";
 
 interface DepositModalProps {
   isOpen: boolean;
@@ -251,7 +253,7 @@ async function runVerification(
       return;
     }
 
-    if (status === 401 && !sessionRefreshed) {
+    if (needsSession({ status, code: body?.code }) && !sessionRefreshed) {
       sessionRefreshed = true;
       await ensureBalanceSession();
       publish({
@@ -273,6 +275,7 @@ async function runVerification(
     if (
       body?.retryable === true ||
       status === 0 ||
+      status === 429 ||
       (status >= 500 && status < 600)
     ) {
       publish({
@@ -509,7 +512,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   useEffect(() => {
     if (!isOpen || !address) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- a fetch effect resets its result when its inputs go away
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPrecheck(null);
       return;
     }
@@ -807,6 +810,9 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           ? "Spend your Circle Gateway balance from any chain. It lands on Arc in seconds."
           : `Move ${asset} from your Arc wallet to your trading balance.`}
       </p>
+      <div className="-mt-4 mb-6">
+        <HumanStatus nudge />
+      </div>
       {config.chainId === 5042002 && (
         <a
           href="https://faucet.circle.com"
@@ -1166,7 +1172,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   );
 };
 
-/** One readable line for a wallet or RPC failure, never viem's multi-paragraph dump. */
 function walletErrorText(err: unknown): string {
   const raw =
     err instanceof Error

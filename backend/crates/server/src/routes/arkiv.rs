@@ -1,9 +1,3 @@
-//! `/api/arkiv/bets/{id}/seal`: where a bet stands on Arkiv. The browser reads
-//! the entity from Arkiv itself, so this answers only with its key and block.
-//!
-//! `POST /api/arkiv/key`: a wallet delegates one browser key to write its own bets
-//! on Arkiv. We check the wallet's signature and send the key its gas, once.
-
 use std::time::Duration;
 
 use axum::extract::Path;
@@ -19,7 +13,7 @@ use strike_core::db::now_us;
 use strike_core::error::{ApiError, ApiResult};
 use strike_core::eth::verify_personal_signature;
 
-use crate::http::require_balance_session;
+use crate::http::{require_balance_session, JsonBody};
 
 const SEAL_WAIT: Duration = Duration::from_secs(25);
 
@@ -50,12 +44,10 @@ async fn seal(headers: HeaderMap, Path(bet_id): Path<String>) -> Response {
     }
 }
 
-/// A delegation may not outlive this.
 const MAX_KEY_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-/// Funded keys per wallet per day: enough for a few browsers, not a gas faucet.
 const KEYS_PER_DAY: i64 = 3;
 
-async fn register_key(Json(body): Json<serde_json::Value>) -> Response {
+async fn register_key(JsonBody(body): JsonBody<serde_json::Value>) -> Response {
     let answer: ApiResult<_> = async {
         let wallet = body["wallet"].as_str().unwrap_or_default();
         let key = body["key"].as_str().unwrap_or_default();

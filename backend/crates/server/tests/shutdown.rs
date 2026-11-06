@@ -1,7 +1,3 @@
-//! What happens to money and streams when the client or the process goes away:
-//! the real binary, a throwaway database, and a node in this process that can
-//! hold a transfer unconfirmed for as long as a test wants.
-
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,9 +48,7 @@ fn word(address: &str) -> String {
 
 #[derive(Clone)]
 struct Node {
-    /// While true, a broadcast transfer has no receipt: a slow chain.
     pending: Arc<AtomicBool>,
-    /// Every transfer's receipt reports a revert.
     reverts: Arc<AtomicBool>,
     owner: String,
     player: String,
@@ -153,6 +147,8 @@ async fn start() -> Server {
         .env("SQLITE_PATH", dir.join("ledger.sqlite"))
         .env("BIND_ADDR", format!("127.0.0.1:{port}"))
         .env("BALANCE_INTERNAL_SECRET", SECRET)
+        .env("STRIKE_DEV_NO_WORLD", "1")
+        .env("STEPUP_WITHDRAW_OVER", "100")
         .env("BINANCE_ENDPOINT", "http://127.0.0.1:9/ticker")
         .env("YAHOO_SPARK_ENDPOINT", "http://127.0.0.1:9/spark")
         .env("BINANCE_PERP_ENDPOINT", "http://127.0.0.1:9/perp")
@@ -191,8 +187,6 @@ impl Server {
         rusqlite::Connection::open(self.dir.join("ledger.sqlite")).unwrap()
     }
 
-    /// Funds the player, signs a 50 USDC withdrawal and hangs up on it, as a
-    /// proxy timing out does. Auto-pay keeps paying; returns the request id.
     async fn withdraw_then_hang_up(&self) -> i64 {
         let address = address_of(&self.player);
         self.db()
@@ -360,7 +354,6 @@ async fn sigterm_waits_for_a_payout_nobody_is_listening_to() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deposit_credits_without_waiting_on_any_treasury_transfer() {
     let s = start().await;
-    // The node stays slow: any treasury broadcast would never get a receipt.
     let res = s
         .http
         .post(format!("{}/api/balance/deposit", s.url))

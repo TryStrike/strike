@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ActiveBet } from "@/lib/store/gameSlice";
 import type { AssetType } from "@/lib/utils/priceFeed";
+import type { StepUp } from "@/lib/api/errors";
 
 export type Verdict =
   "awaiting" | "placed" | "skipped" | "blocked" | "rejected";
@@ -21,6 +22,9 @@ export interface AgentSession {
   realizedPnl: number;
   wins: number;
   losses: number;
+  pausedUntil: number | null;
+  pauseStepupId: string | null;
+  checksPassed: number;
 }
 
 export interface Trace {
@@ -55,7 +59,6 @@ export interface ToolStep {
   error?: string;
 }
 
-/** One watcher run. It reaches the client in pieces and is never stored. */
 export interface Thought {
   id: string;
   at: number;
@@ -136,13 +139,11 @@ export function agentChartBets(): ActiveBet[] {
 
 /** `agent::WAITING_FOR_HUMAN` in the Rust core. */
 export const WAITING_FOR_HUMAN = "Waiting for a human";
-/** Rows `get_agent_decisions` reads, so a Why can only reach this far back. */
 export const WHY_REACH = 20;
 const KEEP = 100;
 /** `agent::ROUND_SECONDS` in the Rust core. */
 const ROUND_MS = 30_000;
 const KEEP_THOUGHTS = 30;
-/** When the running session ends. Lets other pages connect without asking the server first. */
 const LIVE_UNTIL = "strike-agent-live-until";
 
 let source: EventSource | null = null;
@@ -153,10 +154,10 @@ interface AgentFeed {
   thoughts: Thought[];
   activity: Activity;
   showStep: (step: SignalStep | AiStep | ResultStep) => void;
+  stepup: StepUp | null;
   showSession: (session: AgentSession) => void;
   showDecision: (decision: Decision) => void;
   showThought: (frame: ThoughtFrame) => void;
-  /** Follows the session on the agent cookie. A new start passes `fresh` to pick up the new cookie. */
   connect: (fresh?: boolean) => void;
   connectIfLive: () => void;
   dismiss: () => void;
@@ -174,6 +175,7 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
           ? { signal: step }
           : { ...s.activity, [step.stage]: step },
     })),
+  stepup: null,
   showSession: (session) => {
     if (session.status === "running")
       localStorage.setItem(LIVE_UNTIL, String(session.endsAt));
@@ -211,7 +213,8 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
   connect: (fresh = false) => {
     if (source && !fresh) return;
     source?.close();
-    if (fresh) set({ decisions: [], thoughts: [], activity: {} });
+    if (fresh)
+      set({ decisions: [], thoughts: [], activity: {}, stepup: null });
     const opened = new EventSource("/api/agent/decisions");
     source = opened;
     opened.addEventListener("session", (e) =>
@@ -223,10 +226,12 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     opened.addEventListener("check", (e) =>
       get().showStep(JSON.parse((e as MessageEvent).data)),
     );
+    opened.addEventListener("stepup", (e) =>
+      set({ stepup: JSON.parse((e as MessageEvent).data) }),
+    );
     opened.addEventListener("thought", (e) =>
       get().showThought(JSON.parse((e as MessageEvent).data)),
     );
-    // A 401 means no session. The browser closes and never retries it.
     opened.onerror = () => {
       if (opened.readyState !== EventSource.CLOSED) return;
       opened.close();
@@ -240,6 +245,12 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     source?.close();
     source = null;
     localStorage.removeItem(LIVE_UNTIL);
-    set({ session: null, decisions: [], thoughts: [], activity: {} });
+    set({
+      session: null,
+      decisions: [],
+      thoughts: [],
+      activity: {},
+      stepup: null,
+    });
   },
 }));

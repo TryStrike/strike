@@ -1,8 +1,3 @@
-//! `/api/balance/*` — the house-ledger family.
-//!
-//! Session minting and balance reads are here; the mutation routes
-//! (bet/deposit/win/withdraw) follow the same guard and RPC conventions.
-
 use axum::extract::{Path, Query};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -21,7 +16,7 @@ use strike_core::eth::verify_personal_signature;
 use strike_core::ledger;
 
 use crate::bans::is_globally_banned;
-use crate::http::{cookie, json_with_cookie, Cookie};
+use crate::http::{cookie, json_with_cookie, Cookie, JsonBody};
 use crate::sql;
 
 pub fn routes() -> Router {
@@ -33,10 +28,7 @@ pub fn routes() -> Router {
         .route("/api/balance/{address}", get(read_balance))
 }
 
-/// `POST /api/balance/session` — the wallet signs `balance_session_message` and
-/// gets an HttpOnly cookie bound to it. With no secret configured nothing is
-/// minted, so development keeps working; the mutation guard refuses requests.
-async fn mint_session(Json(body): Json<Value>) -> ApiResult<axum::response::Response> {
+async fn mint_session(JsonBody(body): JsonBody<Value>) -> ApiResult<axum::response::Response> {
     let address = body["address"].as_str().unwrap_or_default();
     let issued_at = body["issuedAt"].as_i64().unwrap_or_default();
     let signature = body["signature"].as_str().unwrap_or_default();
@@ -56,7 +48,8 @@ async fn mint_session(Json(body): Json<Value>) -> ApiResult<axum::response::Resp
     )
     .await?
     {
-        return Err(ApiError::unauthorized(
+        return Err(ApiError::coded(
+            "session_required",
             "Sign-in signature is not from this wallet",
         ));
     }
@@ -80,8 +73,6 @@ async fn mint_session(Json(body): Json<Value>) -> ApiResult<axum::response::Resp
     ))
 }
 
-/// `GET /api/balance/session` — which wallet this browser is signed in as, so the
-/// app asks for a signature only when it has to.
 async fn session_wallet(headers: HeaderMap) -> Json<Value> {
     let wallet = balance_session_wallet(cookie(&headers, BALANCE_SESSION_COOKIE).as_deref());
     Json(serde_json::json!({ "wallet": wallet }))
@@ -92,8 +83,6 @@ struct BalanceQuery {
     currency: Option<String>,
 }
 
-/// `GET /api/balance/[address]` — sums legacy duplicate rows, reports the tier
-/// of the canonical row, and never fails for an unknown wallet (balance 0).
 async fn read_balance(
     Path(address_param): Path<String>,
     Query(query): Query<BalanceQuery>,
@@ -110,13 +99,7 @@ async fn read_balance(
     }
 
     let variants = address::search_variants(&address_param);
-    // $1 is the currency, $2.. the address variants.
     let placeholders = sql::in_list(2, "text", variants.len());
-    // `NULLS LAST`: the TS route chose its newest row with
-    // `new Date(r.updated_at) > new Date(best.updated_at)`, and `new Date(null)`
-    // is the epoch - a row with no `updated_at` can never be the latest one
-    // unless every row is missing it. Plain `DESC` puts NULLs first in
-    // Postgres, which would have answered `updatedAt: null`.
     let statement = format!(
         "SELECT balance, updated_at, user_address, user_tier \
          FROM user_balances \
@@ -147,9 +130,6 @@ async fn read_balance(
         ]))));
     }
 
-    // Legacy duplicate rows sum in exact base units: this number is what the
-    // player sees as their money, so an unreadable row fails rather than
-    // quietly lowering it. Rows are ordered newest-first above.
     let null = Value::Null;
     let balances = rows.iter().map(|row| row.get("balance").unwrap_or(&null));
     let Some(total_base) = ledger::sum_amounts_to_base_units(balances, ledger::USDC_DECIMALS)

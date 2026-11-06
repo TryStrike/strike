@@ -1,11 +1,5 @@
 'use client';
 
-/**
- * Bets the player owns on Arkiv. The wallet signs once to delegate a browser key;
- * that key then writes one `strike.bets` entity per bet, with no wallet popup.
- * The entity is created by the player's key, not by Strike, and carries the
- * wallet's delegation signature, so anyone can check wallet -> key -> bet.
- */
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import {
   concat,
@@ -23,6 +17,7 @@ import {
 } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { ARKIV_RPC, arkiv, flatten, type RawEntity } from '@/lib/arkiv';
+import { ApiFailure, readApiError } from '@/lib/api/errors';
 
 export const BET_SCHEMA = 'strike.bets';
 const ARKIV_CONTRACT = '0x4400000000000000000000000000000000000044';
@@ -31,7 +26,6 @@ const ENTITY_CREATED = keccak256(stringToHex('EntityCreated(bytes32,address,uint
 const OP_CREATE = BigInt(1);
 const FLAG_READONLY = BigInt(1);
 const BLOCK_MS = 2_000;
-/** An open bet lives on Arkiv until its round ends, plus an hour to look it up afterwards. */
 const AFTER_END_MS = 60 * 60 * 1000;
 const lifetimeBlocks = (endTime?: number) =>
   BigInt(Math.ceil((Math.max(0, (endTime ?? Date.now() + 86_400_000) - Date.now()) + AFTER_END_MS) / BLOCK_MS));
@@ -58,7 +52,6 @@ interface Delegation {
   signature: Hex;
 }
 
-/** Must match `arkiv::delegation_message` in the Rust backend byte for byte. */
 export const delegationMessage = (wallet: string, key: string, expires: number) =>
   `Strike: let this browser key record my bets on Arkiv\nWallet: ${wallet.toLowerCase()}\nKey: ${key.toLowerCase()}\nExpires: ${expires}`;
 
@@ -74,7 +67,6 @@ function load(wallet: string): Delegation | null {
   }
 }
 
-// --- tiny external store: delegation per wallet and entity key per bet ---
 const listeners = new Set<() => void>();
 const entities = new Map<string, string>();
 let version = 0;
@@ -97,7 +89,6 @@ export function useBetEntity(betId: string): string | undefined {
   return entities.get(betId);
 }
 
-/** One wallet signature, then the server sends the new key a little Arkiv gas. */
 export async function enableArkivBets(wallet: string, sign: (message: string) => Promise<Hex>): Promise<Delegation> {
   const pk = generatePrivateKey();
   const key = privateKeyToAccount(pk).address;
@@ -108,7 +99,7 @@ export async function enableArkivBets(wallet: string, sign: (message: string) =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ wallet, key, expiresAt: expires, signature }),
   });
-  if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `Arkiv key setup failed (${res.status})`);
+  if (!res.ok) throw new ApiFailure(await readApiError(res));
   const { fundTx } = (await res.json()) as { fundTx: Hex };
   await createPublicClient({ chain: arkivChain, transport: http() }).waitForTransactionReceipt({ hash: fundTx, timeout: 30_000 });
   const d: Delegation = { pk, key: key.toLowerCase(), wallet: wallet.toLowerCase(), expires, signature };
@@ -145,7 +136,6 @@ function attributes(wallet: string, bet: BetForArkiv, d: Delegation): [Hex, bigi
     ['stake', DEC, dec(bet.amount)],
     ['multiplier', DEC, dec(bet.multiplier)],
     ['placedAt', U64 | INDEXED, u64(Date.now())],
-    // Arkiv strings stop at 128 bytes; the 65-byte signature goes in as r and s||v.
     ['delegationR', STR, stringToHex(d.signature.slice(0, 66))],
     ['delegationSV', STR, stringToHex(`0x${d.signature.slice(66)}`)],
     ['delegationExpires', U64, u64(d.expires)],
@@ -159,7 +149,6 @@ function attributes(wallet: string, bet: BetForArkiv, d: Delegation): [Hex, bigi
     .map(([n, t, v]) => [name32(n), BigInt(t), v]);
 }
 
-/** `execute([create])` calldata, the same layout the backend's sealer sends. */
 function createCalldata(wallet: string, bet: BetForArkiv, d: Delegation): Hex {
   const salt = BigInt(`0x${crypto.randomUUID().replaceAll('-', '')}`);
   const data = encodeAbiParameters(
@@ -184,10 +173,8 @@ function createCalldata(wallet: string, bet: BetForArkiv, d: Delegation): Hex {
   return concat([EXECUTE, ops]);
 }
 
-// One write at a time so the key's nonces never collide.
 let queue: Promise<unknown> = Promise.resolve();
 
-/** Writes the bet from the player's own key. Resolves to the entity key, or null when not enabled. */
 export function recordBetOnArkiv(wallet: string, bet: BetForArkiv): Promise<string | null> {
   const d = load(wallet);
   if (!d) return Promise.resolve(null);
@@ -229,7 +216,6 @@ export interface OpenBet {
 const ASSET = /^[A-Z0-9]{2,10}$/;
 const IN_PLAY_REFRESH_MS = 5_000;
 
-/** Anyone can write a `strike.bets` entity; it counts only if the wallet signed the key that wrote it. */
 async function signedByWallet(e: Record<string, string>): Promise<boolean> {
   try {
     const signer = await recoverMessageAddress({
@@ -242,7 +228,6 @@ async function signedByWallet(e: Record<string, string>): Promise<boolean> {
   }
 }
 
-/** Bets on `asset` whose round has not ended yet, read from Arkiv and checked against each wallet's signature. */
 export function useBetsInPlay(asset: string): { bets: OpenBet[] | null; error: string | null } {
   const [bets, setBets] = useState<OpenBet[] | null>(null);
   const [error, setError] = useState<string | null>(null);
