@@ -265,8 +265,8 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
           const cold = label.cold || label.heat === undefined;
           const t = cold ? 0 : heatOf(label.heat as number);
           // Larger for richer payouts, shrunk to fit the tile.
-          const size = Math.max(10, Math.min(15 + t * 3, row * 0.36, (columnPx - 12) / (label.text.length * 0.62)));
-          ctx.font = `${cold ? 600 : t > 0.66 ? 700 : t > 0.33 ? 650 : 600} ${size.toFixed(1)}px ${fontFamily}`;
+          const size = Math.max(10, Math.min(11, row * 0.36, (columnPx - 12) / (label.text.length * 0.62)));
+          ctx.font = `500 ${size.toFixed(1)}px ${fontFamily}`;
           ctx.fillStyle = cold ? COLD_TEXT : HEAT_TEXT[Math.round(t * HEAT_BUCKETS)];
           ctx.globalAlpha = cell.state === 'locked' ? 0.4 : 1;
           const labelX = s.x(cell.time) + columnPx / 2;
