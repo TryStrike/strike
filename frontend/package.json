@@ -10,24 +10,26 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@circle-fin/adapter-viem-v2": "^1.20.1",
+    "@circle-fin/bridge-kit": "^1.17.1",
+    "@circle-fin/modular-wallets-core": "^1.0.16",
     "@phosphor-icons/react": "^2.1.10",
     "@tanstack/react-query": "^5.105.3",
     "@worldcoin/idkit": "4.6.0",
     "connectkit": "^1.9.2",
-    "d3-shape": "^3.2.1",
     "ethers": "^6.17.0",
     "framer-motion": "^12.43.0",
     "next": "16.4.4",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-is": "^19.3.1",
+    "tapgrid": "file:packages/tapgrid",
     "viem": "^2.57.15",
     "wagmi": "^3.7.11",
     "zustand": "^5.0.16"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/d3-shape": "^3.2.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -35,5 +37,10 @@
     "eslint-config-next": "16.4.4",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "@circle-fin/modular-wallets-core": {
+      "viem": "$viem"
+    }
   }
 }

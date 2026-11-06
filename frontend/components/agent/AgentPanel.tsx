@@ -283,7 +283,7 @@ function DecisionRow({
       </div>
       <p className="mt-1 text-sm text-muted">{d.reason}</p>
       <p className="mt-1 font-jet text-xs text-faint">
-        {d.confidence !== null && `confidence ${(d.confidence * 100).toFixed(0)}% · `}
+        {d.confidence !== null && `jev confidence ${(d.confidence * 100).toFixed(0)}% · `}
         {d.result && `${RESULT[d.result] ?? d.result} · `}
         {new Date(d.createdAt).toLocaleTimeString()}
       </p>

@@ -14,6 +14,7 @@ import { ReferralSync } from './ReferralSync';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 import { useThemeSync } from '@/lib/useTheme';
 import { usePriceStream } from '@/lib/hooks/usePriceStream';
+import { bridging } from '@/lib/bridge/bridging';
 
 function WalletSync() {
   const { address: wagmiAddress, isConnected: wagmiConnected, chainId: wagmiChainId } = useAccount();
@@ -35,7 +36,7 @@ function WalletSync() {
   const connectedAddress = wagmiConnected && wagmiAddress ? wagmiAddress : null;
 
   useEffect(() => {
-    if (!wagmiConnected || wagmiChainId === arc.id || !switchChainAsync) return;
+    if (!wagmiConnected || wagmiChainId === arc.id || !switchChainAsync || bridging.get()) return;
     let cancelled = false;
     switchChainAsync({ chainId: arc.id }).catch((err: unknown) => {
       if (cancelled) return;
@@ -57,6 +58,9 @@ function WalletSync() {
         setNetwork('ARC');
         void refreshWalletBalance();
         void fetchBalance(connectedAddress);
+        void import('@/lib/balance/balanceClientHeaders')
+          .then(({ ensureBalanceSession }) => ensureBalanceSession())
+          .catch((err) => console.error('[session] wallet sign-in failed', err));
       }
       return;
     }
@@ -86,14 +90,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
   useThemeSync();
 
   const updateAllPrices = useStore((s) => s.updateAllPrices);
-  const feed = usePriceStream(updateAllPrices);
+  const setMaxBands = useStore((s) => s.setMaxBands);
+  const feed = usePriceStream(updateAllPrices, { onBands: setMaxBands });
   useEffect(() => {
     useStore.getState().setPriceFeed(feed);
   }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    void import('@/lib/balance/balanceClientHeaders').then(({ ensureBalanceSession }) => ensureBalanceSession());
-  }, []);
 
   return (
     <WagmiProvider config={wagmiConfig}>

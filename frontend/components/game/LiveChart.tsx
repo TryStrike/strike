@@ -1,31 +1,63 @@
 'use client';
 
-import React, { useCallback, useLayoutEffect, useMemo, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { line, curveMonotoneX } from 'd3-shape';
+import type { Cell, CellLabel, Scales, TapGrid } from 'tapgrid';
+import { TapGridChart } from 'tapgrid/react';
 import { useStore } from '@/lib/store';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { AssetType } from '@/lib/utils/priceFeed';
 import { motion, AnimatePresence } from 'framer-motion';
-import { playWinSound, playLoseSound } from '@/lib/utils/sounds';
+import { computeIndicators, drawBets, drawIndicators, drawRsiPanel, RSI_PANEL_INSET } from './chartOverlays';
+import type { OverlayPalette } from './chartOverlays';
 import { useToast } from '@/lib/hooks/useToast';
 import { CaretDown, X, MagnifyingGlass, Star, TrendUp, Waveform, ArrowsDownUp, Pulse } from '@phosphor-icons/react';
 
 
-const RENDER_MS = 100;
-const TIP_EASE_MS = 90;
+const BET_LOCK_MS = 2_500;
+const RESULT_VISIBLE_MS = 3_000;
+const ROWS = 10;
+const LINE_VIEW_SPAN = 3;
+const LINE_MIN_RANGE = 0.001;
+/** Box bands scale with the view, and multipliers are priced for this span, so it moves the house edge. */
+const BOX_VIEW_SPAN = 1.7;
+const BOX_MIN_RANGE = 0.0003;
 const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight';
 
 interface LiveChartProps {
   betAmount: string;
 }
 
-interface CellBet {
-  cellId: string;
-  betId: string;
-  amount: number;
-  multiplier: number;
-  direction: 'UP' | 'DOWN';
+interface BoxQuote {
+  asset: AssetType;
+  multiplier: string;
+  isUp: boolean;
+}
+
+function readPalette(el: HTMLElement): { palette: OverlayPalette; fontFamily: string } {
+  const css = getComputedStyle(el);
+  const color = (name: string) => css.getPropertyValue(name).trim();
+  return {
+    fontFamily: color('--font-jet'),
+    palette: {
+      background: color('--paper'),
+      grid: color('--line'),
+      text: color('--faint'),
+      cellText: color('--faint'),
+      accentText: color('--down'),
+      crossing: color('--surface'),
+      line: color('--up'),
+      tipText: color('--paper'),
+      up: color('--up'),
+      upSoft: color('--up-soft'),
+      down: color('--down'),
+      ink: color('--ink'),
+      subtle: color('--subtle'),
+      faint: color('--faint'),
+      muted: color('--muted'),
+      border: color('--line'),
+    },
+  };
 }
 
 const ASSET_CONFIG: Record<AssetType, { name: string; symbol: string; pair: string; logo: string; category: 'Crypto' | 'Metals' | 'Forex' | 'Stocks' | 'Commodities'; decimals: number }> = {
@@ -163,49 +195,6 @@ const STOCK_DOMAIN_MAP: Record<string, string> = {
 };
 
 
-export interface YDomainBounds {
-  min: number;
-  max: number;
-}
-
-export function computeYDomainTarget(
-  points: readonly { price: number }[],
-  price: number,
-  tick: number,
-  paddingFactor = 0.35,
-): YDomainBounds {
-  let low = price;
-  let high = price;
-  for (const p of points) {
-    if (p.price < low) low = p.price;
-    if (p.price > high) high = p.price;
-  }
-  const spread = high - low;
-  const padding = spread > 0 ? spread * paddingFactor : Math.max(price * 0.0002, 1e-8);
-  let min = low - padding;
-  let max = high + padding;
-  const minSpan = Math.max(price * 0.0003, tick * 20);
-  if (max - min < minSpan) {
-    const mid = (max + min) / 2;
-    min = mid - minSpan / 2;
-    max = mid + minSpan / 2;
-  }
-  return { min, max };
-}
-
-export function nextYDomain(
-  prev: YDomainBounds | null,
-  target: YDomainBounds,
-  assetChanged: boolean,
-  lerpFactor = 0.25,
-): YDomainBounds {
-  if (!prev || assetChanged) return { min: target.min, max: target.max };
-  return {
-    min: prev.min + (target.min - prev.min) * lerpFactor,
-    max: prev.max + (target.max - prev.max) * lerpFactor,
-  };
-}
-
 const AssetIcon = ({ src, asset, className }: { src: string; asset: string; className: string }) => {
 
   const [currentSrc, setCurrentSrc] = useState(src);
@@ -317,18 +306,14 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const toast = useToast();
   const setSelectedAsset = useStore((state) => state.setSelectedAsset);
   const placeBetFromHouseBalance = useStore((state) => state.placeBetFromHouseBalance);
-  const activeBets = useStore((state) => state.activeBets);
-  const resolveBet = useStore((state) => state.resolveBet);
-  const fetchBalance = useStore((state) => state.fetchBalance);
+  const settlingCount = useStore((state) => state.settlingBets.length);
+  const maxBand = useStore((state) => state.maxBands[state.selectedAsset] ?? 0);
   const userAddress = useStore((state) => state.address);
   const houseBalance = useStore((state) => state.houseBalance);
   const isPlacingBet = useStore((state) => state.isPlacingBet);
 
   const gameMode = useStore((state) => state.gameMode);
   const timeframeSeconds = useStore((state) => state.timeframeSeconds);
-  const isBlitzActive = useStore((state) => state.isBlitzActive);
-  const hasBlitzAccess = useStore((state) => state.hasBlitzAccess);
-  const blitzMultiplier = useStore((state) => state.blitzMultiplier);
   const lastResult = useStore((state) => state.lastResult);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
@@ -336,53 +321,13 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
-  const [now, setNow] = useState(Date.now());
-  const [tip, setTip] = useState<{ asset: AssetType | null; price: number }>({ asset: null, price: 0 });
-  const tipPrice = tip.asset === selectedAsset && tip.price > 0 ? tip.price : currentPrice;
-
-  const nowRef = useRef(now);
-  const ppsRef = useRef(0);
-  const reducedRef = useRef(false);
-  const tipPriceRef = useRef(tipPrice);
-  const easedTipRef = useRef(0);
-  const easedAssetRef = useRef(selectedAsset);
-  const lastPointRef = useRef<{ timestamp: number; price: number } | null>(null);
-  const tipGroupRef = useRef<SVGGElement>(null);
-  const tailRef = useRef<SVGLineElement>(null);
-  const scrollEls = useRef(new Set<HTMLElement | SVGElement>());
-  const scrollLayer = useCallback((el: HTMLElement | SVGElement | null) => {
-    if (!el) return;
-    scrollEls.current.add(el);
-    return () => {
-      scrollEls.current.delete(el);
-    };
-  }, []);
+  const [chart, setChart] = useState<TapGrid | null>(null);
+  const [theme, setTheme] = useState<ReturnType<typeof readPalette> | null>(null);
   const [isAssetDropdownOpen, setIsAssetDropdownOpen] = useState(false);
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
 
   const [isLoadingPrice, setIsLoadingPrice] = useState(true);
-
-  const resolvedDrawBetIdsRef = useRef<Set<string>>(new Set());
-
-  const [cellBets, setCellBets] = useState<Map<string, CellBet>>(new Map());
-
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
-  const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
-
-  interface PendingDrawBox {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    priceTop: number;
-    priceBottom: number;
-    durationSeconds: number;
-    multiplier: number;
-    startTime: number;
-  }
-  const [pendingBox, setPendingBox] = useState<PendingDrawBox | null>(null);
 
   const [showInsufficientFunds, setShowInsufficientFunds] = useState(false);
 
@@ -428,55 +373,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }, [assetSearchQuery, activeAssetCategory]);
 
 
-  const yDomain = useRef<{ min: number; max: number } | null>(null);
-  const yDomainAsset = useRef<AssetType | null>(null);
-
   useEffect(() => {
     setBetResults([]);
-    setCellBets(new Map());
-
-    const lastPoint = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : null;
-    const assetPrice = currentPrice > 0 ? currentPrice : (lastPoint?.price ?? 0);
-
-    setTip({ asset: selectedAsset, price: assetPrice });
-
-    setIsLoadingPrice(priceHistory.length === 0 || assetPrice <= 0);
+    setIsLoadingPrice(priceHistory.length === 0 || currentPrice <= 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAsset]);
-
-  useEffect(() => {
-    if (gameMode !== 'box') {
-      setCellBets(new Map());
-      return;
-    }
-    const next = new Map<string, CellBet>();
-    for (const bet of activeBets as Array<{
-      mode: string;
-      status: string;
-      cellId?: string;
-      id: string;
-      amount: number;
-      multiplier: number;
-      direction: 'UP' | 'DOWN';
-      asset: AssetType;
-    }>) {
-      if (
-        bet.mode === 'box' &&
-        bet.status === 'active' &&
-        bet.cellId &&
-        bet.asset === selectedAsset
-      ) {
-        next.set(bet.cellId, {
-          cellId: bet.cellId,
-          betId: bet.id,
-          amount: bet.amount,
-          multiplier: bet.multiplier,
-          direction: bet.direction,
-        });
-      }
-    }
-    setCellBets(next);
-  }, [activeBets, gameMode, selectedAsset]);
 
   useEffect(() => {
     try {
@@ -510,7 +411,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     const interval = setInterval(() => {
       const nowTime = Date.now();
       setBetResults(prev => {
-        const filtered = prev.filter((r: BetResult) => nowTime - r.timestamp < 3000);
+        const filtered = prev.filter((r: BetResult) => nowTime - r.timestamp < RESULT_VISIBLE_MS);
         return filtered.length === prev.length ? prev : filtered;
       });
     }, 1000);
@@ -549,10 +450,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => mq.removeEventListener('change', onChange);
   }, []);
 
-  useEffect(() => {
-    if (currentPrice > 0) setTip({ asset: selectedAsset, price: currentPrice });
-  }, [currentPrice, selectedAsset]);
-
   const [feedStalled, setFeedStalled] = useState(false);
   useEffect(() => {
     const check = () => {
@@ -566,671 +463,114 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
   const feedState = feedStalled ? 'stale' : feedMode === 'stream' && streamLive ? 'live' : 'polling';
 
-  const applyMotion = useCallback((dt: number) => {
-    const s = scalesRef.current;
-    if (!s) return;
-    const dx = reducedRef.current ? 0 : (-(Date.now() - nowRef.current) * ppsRef.current) / 1000;
-    for (const el of scrollEls.current) {
-      if (el instanceof SVGElement) el.setAttribute('transform', `translate(${dx},0)`);
-      else el.style.transform = `translate3d(${dx}px,0,0)`;
-    }
-    const target = tipPriceRef.current;
-    const eased = easedTipRef.current;
-    easedTipRef.current =
-      reducedRef.current || !eased || dt <= 0 ? target : eased + (target - eased) * (1 - Math.exp(-dt / TIP_EASE_MS));
-    const y = s.yScale(easedTipRef.current);
-    tipGroupRef.current?.setAttribute('transform', `translate(0,${y})`);
-    const tail = tailRef.current;
-    const last = lastPointRef.current;
-    if (tail) {
-      tail.setAttribute('x1', String(last ? s.xScale(last.timestamp) + dx : s.tipX));
-      tail.setAttribute('y1', String(last ? s.yScale(last.price) : y));
-      tail.setAttribute('x2', String(s.tipX));
-      tail.setAttribute('y2', String(y));
-    }
-  }, []);
-
-  useEffect(() => {
-    reducedRef.current = prefersReducedMotion;
-    if (prefersReducedMotion) {
-      const id = setInterval(() => setNow(Date.now()), 1000);
-      return () => clearInterval(id);
-    }
-    let frameId = 0;
-    let last = performance.now();
-    let lastRender = Date.now();
-    const animate = (t: number) => {
-      const wall = Date.now();
-      if (wall - lastRender >= RENDER_MS) {
-        lastRender = wall;
-        setNow(wall);
-      }
-      applyMotion(t - last);
-      last = t;
-      frameId = requestAnimationFrame(animate);
-    };
-    frameId = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(frameId);
-  }, [prefersReducedMotion, applyMotion]);
-
   const isMobile = dimensions.width < 640;
   const historyWidthRatio = isMobile ? 0.35 : 0.50;
   const targetColWidthPx = isMobile ? 100 : 250;
-  const gridInterval = ((gameMode === 'box' || gameMode === 'draw') ? timeframeSeconds : 30) * 1000;
-  const pixelsPerSecond = (gameMode === 'box' || gameMode === 'draw')
+  const isBox = gameMode === 'box';
+  const gridInterval = (isBox ? timeframeSeconds : 30) * 1000;
+  const pixelsPerSecond = isBox
     ? Math.max(2, targetColWidthPx / (gridInterval / 1000))
-    : (isMobile ? 35 : 50);
+    : (isMobile ? 20 : 30);
+  const tickRange = 20 * 10 ** -currentAssetConfig.decimals;
 
-  const scales = useMemo(() => {
-    if (dimensions.width === 0 || currentPrice === 0) return null;
+  useEffect(() => {
+    chart?.setData(priceHistory, currentPrice);
+  }, [chart, priceHistory, currentPrice]);
 
-    const windowMs = (dimensions.width / Math.max(pixelsPerSecond, 0.0001)) * 1000;
-    const cutoff = now - windowMs;
-
-    const visiblePoints: { price: number }[] = [];
-    for (const point of priceHistory) {
-      if (point.timestamp >= cutoff) visiblePoints.push(point);
-    }
-    let { min: targetMin, max: targetMax } = computeYDomainTarget(visiblePoints, currentPrice, 10 ** -currentAssetConfig.decimals);
-
-    const mobileZoomFactor = isMobile ? 0.75 : 1.0;
-    if (mobileZoomFactor !== 1) {
-      const mid = (targetMax + targetMin) / 2;
-      const half = ((targetMax - targetMin) / 2) * mobileZoomFactor;
-      targetMin = mid - half;
-      targetMax = mid + half;
-    }
-
-    const assetChanged = yDomainAsset.current !== selectedAsset;
-    if (assetChanged) yDomainAsset.current = selectedAsset;
-    yDomain.current = nextYDomain(
-      assetChanged ? null : yDomain.current,
-      { min: targetMin, max: targetMax },
-      assetChanged,
-    );
-
-    const { min: minY, max: maxY } = yDomain.current;
-
-    const yScale = (price: number) => {
-      return dimensions.height - ((price - minY) / (maxY - minY)) * dimensions.height;
+  useEffect(() => {
+    const read = () => {
+      if (containerRef.current) setTheme(readPalette(containerRef.current));
     };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, []);
 
-    const tipX = dimensions.width * historyWidthRatio;
+  const lastProcessedResultRef = useRef<number>(0);
+  useEffect(() => {
+    if (!lastResult || lastResult.timestamp <= lastProcessedResultRef.current) return;
+    lastProcessedResultRef.current = lastResult.timestamp;
+    const scales = chart?.scales();
+    if (!scales) return;
 
-    const xScale = (timestamp: number) => {
-      const diffMs = timestamp - now;
-      const diffSeconds = diffMs / 1000;
-      return tipX + (diffSeconds * pixelsPerSecond);
-    };
+    setBetResults((prev) => [
+      ...prev,
+      {
+        id: `result-${lastResult.betId ?? lastResult.timestamp}`,
+        won: lastResult.won,
+        amount: lastResult.amount,
+        payout: lastResult.payout,
+        multiplier: Number((lastResult.amount > 0 ? lastResult.payout / lastResult.amount : 0).toFixed(2)),
+        timestamp: Date.now(),
+        x: scales.tipX,
+        y: scales.y(currentPrice),
+      },
+    ]);
+  }, [chart, lastResult, currentPrice]);
 
-    return { yScale, xScale, tipX, minY, maxY };
-  }, [dimensions, priceHistory, currentPrice, now, selectedAsset]);
+  const indicators = useMemo(
+    () => computeIndicators(priceHistory, activeIndicators),
+    [priceHistory, activeIndicators],
+  );
 
-  const scalesRef = useRef(scales);
-  const currentPriceRef = useRef(currentPrice);
+  const quoteCell = useCallback((cell: Cell, scales: Scales): CellLabel<BoxQuote> => {
+    const { currentPrice: price, selectedAsset: asset, isBlitzActive, hasBlitzAccess, blitzMultiplier } = useStore.getState();
+    const center = (cell.top + cell.bottom) / 2;
+    const priceRange = scales.maxPrice - scales.minPrice;
+    const inRow = price <= cell.top && price >= cell.bottom;
+    const distance = Math.min(Math.abs(center - price) / (priceRange * 0.8), 1);
+    const base = inRow ? 1.01 : 1.05 + Math.pow(distance, 1.3) * 3.95;
+    const timeBonus = Math.max(0, (scales.x(cell.time) - scales.tipX) / 800) * 0.25;
 
-  useLayoutEffect(() => {
-    scalesRef.current = scales;
-    currentPriceRef.current = currentPrice;
-    nowRef.current = now;
-    ppsRef.current = pixelsPerSecond;
-    tipPriceRef.current = tipPrice;
-    if (easedAssetRef.current !== selectedAsset) {
-      easedAssetRef.current = selectedAsset;
-      easedTipRef.current = 0;
-    }
-    applyMotion(0);
-  });
+    const isLuckyDiagonal = (Math.round(cell.top / scales.step) + Math.floor(cell.time / (timeframeSeconds * 1000))) % 5 === 0;
+    const boosted = isBlitzActive && hasBlitzAccess && (base > 2.2 || isLuckyDiagonal);
+    const multiplier = Math.min(Math.min(base + timeBonus, 10) * (boosted ? blitzMultiplier : 1), 20).toFixed(2);
 
+    return { text: `${multiplier}x`, accent: boosted, value: { asset, multiplier, isUp: center > price } };
+  }, [timeframeSeconds]);
 
+  const handleCellTap = async (cell: Cell, label: CellLabel | null) => {
+    const quote = label?.value as BoxQuote | undefined;
+    if (!quote || quote.asset !== useStore.getState().selectedAsset || !betAmount || !userAddress) return;
 
-  const getRelativePos = (e: React.MouseEvent): { x: number; y: number } => {
-    if (!containerRef.current) return { x: 0, y: 0 };
-    const rect = containerRef.current.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  };
-
-  const drawBoxGeometry = (a: { x: number; y: number }, b: { x: number; y: number }) => {
-    const tip = (scales?.tipX ?? 0) + 2;
-    const width = Math.min(Math.abs(b.x - a.x), pixelsPerSecond * 20);
-    const height = Math.min(Math.abs(b.y - a.y), dimensions.height * 0.2);
-    const top = b.y >= a.y ? a.y : a.y - height;
-    return { x: Math.max(Math.min(a.x, b.x), tip), y: top, width, height };
-  };
-
-  const handleDrawMouseDown = (e: React.MouseEvent) => {
-    if (gameMode !== 'draw' || !scales || e.button !== 0) return;
-    const pos = getRelativePos(e);
-
-    setPendingBox(null);
-    setDrawStart(pos);
-    setDrawCurrent(pos);
-    setIsDrawing(true);
-    e.preventDefault();
-  };
-
-  const handleDrawMouseMove = (e: React.MouseEvent) => {
-    if (gameMode !== 'draw' || !scales) return;
-    if (!isDrawing || !drawStart) return;
-
-    setDrawCurrent(getRelativePos(e));
-  };
-
-  const finalizeDrawBox = () => {
-    if (!drawStart || !drawCurrent || !scales || dimensions.height === 0) {
-      setIsDrawing(false);
-      setDrawStart(null);
-      setDrawCurrent(null);
-      return;
-    }
-
-    setIsDrawing(false);
-
-    const box = drawBoxGeometry(drawStart, drawCurrent);
-    const minX = box.x;
-    const maxX = box.x + box.width;
-    const minY = box.y;
-    const maxY = box.y + box.height;
-
-    const minBoxHeightPx = 2;
-    const maxBoxHeightPx = dimensions.height * 0.20;
-    const minBoxWidthPx = pixelsPerSecond * 0.3;
-    const maxBoxWidthPx = pixelsPerSecond * 20;
-
-    if (maxX - minX < minBoxWidthPx || maxY - minY < minBoxHeightPx) {
-      setDrawStart(null);
-      setDrawCurrent(null);
-      return;
-    }
-
-    const constrainedHeight = Math.min(maxY - minY, maxBoxHeightPx);
-    const constrainedWidth = Math.min(maxX - minX, maxBoxWidthPx);
-
-    const priceRange = scales.maxY - scales.minY;
-    const priceTop = scales.minY + (1 - minY / dimensions.height) * priceRange;
-    const priceBottom =
-      scales.minY + (1 - (minY + constrainedHeight) / dimensions.height) * priceRange;
-
-    const startOffsetSeconds = (minX - scales.tipX) / pixelsPerSecond;
-    const durationSeconds = constrainedWidth / pixelsPerSecond;
-    const startTime = Date.now() + startOffsetSeconds * 1000;
-
-    const sizeRatio = constrainedHeight / dimensions.height;
-    const priceInsideBox =
-      currentPriceRef.current >= priceBottom && currentPriceRef.current <= priceTop;
-
-    let multiplier: number;
-    if (priceInsideBox) {
-      multiplier = 1.01;
-    } else {
-      const distFromEdge = Math.min(
-        Math.abs(currentPriceRef.current - priceTop),
-        Math.abs(currentPriceRef.current - priceBottom)
-      );
-      const distNormalized = Math.min(distFromEdge / Math.max(priceRange, 0.0001), 1);
-      const distFactor = Math.pow(distNormalized, 0.7) * 6;
-      const sizeFactor = Math.min(1 / Math.max(sizeRatio * 15, 0.5), 2);
-      const durationBonus = Math.min(durationSeconds / 60, 1) * 0.3;
-      const rawMult = (1 + distFactor) * sizeFactor + durationBonus;
-      multiplier = Math.max(1.02, Math.min(rawMult, 15));
-    }
-
-    setPendingBox({
-      x: minX,
-      y: minY,
-      width: constrainedWidth,
-      height: constrainedHeight,
-      priceTop,
-      priceBottom,
-      durationSeconds,
-      multiplier,
-      startTime,
-    });
-
-    setDrawStart(null);
-    setDrawCurrent(null);
-  };
-
-  const handleDrawMouseUp = () => {
-    if (isDrawing) finalizeDrawBox();
-  };
-
-  const handleDrawMouseLeave = () => {
-    if (isDrawing) finalizeDrawBox();
-  };
-
-  const handlePlaceDrawBet = async () => {
-    if (!pendingBox || !userAddress || !betAmount) return;
-    const requiredAmount = parseFloat(betAmount);
-    if (isNaN(requiredAmount) || requiredAmount <= 0) return;
-
-    const currentBalance = houseBalance || 0;
-    if (currentBalance < requiredAmount) {
+    if ((houseBalance || 0) < parseFloat(betAmount)) {
       setShowInsufficientFunds(true);
       setTimeout(() => setShowInsufficientFunds(false), 2000);
-      setPendingBox(null);
       return;
     }
-
-    const endTime = pendingBox.startTime + Math.round(pendingBox.durationSeconds) * 1000;
-    const targetId = `UP-${pendingBox.multiplier}-${Math.round(pendingBox.durationSeconds)}`;
 
     try {
       await placeBetFromHouseBalance(
         betAmount,
-        targetId,
+        `${quote.isUp ? 'UP' : 'DOWN'}-${quote.multiplier}-${timeframeSeconds}`,
         userAddress,
-        undefined,
-        {
-          priceTop: pendingBox.priceTop,
-          priceBottom: pendingBox.priceBottom,
-          startTime: pendingBox.startTime,
-          endTime,
-        }
+        cell.key,
+        { priceTop: cell.top, priceBottom: cell.bottom, startTime: cell.time, endTime: cell.time },
       );
     } catch (error) {
-      console.error('Failed to place draw bet:', error);
+      console.error('Failed to place box bet:', error);
       toast.error(error instanceof Error ? error.message : 'Failed to place bet');
-    } finally {
-      setPendingBox(null);
     }
   };
 
-  const lastProcessedResultRef = useRef<number>(0);
-  useEffect(() => {
-    if (lastResult && gameMode === 'binomo' && scales && lastResult.timestamp > lastProcessedResultRef.current) {
-      lastProcessedResultRef.current = lastResult.timestamp;
-
-      const multiplier = lastResult.amount > 0 ? lastResult.payout / lastResult.amount : 0;
-
-      const result: BetResult = {
-        id: `classic-${lastResult.timestamp}`,
-        won: lastResult.won,
-        amount: lastResult.amount,
-        payout: lastResult.payout,
-        multiplier: Number(multiplier.toFixed(2)),
-        timestamp: Date.now(),
-        x: scales.tipX,
-        y: scales.yScale(currentPrice)
-      };
-
-      setBetResults(prev => [...prev, result]);
-
-      if (lastResult.won) {
-        playWinSound();
-      } else {
-        playLoseSound();
-      }
-    }
-  }, [lastResult, gameMode, scales, currentPrice, playWinSound, playLoseSound]);
-
-  const chartPath = useMemo(() => {
-    if (!scales || currentPrice <= 0) return '';
-
-    const pixelsPerSec = pixelsPerSecond;
-    const thresholdMs = ((-100 - scales.tipX) / pixelsPerSec) * 1000;
-    const minTimestamp = now + thresholdMs;
-
-    const visiblePoints = priceHistory.filter((p: any) => {
-      return p.timestamp > minTimestamp && p.timestamp <= now + 1000;
-    });
-
-
-    const pointsToRender = visiblePoints.filter((p, i) => i === 0 || p.price !== visiblePoints[i - 1].price);
-
-    lastPointRef.current = pointsToRender.length > 0 ? pointsToRender[pointsToRender.length - 1] : null;
-    if (pointsToRender.length < 2) return '';
-
-    try {
-      const lineGenerator = line<{ timestamp: number, price: number }>()
-        .x((d) => scales.xScale(d.timestamp))
-        .y((d) => scales.yScale(d.price))
-        .curve(curveMonotoneX);
-
-      return lineGenerator(pointsToRender) || '';
-    } catch (err) {
-      console.error("Chart line generation error:", err);
-      return '';
-    }
-  }, [scales, priceHistory, currentPrice, now]);
-
-
-  const indicatorPaths = useMemo(() => {
-    if (!scales) return null;
-
-    const paths: Record<string, any> = {};
-    const points = [...priceHistory, { timestamp: now, price: currentPrice }];
-
-    if (activeIndicators['ma'] && points.length >= 2) {
-      const maPoints = [];
-      const period = 20;
-      for (let i = 1; i < points.length; i++) {
-        const currentPeriod = Math.min(i + 1, period);
-        const slice = points.slice(Math.max(0, i + 1 - currentPeriod), i + 1);
-        const avg = slice.reduce((sum, p) => sum + p.price, 0) / slice.length;
-        maPoints.push({ timestamp: points[i].timestamp, price: avg });
-      }
-      const lineGen = line<{ timestamp: number, price: number }>()
-        .x(d => scales.xScale(d.timestamp))
-        .y(d => scales.yScale(d.price))
-        .curve(curveMonotoneX);
-      paths.ma = lineGen(maPoints) || '';
-    }
-
-    if (activeIndicators['bollinger'] && points.length >= 2) {
-      const topPoints = [];
-      const bottomPoints = [];
-      const midPoints = [];
-      const period = 20;
-
-      for (let i = 1; i < points.length; i++) {
-        const currentPeriod = Math.min(i + 1, period);
-        const slice = points.slice(Math.max(0, i + 1 - currentPeriod), i + 1).map(p => p.price);
-        const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
-
-        let stdDev = 0;
-        if (slice.length > 1) {
-          stdDev = Math.sqrt(slice.map(x => Math.pow(x - avg, 2)).reduce((a, b) => a + b, 0) / slice.length);
-        }
-
-        topPoints.push({ timestamp: points[i].timestamp, price: avg + 2 * stdDev });
-        bottomPoints.push({ timestamp: points[i].timestamp, price: avg - 2 * stdDev });
-        midPoints.push({ timestamp: points[i].timestamp, price: avg });
-      }
-
-      const lineGen = line<{ timestamp: number, price: number }>()
-        .x(d => scales.xScale(d.timestamp))
-        .y(d => scales.yScale(d.price))
-        .curve(curveMonotoneX);
-
-      paths.bollinger = [
-        lineGen(topPoints) || '',
-        lineGen(bottomPoints) || '',
-        lineGen(midPoints) || ''
-      ];
-    }
-
-    if (activeIndicators['alligator'] && points.length >= 2) {
-      const calculateDynamicSMA = (period: number) => {
-        const sma = [];
-        for (let i = 1; i < points.length; i++) {
-          const currentPeriod = Math.min(i + 1, period);
-          const slice = points.slice(Math.max(0, i + 1 - currentPeriod), i + 1);
-          const avg = slice.reduce((sum, p) => sum + p.price, 0) / slice.length;
-          sma.push({ timestamp: points[i].timestamp, price: avg });
-        }
-        return sma;
-      };
-
-      const lineGen = line<{ timestamp: number, price: number }>()
-        .x(d => scales.xScale(d.timestamp))
-        .y(d => scales.yScale(d.price))
-        .curve(curveMonotoneX);
-
-      paths.alligator = [
-        lineGen(calculateDynamicSMA(13)) || '',
-        lineGen(calculateDynamicSMA(8)) || '',
-        lineGen(calculateDynamicSMA(5)) || '',
-      ];
-    }
-
-    if (activeIndicators['rsi'] && points.length >= 2) {
-      const rsiPoints = [];
-      let avgGain = 0;
-      let avgLoss = 0;
-      const period = 14;
-
-      for (let i = 1; i < points.length; i++) {
-        const change = points[i].price - points[i - 1].price;
-        const gain = change > 0 ? change : 0;
-        const loss = change < 0 ? -change : 0;
-
-        if (i <= period) {
-          avgGain += gain;
-          avgLoss += loss;
-          if (i === period) {
-            avgGain /= period;
-            avgLoss /= period;
-            const rs = avgGain / (avgLoss || 0.00001);
-            rsiPoints.push({ timestamp: points[i].timestamp, rsi: 100 - (100 / (1 + rs)) });
-          } else {
-            rsiPoints.push({ timestamp: points[i].timestamp, rsi: 50 });
-          }
-        } else {
-          avgGain = (avgGain * (period - 1) + gain) / period;
-          avgLoss = (avgLoss * (period - 1) + loss) / period;
-          const rs = avgGain / (avgLoss || 0.00001);
-          const rsiValue = 100 - (100 / (1 + rs));
-          rsiPoints.push({ timestamp: points[i].timestamp, rsi: rsiValue });
-        }
-      }
-      paths.rsi = rsiPoints;
-    }
-
-
-    return paths;
-  }, [scales, priceHistory, now, currentPrice, activeIndicators]);
-
-  const betCells = useMemo(() => {
-    if (!scales || dimensions.height === 0) return [];
-
-    const cells = [];
-    const colWidth = (gridInterval / 1000) * pixelsPerSecond;
-
-    const rawStep = (scales.maxY - scales.minY) / 10;
-    if (isNaN(rawStep) || rawStep <= 0) return [];
-    
-    const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
-    const normalized = rawStep / magnitude;
-    let priceStep;
-    if (normalized < 1.5) priceStep = 1 * magnitude;
-    else if (normalized < 3) priceStep = 2 * magnitude;
-    else if (normalized < 7) priceStep = 5 * magnitude;
-    else priceStep = 10 * magnitude;
-
-
-    const viewPadding = (scales.maxY - scales.minY) * 0.8;
-
-
-    const gridMaxY = scales.maxY + viewPadding;
-    const gridMinY = scales.minY - viewPadding;
-
-    const startPrice = Math.floor(gridMaxY / priceStep) * priceStep;
-    const endPrice = Math.ceil(gridMinY / priceStep) * priceStep;
-
-    const priceRange = scales.maxY - scales.minY;
-
-    const startTime = Math.floor(now / gridInterval) * gridInterval - gridInterval;
-    const endTime = now + ((dimensions.width - scales.tipX) / pixelsPerSecond) * 1000 + gridInterval * 2;
-
-    for (let colTimestamp = startTime; colTimestamp <= endTime; colTimestamp += gridInterval) {
-      const colX = scales.xScale(colTimestamp);
-
-      if (colX + colWidth < 0) continue;
-      if (colX > dimensions.width + 100) continue;
-
-      const isCrossing = colX <= scales.tipX && colX + colWidth > scales.tipX;
-      const isPast = colX + colWidth <= scales.tipX;
-
-
-      for (let rowPriceTop = startPrice; rowPriceTop >= endPrice; rowPriceTop -= priceStep) {
-        const rowPriceBottom = rowPriceTop - priceStep;
-        const rowPriceCenter = (rowPriceTop + rowPriceBottom) / 2;
-        const priceLevelIndex = Math.round(rowPriceTop / priceStep);
-
-        const y = scales.yScale(rowPriceTop);
-
-        const cellBottom = scales.yScale(rowPriceBottom);
-        const rowHeight = cellBottom - y;
-
-        if (y > dimensions.height + 50 || cellBottom < -50) continue;
-
-        let status: 'future' | 'active' | 'won' | 'lost' = 'future';
-
-        if (isCrossing) {
-          if (currentPrice <= rowPriceTop && currentPrice >= rowPriceBottom) {
-            status = 'won';
-          } else {
-            status = 'active';
-          }
-        } else if (isPast) {
-          status = 'lost';
-        }
-
-
-        const isUp = rowPriceCenter > currentPrice;
-        const priceInRow = currentPrice <= rowPriceTop && currentPrice >= rowPriceBottom;
-
-        let baseMultiplier: number;
-        if (priceInRow) {
-          baseMultiplier = 1.01;
-        } else {
-          const priceDist = Math.abs(rowPriceCenter - currentPrice);
-          const normalizedDist = Math.min(priceDist / (priceRange * 0.8), 1);
-          baseMultiplier = 1.05 + Math.pow(normalizedDist, 1.3) * 3.95;
-        }
-
-        const timeBonus = Math.max(0, (colX - scales.tipX) / 800) * 0.25;
-        let calculatedMultiplier = Math.min(baseMultiplier + timeBonus, 10.0);
-
-        const colIndex = Math.floor(colTimestamp / gridInterval);
-        const isHighStake = baseMultiplier > 2.2;
-        const isLuckyDiagonal = (priceLevelIndex + colIndex) % 5 === 0;
-        const isBlitzBoosted = isBlitzActive && hasBlitzAccess && (isHighStake || isLuckyDiagonal);
-
-
-
-        if (isBlitzBoosted) {
-          calculatedMultiplier = calculatedMultiplier * blitzMultiplier;
-        }
-
-        const multiplier = Math.min(calculatedMultiplier, 20).toFixed(2);
-
-        const distFromCenter = Math.abs(rowPriceCenter - currentPrice) / priceRange;
-        const intensity = Math.min(distFromCenter * 1.5, 1);
-
-        const hue = isBlitzBoosted ? 25 : 270;
-        const saturation = isBlitzBoosted ? 80 + intensity * 15 : 50 + intensity * 30;
-        const lightness = isBlitzBoosted ? 55 : 45;
-        const alpha = isBlitzBoosted ? 0.5 - intensity * 0.2 : 0.4 - intensity * 0.35;
-
-        const cellColor = `hsla(${hue}, ${saturation}%, ${lightness}%, ${Math.max(0.05, alpha)})`;
-        const borderColor = isBlitzBoosted
-          ? `hsla(${hue}, 90%, 60%, ${0.7 - intensity * 0.3})`
-          : `hsla(${hue}, 70%, 55%, ${Math.max(0.1, 0.5 - intensity * 0.4)})`;
-
-        cells.push({
-          id: `cell-${colTimestamp}-${priceLevelIndex}`,
-          colTimestamp,
-          x: colX,
-          y,
-          width: colWidth,
-          height: Math.max(rowHeight, 5),
-          multiplier,
-          isUp,
-          status,
-          color: cellColor,
-          borderColor: borderColor,
-          priceTop: rowPriceTop,
-          priceBottom: rowPriceBottom,
-          isBlitzBoosted
-        });
-      }
-    }
-
-    return cells;
-  }, [scales, currentPrice, dimensions, gameMode, timeframeSeconds, selectedAsset, isBlitzActive, hasBlitzAccess, blitzMultiplier]);
-
-
-
-
-  useEffect(() => {
-    if (!scales || cellBets.size === 0 || gameMode !== 'box') return;
-
-    betCells.forEach((cell: any) => {
-      const bet = cellBets.get(cell.id);
-      if (!bet) return;
-
-      const isCrossing = cell.status === 'active' || cell.status === 'won' || cell.status === 'lost';
-
-      if (isCrossing) {
-        const won = currentPrice <= cell.priceTop && currentPrice >= cell.priceBottom;
-        const payout = won ? bet.amount * bet.multiplier : 0;
-
-        setCellBets(prev => {
-          const newMap = new Map(prev);
-          newMap.delete(cell.id);
-          return newMap;
-        });
-
-        resolveBet(bet.betId, won, payout);
-
-        setBetResults(prev => [...prev, {
-          id: `result-${bet.betId}`,
-          won,
-          amount: bet.amount,
-          payout,
-          multiplier: bet.multiplier,
-          timestamp: Date.now(),
-          x: cell.x,
-          y: cell.y
-        }]);
-
-        if (won) {
-          playWinSound();
-        } else {
-          playLoseSound();
-        }
-
-        if (userAddress) {
-          fetchBalance(userAddress);
-        }
-
-      }
-    });
-  }, [betCells, cellBets, scales, currentPrice, resolveBet, userAddress, fetchBalance, playWinSound, playLoseSound, gameMode]);
-
-  useEffect(() => {
-    if (!scales || gameMode !== 'draw') return;
-
-    const drawBets = activeBets.filter((bet: any) =>
-      bet.mode === 'draw' &&
-      bet.asset === selectedAsset &&
-      bet.status === 'active' &&
-      typeof bet.endTime === 'number' &&
-      typeof bet.priceTop === 'number' &&
-      typeof bet.priceBottom === 'number'
-    );
-
-    drawBets.forEach((bet: any) => {
-      if (now < bet.endTime) return;
-      if (resolvedDrawBetIdsRef.current.has(bet.id)) return;
-      resolvedDrawBetIdsRef.current.add(bet.id);
-      setTimeout(() => resolvedDrawBetIdsRef.current.delete(bet.id), 5000);
-
-      const won = currentPrice <= bet.priceTop && currentPrice >= bet.priceBottom;
-      const payout = won ? bet.amount * bet.multiplier : 0;
-
-      resolveBet(bet.id, won, payout);
-
-      setBetResults(prev => [
-        ...prev,
-        {
-          id: `draw-${bet.id}`,
-          won,
-          amount: bet.amount,
-          payout,
-          multiplier: bet.multiplier,
-          timestamp: Date.now(),
-          x: scales.tipX,
-          y: (scales.yScale(bet.priceTop) + scales.yScale(bet.priceBottom)) / 2,
-        },
-      ]);
-
-      if (won) playWinSound();
-      else playLoseSound();
-    });
-  }, [scales, gameMode, activeBets, selectedAsset, now, currentPrice, resolveBet, playWinSound, playLoseSound]);
+  const underlay = (ctx: CanvasRenderingContext2D, scales: Scales) => {
+    if (theme) drawIndicators(ctx, scales, indicators, theme.palette);
+  };
+
+  const overlay = (ctx: CanvasRenderingContext2D, scales: Scales) => {
+    if (!theme) return;
+    const { activeBets, settlingBets } = useStore.getState();
+    drawBets(ctx, scales, [...activeBets, ...settlingBets], {
+      mode: gameMode,
+      asset: selectedAsset,
+      price: useStore.getState().currentPrice,
+      intervalMs: gridInterval,
+      symbol: currencySymbol,
+      fontFamily: theme.fontFamily,
+    }, theme.palette);
+    if (indicators.rsi) drawRsiPanel(ctx, scales, indicators.rsi, theme.palette, theme.fontFamily);
+  };
 
   return (
     <div ref={containerRef} className="absolute inset-0 z-0 bg-white font-tight text-ink overflow-hidden select-none">
@@ -1246,541 +586,40 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         </div>
       )}
 
-      {gameMode === 'box' && (
-        <div className="absolute inset-0 z-5 overflow-hidden pointer-events-none">
-          <div ref={scrollLayer} className="absolute inset-0 will-change-transform">
-          {betCells.map((cell: any) => {
-            let opacity = 0.9;
-            let canBet = cell.status === 'future';
-            let tone = cell.isBlitzBoosted
-              ? 'bg-down-soft border-down/30 text-down'
-              : 'bg-white border-line text-faint';
-
-            if (cell.status === 'won') {
-              return (
-                <div
-                  key={cell.id}
-                  className="absolute flex items-center justify-center bg-up pointer-events-none"
-                  style={{ left: 0, top: 0, transform: `translate3d(${cell.x}px,${cell.y}px,0)`, width: cell.width, height: cell.height }}
-                >
-                  <span className="font-jet text-[10px] font-medium text-white">
-                    {cell.multiplier}x
-                  </span>
-                </div>
-              );
-            } else if (cell.status === 'lost') {
-              return (
-                <div
-                  key={cell.id}
-                  className="absolute border-b border-r border-line bg-white pointer-events-none"
-                  style={{ left: 0, top: 0, transform: `translate3d(${cell.x}px,${cell.y}px,0)`, width: cell.width, height: cell.height }}
-                />
-              );
-            } else if (cell.status === 'active') {
-              opacity = 1;
-              tone = 'bg-surface border-ink/15 text-subtle';
-            }
-
-            const handleClick = async () => {
-              if (canBet && betAmount && userAddress) {
-                const requiredAmount = parseFloat(betAmount);
-                const currentBalance = houseBalance || 0;
-
-                if (currentBalance < requiredAmount) {
-                  setShowInsufficientFunds(true);
-                  setTimeout(() => setShowInsufficientFunds(false), 2000);
-                  return;
-                }
-
-                try {
-                  const targetId = `${cell.isUp ? 'UP' : 'DOWN'}-${cell.multiplier}-${timeframeSeconds}`;
-
-                  const result = await placeBetFromHouseBalance(
-                    betAmount,
-                    targetId,
-                    userAddress,
-                    cell.id,
-                    {
-                      priceTop: cell.priceTop,
-                      priceBottom: cell.priceBottom,
-                      startTime: cell.colTimestamp,
-                      endTime: cell.colTimestamp,
-                    },
-                  );
-
-                  if (result && result.bet) {}
-                } catch (error) {
-                  console.error('Failed to place box bet:', error);
-                  toast.error(error instanceof Error ? error.message : 'Failed to place bet');
-                }
-              }
-            };
-
-            const hasBet = cellBets.has(cell.id);
-            if (hasBet) {
-              tone = 'bg-up-soft border-up/40 text-up';
-            }
-
-            return (
-              <div
-                key={cell.id}
-                onClick={handleClick}
-                className={`absolute border-b border-r flex items-center justify-center ${tone} ${canBet ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
-                style={{
-                  left: 0,
-                  top: 0,
-                  transform: `translate3d(${cell.x}px,${cell.y}px,0)`,
-                  width: cell.width,
-                  height: cell.height,
-                  opacity
-                }}
-              >
-                <div className="flex flex-col items-center justify-center h-full w-full pointer-events-none">
-                  {hasBet ? (
-                    <div className="flex flex-col items-center leading-none">
-                      <span className="font-jet text-[13px] font-medium text-up">
-                        {(parseFloat(cellBets.get(cell.id)?.amount as any || '0') * parseFloat(cellBets.get(cell.id)?.multiplier as any || '1')).toFixed(2)}
-                        <span className="ml-1 text-[9px] text-up/70">{currencySymbol}</span>
-                      </span>
-                      <span className="font-jet text-[9px] text-up/70 mt-1">
-                        {cellBets.get(cell.id)?.multiplier}x
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="font-jet text-[10px]">
-                      {cell.multiplier}x
-                    </span>
-                  )}
-                </div>
-              </div>
-            );
-
-          })}
-          </div>
+      {theme && (
+        <div className="absolute inset-0 z-5">
+          <TapGridChart
+            mode={isBox ? 'grid' : 'line'}
+            seriesKey={selectedAsset}
+            intervalMs={gridInterval}
+            pxPerSecond={pixelsPerSecond}
+            tipRatio={historyWidthRatio}
+            rows={ROWS}
+            decimals={currentAssetConfig.decimals}
+            lockMs={BET_LOCK_MS}
+            viewSpan={isBox ? BOX_VIEW_SPAN : LINE_VIEW_SPAN}
+            minRange={Math.max(currentPrice * (isBox ? BOX_MIN_RANGE : LINE_MIN_RANGE), tickRange)}
+            maxStep={isBox ? maxBand : 0}
+            colors={theme.palette}
+            fontFamily={theme.fontFamily}
+            reducedMotion={prefersReducedMotion}
+            stale={feedStalled}
+            tapInsetBottom={indicators.rsi ? RSI_PANEL_INSET : 0}
+            cellLabel={quoteCell}
+            onCellTap={handleCellTap}
+            underlay={underlay}
+            overlay={overlay}
+            onReady={setChart}
+            style={{ cursor: isBox ? 'pointer' : 'default' }}
+          />
         </div>
       )}
 
-      {gameMode === 'draw' && scales && (
-        <>
-          <div
-            className="absolute inset-0 z-30"
-            style={{ cursor: 'crosshair', pointerEvents: pendingBox ? 'none' : 'auto' }}
-            onMouseDown={handleDrawMouseDown}
-            onMouseMove={handleDrawMouseMove}
-            onMouseUp={handleDrawMouseUp}
-            onMouseLeave={handleDrawMouseLeave}
-          />
-
-          {isDrawing && drawStart && drawCurrent && (
-            <div
-              className="absolute z-25 pointer-events-none"
-              style={{
-                left: drawBoxGeometry(drawStart, drawCurrent).x,
-                top: drawBoxGeometry(drawStart, drawCurrent).y,
-                width: drawBoxGeometry(drawStart, drawCurrent).width,
-                height: drawBoxGeometry(drawStart, drawCurrent).height,
-                border: '1px dashed var(--up)',
-                backgroundColor: 'color-mix(in srgb, var(--up) 6%, transparent)',
-                borderRadius: 6,
-              }}
-            />
-          )}
-
-          {pendingBox && !isDrawing && (
-            <>
-              <div
-                className="absolute z-25 pointer-events-none"
-                style={{
-                  left: pendingBox.x,
-                  top: pendingBox.y,
-                  width: pendingBox.width,
-                  height: pendingBox.height,
-                  border: '1px dashed var(--up)',
-                  backgroundColor: 'var(--up-soft)',
-                  borderRadius: 6,
-                }}
-              />
-
-              <div
-                className="absolute z-[35]"
-                style={{
-                  left: Math.min(pendingBox.x + pendingBox.width + 10, Math.max(16, dimensions.width - 220)),
-                  top: Math.max(10, pendingBox.y - 10),
-                  width: 200,
-                }}
-              >
-                <div className={`${OVERLAY} p-3`}>
-                  <div className="flex items-start justify-between gap-3 mb-2">
-                    <div>
-                      <div className="text-subtle text-[11px]">Multiplier</div>
-                      <div className="font-jet text-ink text-sm">
-                        {pendingBox.multiplier.toFixed(2)}x
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-subtle text-[11px]">Range</div>
-                      <div className="font-jet text-ink text-[11px]">
-                        {pendingBox.priceBottom.toFixed(4)} – {pendingBox.priceTop.toFixed(4)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2 mb-3 pt-2 border-t border-line">
-                    <div className="text-subtle text-[11px]">Payout</div>
-                    <div className="font-jet text-up text-[13px]">
-                      {(parseFloat(betAmount) * pendingBox.multiplier).toFixed(2)} {currencySymbol}
-                    </div>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handlePlaceDrawBet}
-                      disabled={isPlacingBet || !userAddress}
-                      className="flex-1 py-2 rounded-full bg-up hover:bg-up/90 text-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {isPlacingBet ? 'Placing…' : `Bet ${betAmount} ${currencySymbol}`}
-                    </button>
-                    <button
-                      onClick={() => setPendingBox(null)}
-                      disabled={isPlacingBet}
-                      className="py-2 px-3 rounded-full bg-white ring-1 ring-line hover:bg-surface text-muted text-xs font-medium disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-
-          <svg className="absolute inset-0 w-full h-full z-20 pointer-events-none" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}>
-            <g ref={scrollLayer}>
-            {activeBets
-              .filter((bet: any) =>
-                bet.mode === 'draw' &&
-                bet.asset === selectedAsset &&
-                bet.status === 'active' &&
-                typeof bet.startTime === 'number' &&
-                typeof bet.endTime === 'number' &&
-                typeof bet.priceTop === 'number' &&
-                typeof bet.priceBottom === 'number'
-              )
-              .map((bet: any) => {
-                const bStartX = scales.xScale(bet.startTime);
-                const bEndX = scales.xScale(bet.endTime);
-                if (bEndX <= bStartX) return null;
-
-                const clampedStartX = Math.max(scales.tipX, bStartX);
-                const width = bEndX - clampedStartX;
-                if (width <= 0) return null;
-
-                const tY = scales.yScale(bet.priceTop);
-                const bY = scales.yScale(bet.priceBottom);
-                const height = bY - tY;
-                if (height <= 0) return null;
-
-                const isWinning = currentPrice <= bet.priceTop && currentPrice >= bet.priceBottom;
-                const fill = isWinning ? 'var(--up-soft)' : 'color-mix(in srgb, var(--ink) 3%, transparent)';
-                const stroke = isWinning ? 'var(--up)' : 'var(--faint)';
-
-                return (
-                  <g key={bet.id}>
-                    <rect
-                      x={clampedStartX}
-                      y={tY}
-                      width={width}
-                      height={height}
-                      rx={6}
-                      fill={fill}
-                      stroke={stroke}
-                      strokeWidth={1}
-                    />
-                    <text
-                      x={clampedStartX + 6}
-                      y={tY + 16}
-                      fill={isWinning ? 'var(--up)' : 'var(--muted)'}
-                      fontSize={10}
-                      className="font-jet"
-                    >
-                      x{Number(bet.multiplier).toFixed(2)}
-                    </text>
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
-        </>
+      {settlingCount > 0 && (
+        <div className="absolute bottom-8 left-4 z-40 pointer-events-none">
+          <div className={`${OVERLAY} px-3 py-1.5 text-[11px] text-subtle`}>Settling on the server</div>
+        </div>
       )}
-
-      <svg className="absolute inset-0 w-full h-full z-20 pointer-events-none">
-        <g ref={scrollLayer}>
-        {gameMode === 'binomo' && scales && activeBets.map((bet: any) => {
-          if (bet.status !== 'active') return null;
-
-          const strikeY = scales.yScale(bet.strikePrice);
-          const expirationX = scales.xScale(bet.endTime);
-          const nowX = scales.tipX;
-
-          if (expirationX < 0) return null;
-
-          const isUp = bet.direction === 'UP';
-          const color = isUp ? 'var(--up)' : 'var(--down)';
-
-          return (
-            <g key={bet.id}>
-              <line
-                x1={nowX}
-                y1={strikeY}
-                x2={Math.max(nowX, expirationX)}
-                y2={strikeY}
-                stroke={color}
-                strokeWidth="1.5"
-                strokeDasharray="4 4"
-              />
-
-              {expirationX > nowX && (
-                <line
-                  x1={expirationX}
-                  y1={0}
-                  x2={expirationX}
-                  y2={dimensions.height}
-                  stroke="var(--ink)"
-                  strokeWidth="1"
-                  strokeOpacity="0.2"
-                  strokeDasharray="4 4"
-                />
-              )}
-
-              {expirationX > nowX && (
-                <rect
-                  x={nowX}
-                  y={isUp ? Math.min(strikeY, scales.yScale(currentPrice)) : strikeY}
-                  width={expirationX - nowX}
-                  height={Math.abs(strikeY - scales.yScale(currentPrice))}
-                  fill={color}
-                  fillOpacity="0.05"
-                />
-              )}
-
-              <text
-                x={nowX + 5}
-                y={strikeY - 5}
-                fill={color}
-                fontSize="10"
-                className="font-jet"
-              >
-                {bet.direction} {bet.amount} {currencySymbol} {bet.strikePrice && `@ $${bet.strikePrice.toFixed(2)}`}
-              </text>
-            </g>
-          );
-        })}
-        </g>
-      </svg>
-
-      <svg
-        className="absolute inset-0 w-full h-full z-10 pointer-events-none"
-      >
-        {scales && (
-          <>
-            <g className="y-axis">
-              {[0.1, 0.3, 0.5, 0.7, 0.9].map((tick) => {
-                const price = scales.minY + (scales.maxY - scales.minY) * tick;
-                const y = scales.yScale(price);
-                return (
-                  <g key={`y-tick-${tick}`}>
-                    <line x1={0} y1={y} x2={dimensions.width} y2={y} stroke="var(--ink)" strokeOpacity="0.05" strokeWidth="1" />
-                    <text
-                      x={dimensions.width - 8}
-                      y={y - 5}
-                      fill="var(--faint)"
-                      fontSize="10"
-                      textAnchor="end"
-                      className="font-jet"
-                    >
-                      {price.toLocaleString('en-US', { minimumFractionDigits: currentAssetConfig.decimals })}
-                    </text>
-                  </g>
-                );
-              })}
-            </g>
-
-            <g className="x-axis" ref={scrollLayer}>
-              {(() => {
-                const minSpacing = 120;
-                let tickInterval = 10;
-
-                if (pixelsPerSecond < minSpacing / 10) tickInterval = 30;
-                if (pixelsPerSecond < minSpacing / 30) tickInterval = 60;
-                if (pixelsPerSecond < minSpacing / 60) tickInterval = 120;
-                if (pixelsPerSecond < minSpacing / 120) tickInterval = 300;
-                if (pixelsPerSecond < minSpacing / 300) tickInterval = 600;
-
-                const secondsPast = scales.tipX / pixelsPerSecond;
-                const secondsFuture = (dimensions.width - scales.tipX) / pixelsPerSecond;
-
-                const stepMs = tickInterval * 1000;
-                const first = Math.floor((now - secondsPast * 1000) / stepMs) * stepMs;
-                const lastTs = now + (secondsFuture + tickInterval) * 1000;
-
-                const ticks: number[] = [];
-                for (let ts = first; ts <= lastTs; ts += stepMs) ticks.push(ts);
-
-                return ticks.map((ts) => {
-                  const x = scales.xScale(ts);
-                  if (x < -120 || x > dimensions.width + 120) return null;
-                  return (
-                    <g key={`x-tick-${ts}`}>
-                      <line x1={x} y1={0} x2={x} y2={dimensions.height} stroke="var(--ink)" strokeOpacity="0.05" strokeWidth="1" />
-                      <text
-                        x={x + 5}
-                        y={dimensions.height - 10}
-                        fill="var(--faint)"
-                        fontSize="10"
-                        className="font-jet"
-                      >
-                        {new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </text>
-                    </g>
-                  );
-                });
-              })()}
-            </g>
-
-            {currentPrice > 0 && (
-              <>
-                <g
-                  ref={scrollLayer}
-                  opacity={feedStalled ? 0.35 : 1}
-                  style={{ transition: 'opacity 0.4s ease' }}
-                >
-                  {chartPath && (
-                    <path d={chartPath} fill="none" stroke="var(--up)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  )}
-                </g>
-                <line
-                  ref={tailRef}
-                  stroke="var(--up)"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  opacity={feedStalled ? 0.35 : 1}
-                />
-
-                <g ref={tipGroupRef}>
-                  <line
-                    x1={0}
-                    y1={0}
-                    x2={dimensions.width - 84}
-                    y2={0}
-                    stroke="var(--up)"
-                    strokeOpacity="0.4"
-                    strokeWidth="1"
-                    strokeDasharray="3 4"
-                  />
-                  <circle
-                    cx={scales.tipX}
-                    cy={0}
-                    r="4"
-                    fill="var(--up)"
-                    stroke="var(--paper)"
-                    strokeWidth="2"
-                  />
-                  <rect x={dimensions.width - 84} y={-11} width={80} height={22} rx={11} fill="var(--up)" />
-                  <text x={dimensions.width - 44} y={4} fill="var(--paper)" fontSize="11" textAnchor="middle" className="font-jet">
-                    {currentPrice.toLocaleString('en-US', { minimumFractionDigits: currentAssetConfig.decimals, maximumFractionDigits: currentAssetConfig.decimals })}
-                  </text>
-                </g>
-
-                {indicatorPaths && (
-                  <g className="indicators-layer" ref={scrollLayer}>
-                    {activeIndicators['ma'] && indicatorPaths.ma && (
-                      <path
-                        d={indicatorPaths.ma as string}
-                        fill="none"
-                        stroke="var(--down)"
-                        strokeWidth="1.5"
-                        strokeDasharray="4 2"
-                        opacity="0.7"
-                      />
-                    )}
-
-                    {activeIndicators['bollinger'] && indicatorPaths.bollinger && (
-                      <g>
-                        <path
-                          d={(indicatorPaths.bollinger as string[])[0]}
-                          fill="none"
-                          stroke="var(--subtle)"
-                          strokeWidth="1.5"
-                          opacity="0.5"
-                        />
-                        <path
-                          d={(indicatorPaths.bollinger as string[])[1]}
-                          fill="none"
-                          stroke="var(--subtle)"
-                          strokeWidth="1.5"
-                          opacity="0.5"
-                        />
-                        <path
-                          d={(indicatorPaths.bollinger as string[])[2]}
-                          fill="none"
-                          stroke="var(--subtle)"
-                          strokeWidth="1"
-                          strokeDasharray="2 2"
-                          opacity="0.3"
-                        />
-                      </g>
-                    )}
-
-                    {activeIndicators['alligator'] && indicatorPaths.alligator && (
-                      <g>
-                        <path d={(indicatorPaths.alligator as string[])[0]} fill="none" stroke="var(--ink)" strokeWidth="1.5" opacity="0.5" />
-                        <path d={(indicatorPaths.alligator as string[])[1]} fill="none" stroke="var(--subtle)" strokeWidth="1.5" opacity="0.5" />
-                        <path d={(indicatorPaths.alligator as string[])[2]} fill="none" stroke="var(--faint)" strokeWidth="1.5" opacity="0.6" />
-                      </g>
-                    )}
-
-                    {activeIndicators['rsi'] && indicatorPaths.rsi && (() => {
-                      try {
-                        const rsiPoints = indicatorPaths.rsi as any[];
-
-
-                        const panelHeight = 100;
-                        const panelY = dimensions.height - panelHeight - 20;
-
-                        return (
-                          <g transform={`translate(0, ${panelY})`}>
-                            <rect x={0} y={0} width={dimensions.width} height={panelHeight} fill="var(--paper)" fillOpacity="0.92" />
-                            <line x1={0} y1={0} x2={dimensions.width} y2={0} stroke="var(--line)" strokeWidth="1" />
-
-                            <line x1={0} y1={30} x2={dimensions.width} y2={30} stroke="var(--line)" strokeWidth="1" strokeDasharray="4 4" />
-                            <line x1={0} y1={70} x2={dimensions.width} y2={70} stroke="var(--line)" strokeWidth="1" strokeDasharray="4 4" />
-
-                            <text x={10} y={26} fill="var(--faint)" fontSize="10" className="font-jet">70</text>
-                            <text x={10} y={66} fill="var(--faint)" fontSize="10" className="font-jet">30</text>
-
-                            <path
-                              d={line<{ timestamp: number, rsi: number }>()
-                                .x(d => scales.xScale(d.timestamp))
-                                .y(d => panelHeight - (d.rsi / 100) * panelHeight)
-                                .curve(curveMonotoneX)(rsiPoints) || ''}
-                              fill="none"
-                              stroke="var(--ink)"
-                              strokeOpacity="0.7"
-                              strokeWidth="1.5"
-                            />
-
-                            <text x={dimensions.width - 12} y={16} fill="var(--subtle)" fontSize="10" textAnchor="end" className="font-jet">RSI 14</text>
-                          </g>
-                        );
-                      } catch (e) { return null; }
-                    })()}
-
-                  </g>
-                )}
-              </>
-            )}
-          </>
-        )}
-      </svg>
 
       <div className="absolute top-4 left-4 pointer-events-auto z-40">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -1919,19 +758,14 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
 
       <div className="absolute inset-0 z-50 pointer-events-none overflow-hidden">
         {betResults.map((result) => {
-          const age = Date.now() - result.timestamp;
-          const opacity = Math.max(0, 1 - age / 3000);
-          const translateY = -age / 20;
-
           return (
             <div
               key={result.id}
               className="absolute"
               style={{
                 left: Math.min(Math.max(result.x, 80), dimensions.width - 140),
-                top: Math.min(Math.max(result.y + translateY, 40), dimensions.height - 120),
-                opacity,
-                transform: `translateY(${translateY}px)`,
+                top: Math.min(Math.max(result.y, 40), dimensions.height - 120),
+                animation: `result-float ${RESULT_VISIBLE_MS}ms linear forwards`,
               }}
             >
               <div className={`${OVERLAY} px-4 py-3`}>

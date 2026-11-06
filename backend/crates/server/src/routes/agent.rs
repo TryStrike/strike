@@ -273,6 +273,7 @@ async fn settle_proposal(
                 direction,
                 strike,
                 reason,
+                ..
             } if current.direction.as_deref() == Some(direction) => {
                 let trade = live::Trade {
                     decision_id: id,
@@ -280,6 +281,7 @@ async fn settle_proposal(
                     strike,
                     reason: &reason,
                     proposal: true,
+                    confidence: None,
                 };
                 if let live::Placement::Stop(why) =
                     live::place(database, &mut session, trade).await?

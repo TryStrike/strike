@@ -6,6 +6,9 @@ import { Modal } from '@/components/ui/Modal';
 import { Badge, Button, Segmented, glassSelected } from '@/components/ui/kit';
 import { ArrowUpRight, CheckCircle, CircleNotch, WarningCircle } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
+import dynamic from 'next/dynamic';
+
+const BridgeIn = dynamic(() => import('./BridgeIn'), { ssr: false });
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
@@ -680,6 +683,8 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           Need test USDC? Get it free from Circle&apos;s faucet <ArrowUpRight size={14} />
         </a>
       )}
+
+      {config.chainId === 5042002 && <BridgeIn onArrived={() => void useStore.getState().refreshWalletBalance()} />}
 
       {ARC_ASSETS.length > 1 && (
         <Segmented

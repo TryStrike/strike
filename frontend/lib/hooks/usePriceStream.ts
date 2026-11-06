@@ -10,6 +10,7 @@ export interface UsePriceStreamOptions {
   streamPath?: string;
   firstTickTimeoutMs?: number;
   maxReconnectBackoffMs?: number;
+  onBands?: (bands: Record<string, number>) => void;
 }
 
 const DEFAULT_STREAM_PATH = '/api/prices/stream';
@@ -25,9 +26,11 @@ export function usePriceStream(
   const maxReconnectBackoffMs = options.maxReconnectBackoffMs ?? DEFAULT_MAX_RECONNECT_BACKOFF_MS;
 
   const onTickRef = useRef(onTick);
+  const onBandsRef = useRef(options.onBands);
   useEffect(() => {
     onTickRef.current = onTick;
-  }, [onTick]);
+    onBandsRef.current = options.onBands;
+  }, [onTick, options.onBands]);
 
   const [mode, setMode] = useState<PriceFeedMode>('poll');
   const [connected, setConnected] = useState(false);
@@ -108,29 +111,25 @@ export function usePriceStream(
         watchdog = clearTimer(watchdog);
         attempt = 0;
 
-        let tick: { asset?: unknown; price?: unknown };
+        let frame: { prices?: unknown; bands?: unknown };
         try {
-          tick = JSON.parse(String(event.data));
+          frame = JSON.parse(String(event.data));
         } catch (err) {
           console.error('[prices] malformed stream frame', event.data, err);
           return;
         }
-        const price = typeof tick?.price === 'number' ? tick.price : NaN;
-        if (!Number.isFinite(price) || price <= 0) {
-          console.error('[prices] stream frame without a usable price', event.data);
+        if (typeof frame?.prices !== 'object' || frame.prices === null) {
+          console.error('[prices] stream frame without prices', event.data);
           return;
         }
-        if (typeof tick.asset !== 'string' || !tick.asset) {
-          console.error('[prices] stream frame without an asset', event.data);
-          return;
-        }
-        const key = tick.asset;
 
         stopPollFallback();
         reconnectTimer = clearTimer(reconnectTimer);
         setMode('stream');
         setConnected(true);
-        onTickRef.current({ [key]: price });
+        const prices = frame.prices as Record<string, number>;
+        if (Object.keys(prices).length > 0) onTickRef.current(prices);
+        if (frame.bands) onBandsRef.current?.(frame.bands as Record<string, number>);
       };
 
       es.onerror = () => degrade();

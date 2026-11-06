@@ -420,6 +420,60 @@ pub fn recover_personal_signer(message: &str, signature: &str) -> Option<String>
     Some(verifying_key_to_address(&vk))
 }
 
+/// The ERC-6492 universal validator, run as a deployless `eth_call`. It checks an
+/// EOA signature, a deployed smart account (ERC-1271) and a not-yet-deployed one
+/// (ERC-6492 wrapped) alike. Bytecode from viem's `erc6492SignatureValidatorByteCode`.
+const ERC6492_VALIDATOR: &str = include_str!("erc6492_validator.hex");
+
+/// True when `signer` signed `message` (EIP-191). Plain EOA signatures are checked
+/// locally; anything else, such as a passkey smart account, is checked on Arc.
+pub async fn verify_personal_signature(
+    signer: &str,
+    message: &str,
+    signature: &str,
+) -> ApiResult<bool> {
+    if recover_personal_signer(message, signature)
+        .is_some_and(|r| canonical(&r) == canonical(signer))
+    {
+        return Ok(true);
+    }
+    let sig = hex_decode(signature.strip_prefix("0x").unwrap_or(signature))
+        .ok_or_else(|| ApiError::bad_request("Signature is not hex"))?;
+    let owner = hex_decode(signer.strip_prefix("0x").unwrap_or(signer))
+        .filter(|b| b.len() == 20)
+        .ok_or_else(|| ApiError::bad_request("Signer is not an address"))?;
+    let hash = keccak256(
+        &[
+            format!("\x19Ethereum Signed Message:\n{}", message.len()).as_bytes(),
+            message.as_bytes(),
+        ]
+        .concat(),
+    );
+
+    let mut args = vec![0u8; 12];
+    args.extend_from_slice(&owner);
+    args.extend_from_slice(&hash);
+    let mut word = [0u8; 32];
+    word[31] = 0x60;
+    args.extend_from_slice(&word);
+    let mut len = [0u8; 32];
+    len[24..].copy_from_slice(&(sig.len() as u64).to_be_bytes());
+    args.extend_from_slice(&len);
+    args.extend_from_slice(&sig);
+    args.resize(args.len() + (32 - sig.len() % 32) % 32, 0);
+
+    let data = format!("{}{}", ERC6492_VALIDATOR.trim(), hex::encode(args));
+    let result = Rpc::from_config()
+        .call("eth_call", json!([{ "data": data }, "latest"]))
+        .await;
+    Ok(match result {
+        Ok(Value::String(out)) => {
+            hex_decode(out.trim_start_matches("0x")).is_some_and(|b| b.last() == Some(&1))
+        }
+        Ok(_) | Err(_) => false,
+    })
+}
+
 fn verifying_key_to_address(vk: &VerifyingKey) -> String {
     let point = vk.to_encoded_point(false);
     // Uncompressed key is 0x04 || X || Y; the address is the last 20 bytes of
@@ -1172,7 +1226,7 @@ fn raw_tx_hash(raw: &str) -> String {
     format!("0x{}", hex::encode(keccak256(&bytes)))
 }
 
-fn address_from_signing_key(signer: &SigningKey) -> String {
+pub fn address_from_signing_key(signer: &SigningKey) -> String {
     verifying_key_to_address(signer.verifying_key())
 }
 

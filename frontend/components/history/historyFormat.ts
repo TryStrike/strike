@@ -165,33 +165,7 @@ export function summarizeRealRows(rows: BetHistoryRow[]): HistorySummary & { pra
   return { ...summarizeHistoryRows(real), practiceRounds: demo.length };
 }
 
-export const KNOWN_HISTORY_ASSETS = [
-  'BTC',
-  'ETH',
-  'SOL',
-  'BNB',
-  'XRP',
-  'DOGE',
-  'ADA',
-  'SUI',
-  'GOLD',
-  'SILVER',
-  'EUR',
-  'GBP',
-  'JPY',
-  'AAPL',
-  'NVDA',
-  'TSLA',
-] as const;
 
-export function buildAssetOptions(rows: BetHistoryRow[]): string[] {
-  const seen = new Set<string>(KNOWN_HISTORY_ASSETS);
-  for (const row of rows) {
-    const asset = String(row.asset ?? '').trim().toUpperCase();
-    if (asset) seen.add(asset);
-  }
-  return [...seen];
-}
 
 export const CSV_HEADERS = [
   'bet_id',

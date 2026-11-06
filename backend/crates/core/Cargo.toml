@@ -24,6 +24,7 @@ thiserror.workspace = true
 tracing.workspace = true
 once_cell.workspace = true
 futures.workspace = true
+tokio-tungstenite.workspace = true
 ring.workspace = true
 
 [dev-dependencies]

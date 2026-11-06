@@ -7,6 +7,8 @@ import { explorerTxUrl } from '@/lib/arc/config';
 import type { BetHistoryRow } from '@/lib/store/historySlice';
 import { SettlementProof, type SettlementProofInput } from '@/components/game/SettlementProof';
 import { Badge, cx } from '@/components/ui/kit';
+import { ArkivChip } from '@/components/arkiv/ArkivChip';
+import type { ArkivSeals } from '@/lib/arkiv';
 import {
   asNumber,
   formatAmount,
@@ -25,6 +27,7 @@ interface HistoryTableProps {
   loading: boolean;
   wallet: string;
   skeletonRows?: number;
+  seals?: ArkivSeals | null;
 }
 
 const HEAD_CELLS = [
@@ -44,6 +47,7 @@ export const HistoryTable: React.FC<HistoryTableProps> = ({
   loading,
   wallet,
   skeletonRows = 8,
+  seals = null,
 }) => (
   <div className="overflow-x-auto">
     <table className="w-full min-w-[900px] border-collapse text-left font-tight">
@@ -62,7 +66,7 @@ export const HistoryTable: React.FC<HistoryTableProps> = ({
       <tbody className="divide-y divide-line">
         {loading && rows.length === 0
           ? Array.from({ length: skeletonRows }).map((_, i) => <SkeletonRow key={i} index={i} />)
-          : rows.map((row) => <HistoryRow key={String(row.id)} row={row} wallet={wallet} />)}
+          : rows.map((row) => <HistoryRow key={String(row.id)} row={row} wallet={wallet} seals={seals} />)}
       </tbody>
     </table>
   </div>
@@ -102,7 +106,11 @@ export function proofInputFromRow(row: BetHistoryRow): SettlementProofInput {
   };
 }
 
-const HistoryRow: React.FC<{ row: BetHistoryRow; wallet: string }> = ({ row, wallet }) => {
+const HistoryRow: React.FC<{ row: BetHistoryRow; wallet: string; seals: ArkivSeals | null }> = ({
+  row,
+  wallet,
+  seals,
+}) => {
   const net = netOf(row);
   const delta = priceDelta(row);
   const isDemo = isDemoHistoryRow(row);
@@ -174,6 +182,7 @@ const HistoryRow: React.FC<{ row: BetHistoryRow; wallet: string }> = ({ row, wal
             variant="chip"
             label={`${row.asset} ${row.direction}${isDemo ? ' · demo round' : ''}`}
           />
+          {seals && !isDemo ? <ArkivChip seals={seals} betId={String(row.id)} ledgerPayout={row.payout} /> : null}
         </div>
       </td>
     </tr>

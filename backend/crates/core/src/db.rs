@@ -91,7 +91,16 @@ const MIGRATIONS: &[&str] = &[
        expires_at INTEGER
      ) STRICT;
      CREATE INDEX agent_decisions_by_session ON agent_decisions(session_id, created_at);",
-    // 4: World ID human checks that unlock YOLO agents.
+    // 4: each settled round is sealed on Arkiv; a settled round with no seal row is the outbox.
+    "CREATE TABLE IF NOT EXISTS arkiv_seals ( \
+       bet_id    TEXT PRIMARY KEY REFERENCES bet_rounds(bet_id), \
+       tx        TEXT NOT NULL, \
+       sent_at   INTEGER NOT NULL, \
+       key       TEXT, \
+       block     INTEGER \
+     ) STRICT; \
+     CREATE INDEX IF NOT EXISTS arkiv_seals_by_tx ON arkiv_seals (tx);",
+    // 5: World ID human checks that unlock YOLO agents.
     "CREATE TABLE world_attempts (
        id           TEXT PRIMARY KEY,
        wallet       TEXT NOT NULL,
@@ -117,7 +126,7 @@ const MIGRATIONS: &[&str] = &[
        linked_at INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX world_links_by_human ON world_links(iss, sub);",
-    // 5: house commitments of settled round epochs on Arc.
+    // 6: house commitments of settled round epochs on Arc.
     "CREATE TABLE round_commits (
        epoch            INTEGER PRIMARY KEY,
        root             TEXT NOT NULL,
@@ -126,7 +135,7 @@ const MIGRATIONS: &[&str] = &[
        created_at       INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
      ) STRICT;
      CREATE INDEX bet_rounds_by_end ON bet_rounds(end_time);",
-    // 6: a World ID check also resumes a YOLO agent paused for its human.
+    // 7: a World ID check also resumes a YOLO agent paused for its human.
     "ALTER TABLE world_attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'start' CHECK (kind IN ('start', 'checkpoint'));",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.

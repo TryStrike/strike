@@ -1,8 +1,8 @@
 //! `/api/prices/stream` — the SSE feed.
 //!
-//! Pushes `data: {"asset":"BTC","price":111111.5,"ts":1700000000000}` the moment
-//! the aggregated feed moves, primed with one snapshot frame per asset on
-//! connect so a client never waits for a change to get its first tick. Comment
+//! Pushes `data: {"ts":1700000000000,"prices":{"BTC":111111.5}}` on a fixed beat
+//! when prices moved, primed with one frame on connect so a client never waits
+//! for a change to get its first prices. Comment
 //! heartbeats every 15 s keep proxies from idle-killing the stream; the client
 //! treats this as an optimisation only, and the 1 s poll of `/api/prices/latest`
 //! stays the automatic fallback.
@@ -50,7 +50,7 @@ async fn get_stream(Query(query): Query<StreamQuery>) -> Response {
         return json_error(StatusCode::SERVICE_UNAVAILABLE, "Stream unavailable");
     };
     stream::ensure_pump_running();
-    stream::spawn_prime(subscription.id(), assets);
+    stream::prime(subscription.id(), &assets);
 
     let body = axum::body::Body::from_stream(render_stream(subscription, receiver));
     (StatusCode::OK, sse_headers(), body).into_response()

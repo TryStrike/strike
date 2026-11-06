@@ -179,20 +179,6 @@ export const QuickTour: React.FC<{
             position: 'bottom' as const,
         },
         {
-            target: '[data-tour="draw-mode"]',
-            title: 'Draw: your own range',
-            content: 'Drag a rectangle on the chart to set both the price range and the window.',
-            howTo: [
-                'Enter an amount (drawn rounds use a fixed 5-second window)',
-                'Drag on the chart to draw a box',
-                'Height is the price range, width the time',
-                'Release, then confirm the round',
-            ],
-            win: 'the price stays inside your box until the round expires.',
-            note: 'Losing rounds forfeit the stake you placed.',
-            position: 'bottom' as const,
-        },
-        {
             target: '[data-tour="deposit-section"]',
             title: 'Fund your balance',
             content: `Rounds settle in USDC on ${networkName}. Keep your balance topped up to place more rounds.`,
@@ -247,7 +233,6 @@ export const QuickTour: React.FC<{
 
         if (step.target === '[data-tour="classic-mode"]') setGameMode('binomo');
         if (step.target === '[data-tour="box-mode"]') setGameMode('box');
-        if (step.target === '[data-tour="draw-mode"]') setGameMode('draw');
         if (step.target === '[data-tour="wallet-tab"]') setActiveTab('bet');
         if (step.target === '[data-tour="deposit-section"]') setActiveTab('wallet');
     }, [currentStep, isOpen, steps, setGameMode, setActiveTab]);
