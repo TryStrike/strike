@@ -8,9 +8,7 @@ import { Badge, Button, Segmented, glassSelected } from '@/components/ui/kit';
 import { ArrowUpRight, CheckCircle, CircleNotch, WarningCircle } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
-import dynamic from 'next/dynamic';
 
-const Bridge = dynamic(() => import('./Bridge'), { ssr: false });
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
@@ -665,7 +663,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         </a>
       )}
 
-      {config.chainId === 5042002 && asset === 'USDC' && <Bridge direction="in" onArrived={() => void useStore.getState().refreshWalletBalance()} />}
 
       {ARC_ASSETS.length > 1 && (
         <Segmented
