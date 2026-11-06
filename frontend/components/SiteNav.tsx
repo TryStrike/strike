@@ -10,6 +10,7 @@ import { useAiModeToggle } from '@/lib/useTheme';
 
 const LINKS = [
   { href: '/trade', label: 'Trade' },
+  { href: '/markets', label: 'Markets' },
   { href: '/history', label: 'History' },
 ];
 

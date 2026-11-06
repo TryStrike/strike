@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation';
 import { SiteNav } from './SiteNav';
 import { WalletConnect } from './wallet';
 
-const OWN_NAV = ['/', '/trade', '/history', '/agent'];
+const OWN_NAV = ['/', '/trade', '/history', '/agent', '/markets'];
 
 export function Header() {
   const pathname = usePathname();
