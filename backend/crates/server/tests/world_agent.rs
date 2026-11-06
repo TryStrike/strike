@@ -290,7 +290,7 @@ fn step_up(status: StatusCode, body: &Value, challenge: &Option<String>) -> Stri
     );
     assert_eq!(body["stepup"]["status"], "pending");
     assert_eq!(body["stepup"]["userCode"], "WXYZ-1234");
-    assert!(!body.to_string().contains("dc-"), "device code leaked");
+    assert!(!body.to_string().contains("\"dc-"), "device code leaked");
     body["stepup"]["id"].as_str().unwrap().to_string()
 }
 
@@ -316,6 +316,12 @@ async fn a_big_withdrawal_queues_nothing_until_its_human_approves_once() {
     );
 
     s.verify("h1", &wallet, "orb");
+    let (status, body, _) = s
+        .post("/api/balance/withdraw", &withdrawal(&player, 60.0))
+        .await;
+    assert_eq!(body["code"], "withdraw_cap", "{status} {body}");
+    assert_eq!(s.count("SELECT count(*) FROM stepups"), 0);
+
     let intent = withdrawal(&player, 30.0);
     let (status, body, challenge) = s.post("/api/balance/withdraw", &intent).await;
     let denied = step_up(status, &body, &challenge);

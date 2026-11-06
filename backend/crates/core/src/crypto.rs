@@ -20,7 +20,7 @@ const DEFAULT_SETTLEMENT_TTL_SECONDS: i64 = 5 * 60;
 const MIN_SETTLEMENT_TTL_SECONDS: i64 = 60;
 
 /// Withdrawal-intent freshness windows.
-pub const MAX_INTENT_AGE_MS: i64 = 5 * 60 * 1000;
+pub const MAX_INTENT_AGE_MS: i64 = 10 * 60 * 1000;
 pub const MAX_CLOCK_SKEW_MS: i64 = 60 * 1000;
 pub const MAX_ACCEPT_INTENT_AGE_MS: i64 = 10 * 60 * 1000;
 

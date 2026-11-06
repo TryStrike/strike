@@ -12,6 +12,7 @@ use crate::money::parse_decimal;
 use crate::rpc;
 use crate::world;
 
+#[derive(Clone)]
 pub struct QueueRequest {
     pub user_key: String,
     pub variants: Vec<String>,
@@ -297,6 +298,20 @@ pub async fn queue(db: &Db, request: QueueRequest) -> Result<Queued, Rejection> 
     .await
     .unwrap_or_else(|err| {
         tracing::error!("[withdraw] failed to queue withdrawal request: {err}");
+        Err(ledger::withdraw_insert_failed())
+    })
+}
+
+pub async fn dry_run(db: &Db, request: QueueRequest) -> Result<(), Rejection> {
+    db.write(move |conn| {
+        let tx = conn.savepoint()?;
+        let outcome = queue_in_transaction(&tx, &request)?;
+        drop(tx);
+        Ok(outcome.map(|_| ()))
+    })
+    .await
+    .unwrap_or_else(|err| {
+        tracing::error!("[withdraw] failed to check withdrawal limits: {err}");
         Err(ledger::withdraw_insert_failed())
     })
 }

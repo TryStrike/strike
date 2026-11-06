@@ -28,7 +28,7 @@ export interface AgentState {
   stepup: StepUp | null;
 }
 
-const START_VALID_MS = 5 * 60_000;
+const START_VALID_MS = 9 * 60_000;
 /** A reconnect replays many rows at once, and they need one balance fetch. */
 const BALANCE_SETTLE_MS = 300;
 const STATE_POLL_MS = 3_000;

@@ -632,6 +632,7 @@ async fn withdraw_human_check(
     body: &Value,
     wallet: &str,
     head: &ledger::WithdrawHead<'_>,
+    request: &withdrawals::QueueRequest,
 ) -> Result<(), ledger::Rejection> {
     let unavailable = |err: ApiError| {
         tracing::error!("[withdraw] human check failed: {err}");
@@ -656,6 +657,7 @@ async fn withdraw_human_check(
             .await
             .map_err(unavailable)?,
         None => {
+            withdrawals::dry_run(database, request.clone()).await?;
             let action = Action {
                 kind: "withdraw",
                 key,
@@ -739,26 +741,23 @@ async fn withdraw_run(body: &Value) -> Result<Withdrawal, ledger::Rejection> {
         tracing::error!("[withdraw] database unavailable: {err}");
         ledger::withdraw_insert_failed()
     })?;
-    withdraw_human_check(database, body, user_address, &head).await?;
+    let request = withdrawals::QueueRequest {
+        user_key: address::canonical(user_address),
+        variants,
+        ledger_address: db_address,
+        currency: head.currency.clone(),
+        amount: head.amount.clone(),
+        amount_num: head.amount_num,
+        signature: signature.cloned().unwrap_or(Value::Null),
+        signed_at: signed_at.cloned().unwrap_or(Value::Null),
+        frequency_exempt: ledger::frequency_review_exempt(
+            user_address,
+            &config().withdrawal_frequency_exempt,
+        ),
+    };
+    withdraw_human_check(database, body, user_address, &head, &request).await?;
 
-    let queued = withdrawals::queue(
-        database,
-        withdrawals::QueueRequest {
-            user_key: address::canonical(user_address),
-            variants,
-            ledger_address: db_address,
-            currency: head.currency.clone(),
-            amount: head.amount.clone(),
-            amount_num: head.amount_num,
-            signature: signature.cloned().unwrap_or(Value::Null),
-            signed_at: signed_at.cloned().unwrap_or(Value::Null),
-            frequency_exempt: ledger::frequency_review_exempt(
-                user_address,
-                &config().withdrawal_frequency_exempt,
-            ),
-        },
-    )
-    .await?;
+    let queued = withdrawals::queue(database, request).await?;
 
     match queued {
         withdrawals::Queued::Replay(existing) => {
