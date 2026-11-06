@@ -535,7 +535,7 @@ export default function WithdrawalsPage() {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Search request id / tx hash / asset…"
-                  className="w-full bg-ink/40 border border-line rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-faint outline-none focus:border-line"
+                  className="w-full bg-ink/40 border border-line rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-faint outline-none focus:border-ink/40"
                 />
               </div>
             </div>

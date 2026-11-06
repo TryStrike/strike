@@ -39,7 +39,6 @@ const MINUTES = [
 type Limits = Pick<StartLimits, "mode" | "minutes">;
 type Amount = "budget" | "maxPerTrade" | "stopLoss";
 const AMOUNT_INPUT = /^\d*\.?\d*$/;
-const NORMAL_STAKE = 1;
 
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
@@ -62,9 +61,9 @@ export function AgentPanel() {
     minutes: 15,
   });
   const [amounts, setAmounts] = useState<Record<Amount, string>>({
-    budget: "20",
-    maxPerTrade: "2",
-    stopLoss: "5",
+    budget: "1",
+    maxPerTrade: "0.2",
+    stopLoss: "0.8",
   });
   const running = session?.status === "running";
   const sessionAsset = session?.asset;
@@ -93,7 +92,6 @@ export function AgentPanel() {
   const budget = Number(amounts.budget);
   const maxPerTrade = Number(amounts.maxPerTrade);
   const stopLoss = Number(amounts.stopLoss);
-  const smallestStake = limits.mode === "normal" ? NORMAL_STAKE : maxPerTrade;
 
   const checks = (
     <>
@@ -223,19 +221,19 @@ export function AgentPanel() {
       <p className="-mt-3 text-xs text-faint">
         {limits.mode === "yolo"
           ? `The agent trades ${asset} on its own at up to your per trade cap. YOLO needs a fresh World ID check. One human, one YOLO agent. Budgets over 10 USDC need Orb, over 50 need Orb + face. At half the stop-loss it pauses until you check again.`
-          : `You approve every trade on ${asset}. 1 USDC each, and a proposal you don't answer in 5 seconds is skipped.`}
+          : `You approve every trade on ${asset}, up to your per trade cap. A proposal you don't answer in 5 seconds is skipped.`}
       </p>
 
       {address && (
         <p
           className={cx(
             "-mt-3 text-xs",
-            houseBalance < smallestStake ? "text-down" : "text-faint",
+            houseBalance < maxPerTrade ? "text-down" : "text-faint",
           )}
         >
           House balance {houseBalance.toFixed(4)} USDC.
-          {houseBalance < smallestStake &&
-            ` Trades need ${smallestStake} USDC, deposit on Trade first.`}
+          {houseBalance < maxPerTrade &&
+            ` Trades need ${maxPerTrade} USDC, deposit on Trade first.`}
         </p>
       )}
 

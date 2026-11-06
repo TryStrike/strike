@@ -236,7 +236,7 @@ export default function MarketsPage() {
                   ))}
                 </div>
                 <div className="ml-auto flex items-center gap-2">
-                  <label className="flex h-8 items-center gap-1.5 rounded-full bg-surface px-3 text-xs text-muted">
+                  <label className="flex h-8 items-center gap-1.5 rounded-full bg-surface px-3 text-xs text-muted focus-within:ring-1 focus-within:ring-ink/40">
                     <MagnifyingGlass size={13} aria-hidden="true" />
                     <input
                       value={query}

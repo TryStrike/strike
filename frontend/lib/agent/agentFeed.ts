@@ -98,7 +98,7 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     if (session.status === "running")
       localStorage.setItem(LIVE_UNTIL, String(session.endsAt));
     else localStorage.removeItem(LIVE_UNTIL);
-    set({ session });
+    if (session.status === "running" || get().session) set({ session });
   },
   showDecision: (decision) =>
     set((s) => ({
