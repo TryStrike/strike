@@ -53,7 +53,7 @@ you need a Bee node on Swarm testnet with a usable postage batch (a light node a
 
 ## in the demo video
 
-`[timestamp]`: a settled round's proof, then "Epoch on Arkiv", then "Every round + proof on Swarm", and the file opens
+after a round settles, the video opens its proof, then "Epoch on Arkiv", then "Every round + proof on Swarm", and the proof file opens straight from Swarm
 
 ## what got in our way
 
