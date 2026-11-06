@@ -59,6 +59,10 @@ a stock buy finds your USDC wherever it is: your Arc wallet first, then your Gat
 
 every 10 minutes the server rolls that batch's settled rounds into one fingerprint (a Merkle root) and stores it in the vault with `commitRounds`. it's write once. anyone can then check a single round with `verifyRound(epoch, leaf, proof)`. the results themselves are public on Arkiv, and the full proof file is on Swarm, see [arkiv/](../arkiv)
 
+## built for reuse
+
+we pulled the vault out into its own template so other builders can drop it in: [arc-provable-vault](https://github.com/TryStrike/arc-provable-vault) (MIT). it's `StrikeTreasury` made general: any token with per transaction and per day payout caps, an owner and an operator, write once Merkle batch commits with on-chain verification, and CCTP payouts to other chains. 102 Foundry tests, fuzzing and reentrancy cases included, plus a deploy script and a guide to building the Merkle tree off chain
+
 ## built in Arc Studio
 
 the Strike project lives in Arc Studio: the contracts, their tests and the app. the vault was deployed from Studio
