@@ -17,13 +17,13 @@ use strike_core::agent;
 use strike_core::bets::now_ms;
 use strike_core::config::config;
 use strike_core::crypto::{self, AgentClaims, AGENT_COOKIE};
-use strike_core::db;
+use strike_core::db::{self, Db};
 use strike_core::error::ApiError;
 use strike_core::eth;
 use strike_core::ledger::Rejection;
 use strike_core::prices;
 use strike_core::stream;
-use strike_core::world;
+use strike_core::world::{self, HumanGrant};
 
 use crate::agent as live;
 use crate::bans;
@@ -100,14 +100,33 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
             Err(rejection) => reject(rejection),
         });
     }
-    let session = match agent::create_session(database, terms, now, None).await? {
-        Ok(session) => session,
-        Err(rejection) => return Ok(reject(rejection)),
-    };
-    Ok(http::json_with_cookie(
-        json!({ "session": session.to_json() }),
-        started(session)?,
-    ))
+    Ok(match start_session(database, terms, now, None).await? {
+        Ok((session, cookie)) => http::json_with_cookie(json!({ "session": session }), cookie),
+        Err(rejection) => reject(rejection),
+    })
+}
+
+/// Its own task: a client hanging up after the row commits must not leave a
+/// running session with no task and no cookie.
+pub(crate) async fn start_session(
+    database: &'static Db,
+    terms: agent::StartTerms,
+    now: i64,
+    human: Option<HumanGrant>,
+) -> Result<Result<(Value, Cookie), Rejection>, ApiError> {
+    tokio::spawn(async move {
+        Ok(
+            match agent::create_session(database, terms, now, human).await? {
+                Ok(session) => Ok((session.to_json(), started(session)?)),
+                Err(rejection) => Err(rejection),
+            },
+        )
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!("[agent] start task failed: {err}");
+        ApiError::internal("Agent start failed")
+    })?
 }
 
 /// RFC 9470 step-up: the browser goes to `verifyUrl`, and only this browser,

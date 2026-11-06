@@ -21,8 +21,6 @@ use crate::eth::{self, Rpc, Treasury};
 pub const EPOCH_MS: i64 = 600_000;
 /// An epoch commits this long after it ends, so the sweeper has settled it.
 pub const CLOSE_GRACE_MS: i64 = 60_000;
-/// The largest epoch whose bounds still fit in microseconds.
-pub const MAX_EPOCH: u64 = (i64::MAX / 1_000 / EPOCH_MS - 1) as u64;
 const COMMIT_EVERY: Duration = Duration::from_secs(30);
 /// A failing commit waits 30 s, doubling to about an hour, so a revert can't burn gas every pass.
 const MAX_BACKOFF_DOUBLINGS: u32 = 7;
@@ -32,7 +30,7 @@ pub fn epoch_of(end_time_us: i64) -> u64 {
     end_time_us.div_euclid(1_000).div_euclid(EPOCH_MS) as u64
 }
 
-/// `[start, end)` of epoch `n` in milliseconds. `n` is at most [`MAX_EPOCH`].
+/// `[start, end)` of epoch `n` in milliseconds.
 pub fn epoch_bounds(n: u64) -> (i64, i64) {
     let start = n as i64 * EPOCH_MS;
     (start, start + EPOCH_MS)
@@ -246,23 +244,16 @@ fn read_epoch_rows(conn: &Connection, n: u64) -> ApiResult<EpochRows> {
 /// A `round_commits` row.
 pub struct Commit {
     pub root: String,
-    pub rounds: i64,
     pub tx_hash: String,
-    pub created_at_us: i64,
 }
 
 fn read_commit(conn: &Connection, n: u64) -> ApiResult<Option<Commit>> {
     Ok(conn
-        .prepare_cached(
-            "SELECT root, rounds, tx_hash, created_at \
-             FROM round_commits WHERE epoch = ?1",
-        )?
+        .prepare_cached("SELECT root, tx_hash FROM round_commits WHERE epoch = ?1")?
         .query_row([n as i64], |r| {
             Ok(Commit {
                 root: r.get(0)?,
-                rounds: r.get(1)?,
-                tx_hash: r.get(2)?,
-                created_at_us: r.get(3)?,
+                tx_hash: r.get(1)?,
             })
         })
         .optional()?)
@@ -685,8 +676,6 @@ mod tests {
         assert_eq!(epoch_of(EPOCH_MS * 1_000 - 1), 0);
         assert_eq!(epoch_of(EPOCH_MS * 1_000), 1);
         assert_eq!(epoch_bounds(3), (3 * EPOCH_MS, 4 * EPOCH_MS));
-        let (_, end) = epoch_bounds(MAX_EPOCH);
-        assert!(end.checked_mul(1_000).is_some());
     }
 
     #[test]

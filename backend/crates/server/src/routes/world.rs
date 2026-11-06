@@ -22,7 +22,7 @@ use strike_core::world::{self, Attempt, WORLD_COOKIE};
 
 use crate::agent as live;
 use crate::http::{self, Cookie};
-use crate::routes::agent::{started, AGENTS_NOT_CONFIGURED};
+use crate::routes::agent::{start_session, AGENTS_NOT_CONFIGURED};
 
 pub fn routes() -> Router {
     Router::new()
@@ -104,7 +104,7 @@ impl Drop for Redeeming {
 /// The agent cookie on approval. `Err(Some)` is an outcome to record,
 /// `Err(None)` one the session write already recorded.
 async fn decide(
-    database: &Db,
+    database: &'static Db,
     headers: &HeaderMap,
     query: &HashMap<String, String>,
     attempt: &Attempt,
@@ -162,8 +162,8 @@ async fn decide(
         }
         return Ok(Err(None));
     };
-    match agent::create_session(database, terms, now, Some(grant)).await? {
-        Ok(session) => Ok(Ok(started(session)?)),
+    match start_session(database, terms, now_ms(), Some(grant)).await? {
+        Ok((_, cookie)) => Ok(Ok(cookie)),
         Err(_) => Ok(Err(None)),
     }
 }
