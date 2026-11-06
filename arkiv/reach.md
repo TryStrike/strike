@@ -24,6 +24,8 @@ yes. it's live on Arc testnet at [strike.fastship.studio](https://strike.fastshi
 2. connect a wallet and verify as a human with World ID (the simulator works on testnet)
 3. deposit, play a round, then open the history tab and see it Verified
 
+anyone can check any round at [strike.fastship.studio/verify](https://strike.fastship.studio/verify), no account needed
+
 during the event, Strike has sealed about 270 settled rounds on Arkiv, players' own keys have written 100+ bets, and 6 batch entities point to proof files. one production batch of 18 rounds checks out end to end, Arkiv to Swarm to Arc, with [`scripts/verify-epoch.mjs`](../scripts/verify-epoch.mjs)
 
 ## after Mumbai
@@ -32,4 +34,4 @@ we're three people and we want to keep building it:
 
 - move to Arc mainnet when it opens, with real USDC and EURC
 - more markets, and the AI agent for everyone
-- keep the history public on Arkiv so others can build on it, and add a page anyone can use to check a round by its id
+- keep the history public on Arkiv so others can build on it
