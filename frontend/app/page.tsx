@@ -9,6 +9,7 @@ import { explorerAddressUrl, getArcConfig } from '@/lib/arc/config';
 import { BRAND } from '@/lib/brand';
 import { SiteNav } from '@/components/SiteNav';
 import { ArcProof } from '@/components/landing/ArcProof';
+import { Features, ProofLadder } from '@/components/landing/MoreSections';
 import { glassPrimary } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
 import { ArrowDown, ArrowUp, ArrowUpRight, Minus } from '@phosphor-icons/react';
@@ -229,7 +230,7 @@ export default function Landing() {
               </div>
               <div className="px-4 pb-4 pt-5">
                 <div className="text-[17px] font-semibold tracking-tight">Deposit</div>
-                <div className="mt-1 text-[15px] text-subtle">USDC in, on Arc.</div>
+                <div className="mt-1 text-[15px] text-subtle">USDC from any chain, on Arc.</div>
               </div>
             </BlurFade>
 
@@ -275,6 +276,10 @@ export default function Landing() {
           </BlurFade>
         </div>
       </section>
+
+      <ProofLadder />
+
+      <Features />
 
       <ArcProof />
 
