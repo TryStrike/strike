@@ -19,7 +19,7 @@ interface BetProof {
   proof: Hex[] | null;
   house_root: Hex | null;
   commit_tx: Hex | null;
-  status: 'pending' | 'committed';
+  status: 'pending' | 'committed' | 'off';
 }
 
 type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; data: BetProof; at: number };
@@ -149,6 +149,14 @@ export default function OnchainProof({ betId }: { betId: string }) {
 const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
   const { epoch, status, commit_tx } = data;
   const epochLine = <span className="font-jet text-subtle">epoch {epoch}</span>;
+
+  if (status === 'off') {
+    return (
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
+        Onchain proofs are off on this server, so {epochLine} will not be committed to Arc.
+      </p>
+    );
+  }
 
   if (status === 'pending' && at >= data.end_ms) {
     return <p className="mt-1.5 text-[11px] leading-relaxed text-muted">Not committed onchain yet for {epochLine}.</p>;

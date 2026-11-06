@@ -22,12 +22,21 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
     const started = performance.now();
     const clock = setInterval(() => setWaited(performance.now() - started), 100);
     const ctrl = new AbortController();
-    fetch(`/api/arkiv/bets/${encodeURIComponent(betId)}/seal`, { credentials: 'include', signal: ctrl.signal })
-      .then((res) => {
-        if (res.status === 503) return { sealed: false, off: true };
-        return res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`));
-      })
-      .then(async (s: Seal) => setSeal(s.sealed && s.key ? { ...s, entity: await readSealedEntity(s.key, ctrl.signal) } : s))
+    // The server holds each ask up to 25 s; a round still settling or queued gets asked again.
+    const ask = (): Promise<void> =>
+      fetch(`/api/arkiv/bets/${encodeURIComponent(betId)}/seal`, { credentials: 'include', signal: ctrl.signal })
+        .then((res) => {
+          if (res.status === 503) return { sealed: false, off: true };
+          return res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`));
+        })
+        .then(async (s: Seal) => {
+          if (!s.sealed && !s.off && !ctrl.signal.aborted) {
+            setSeal(s);
+            return ask();
+          }
+          setSeal(s.sealed && s.key ? { ...s, entity: await readSealedEntity(s.key, ctrl.signal) } : s);
+        });
+    ask()
       .catch((err) => {
         if (ctrl.signal.aborted) return;
         console.error('[arkiv] seal fetch failed', betId, err);
@@ -45,23 +54,23 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
   return (
     <div data-testid="arkiv-seal" className="mt-3 flex items-center justify-between gap-3 rounded-3xl border border-line px-4 py-3">
       <div className="min-w-0">
-        <div className="text-[11px] uppercase tracking-[0.08em] text-subtle">Arkiv</div>
+        <div className="text-[11px] uppercase tracking-[0.08em] text-subtle">Public record</div>
         <div className="mt-0.5 text-xs">
           {failed ? (
-            <span className="text-down">Could not read the seal ({failed})</span>
+            <span className="text-down">Could not read the public record ({failed})</span>
           ) : !seal ? (
-            <span className="font-jet text-muted">Sealing… {(waited / 1000).toFixed(1)}s</span>
+            <span className="text-muted">Verifying… <span className="font-jet">{(waited / 1000).toFixed(1)}s</span></span>
           ) : seal.off ? (
-            <span className="text-muted">Arkiv sealing is unavailable on this server</span>
+            <span className="text-muted">Public records are off on this server</span>
           ) : !seal.sealed ? (
-            <span className="text-muted">{seal.settled ? 'Queued for the next block' : 'Sealed once the round settles'}</span>
+            <span className="text-muted">{seal.settled ? 'Publishing in the next block' : 'Published once the round settles'}</span>
           ) : !seal.entity ? (
-            <span className="text-down">Our server says sealed, but Arkiv has no such entity</span>
+            <span className="text-down">Our server says published, but the record is missing on Arkiv</span>
           ) : ok === false ? (
-            <span className="text-down">Sealed in block #{seal.block}, does not match the ledger</span>
+            <span className="text-down">The public record does not match your payout</span>
           ) : (
             <span className="text-ink">
-              Sealed in block #{seal.block}, <span className="text-up">matches the ledger</span>
+              <span className="text-up">Verified.</span> Your payout matches the public record on Arkiv, block #{seal.block}
             </span>
           )}
         </div>
@@ -73,7 +82,7 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
           rel="noopener noreferrer"
           className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-muted ring-1 ring-line"
         >
-          Verify <ArrowUpRight size={12} />
+          View record <ArrowUpRight size={12} />
         </a>
       ) : null}
     </div>

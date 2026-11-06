@@ -110,13 +110,25 @@ export function useArkivSeals(wallet: string, betIds: string[]): { seals: ArkivS
       );
       setSeals({ query, byBet });
       setError(null);
+      return byBet.size >= list.length;
     };
-    run().catch((err) => {
-      if (ctrl.signal.aborted) return;
-      console.error('[arkiv] seal lookup failed', err);
-      setError(String(err.message ?? err));
-    });
-    return () => ctrl.abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () =>
+      run()
+        .then((done) => {
+          // A round settles seconds before its seal lands, so look again until every row has one.
+          if (!done && !ctrl.signal.aborted) timer = setTimeout(poll, 10_000);
+        })
+        .catch((err) => {
+          if (ctrl.signal.aborted) return;
+          console.error('[arkiv] seal lookup failed', err);
+          setError(String(err.message ?? err));
+        });
+    void poll();
+    return () => {
+      ctrl.abort();
+      clearTimeout(timer);
+    };
   }, [wallet, ids]);
 
   return { seals, error };

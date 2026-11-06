@@ -13,7 +13,7 @@ export function ArkivSummary({
   rows: Array<{ id: string; payout: number | string | null | undefined }>;
 }) {
   if (error) {
-    return <p className="font-jet text-[11px] text-down">Arkiv could not be read ({error}). The ledger above is unaffected.</p>;
+    return <p className="font-jet text-[11px] text-down">Could not reach the public record on Arkiv ({error}). Your history above is unaffected.</p>;
   }
   if (!seals || rows.length === 0) return null;
 
@@ -23,11 +23,11 @@ export function ArkivSummary({
   return (
     <details className="font-jet text-[11px] text-subtle">
       <summary className="cursor-pointer">
-        Arkiv: {sealed.length} of {rows.length} rounds sealed
-        {sealed.length > 0 ? (mismatched === 0 ? ', all match the ledger' : `, ${mismatched} ${mismatched === 1 ? 'does' : 'do'} not match the ledger`) : ''}.
-        Verify yourself
+        {sealed.length} of {rows.length} rounds verified against the public record
+        {sealed.length > 0 ? (mismatched === 0 ? ', all payouts match' : `, ${mismatched} ${mismatched === 1 ? 'does' : 'do'} not match`) : ''}.
+        Check it yourself
       </summary>
-      <p className="mt-1.5 break-all leading-relaxed text-faint">Your browser ran this on {ARKIV_RPC}, not through our server:</p>
+      <p className="mt-1.5 break-all leading-relaxed text-faint">Your browser asked Arkiv directly ({ARKIV_RPC}), not our server, with this query:</p>
       <p className="mt-1 break-all leading-relaxed text-ink">{seals.query}</p>
     </details>
   );

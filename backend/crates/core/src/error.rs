@@ -17,11 +17,19 @@ pub enum ApiError {
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
     #[error("{0}")]
     Other(String),
+}
+
+/// Some RPC URLs carry an access key in the path, so a request error drops its URL
+/// before it can reach a log line or a response body.
+impl From<reqwest::Error> for ApiError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Http(err.without_url())
+    }
 }
 
 impl ApiError {
@@ -126,3 +134,19 @@ impl IntoResponse for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_request_error_never_carries_the_url() {
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/ark_live_secret")
+            .send()
+            .await
+            .unwrap_err();
+        let shown = ApiError::from(err).to_string();
+        assert!(!shown.contains("ark_live_secret"), "{shown}");
+    }
+}

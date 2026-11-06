@@ -31,7 +31,11 @@ const FLAG_READONLY: u8 = 1;
 const LIFETIME_BLOCKS: u64 = 7_800_000;
 // ponytail: one batch of 50 in flight per tick, pipeline nonces if seals lag behind settlement.
 const BATCH: i64 = 50;
-const TICK: Duration = Duration::from_secs(2);
+/// The Rabdi RPC answers 413 to request bodies past about 200 KB, and a batch goes
+/// up twice as hex (estimate, then the signed tx). 60 KB of calldata keeps both well under.
+const MAX_CALLDATA: usize = 60_000;
+// Idle ticks are one SQLite read; a pending batch costs one receipt call per tick.
+const TICK: Duration = Duration::from_millis(500);
 const DROPPED_AFTER_US: i64 = 60_000_000;
 
 const STR: u8 = 8;
@@ -216,6 +220,17 @@ impl Sealed {
 }
 
 /// `execute(ops)` calldata creating one entity per round, in order.
+/// The longest prefix of `rounds` whose calldata fits under [`MAX_CALLDATA`]; the rest wait a tick.
+fn fit(mut rounds: Vec<Sealed>, salt: impl Fn(usize) -> u128) -> ApiResult<(Vec<Sealed>, Vec<u8>)> {
+    loop {
+        let data = calldata(&rounds, &salt)?;
+        if data.len() <= MAX_CALLDATA || rounds.len() == 1 {
+            return Ok((rounds, data));
+        }
+        rounds.truncate(rounds.len() / 2);
+    }
+}
+
 fn calldata(rounds: &[Sealed], salt: impl Fn(usize) -> u128) -> ApiResult<Vec<u8>> {
     let ops = rounds
         .iter()
@@ -326,7 +341,7 @@ impl Arkiv {
             return Ok(());
         }
         let _sending = self.sending.lock().await;
-        let data = calldata(&rounds, |_| uuid::Uuid::new_v4().as_u128())?;
+        let (rounds, data) = fit(rounds, |_| uuid::Uuid::new_v4().as_u128())?;
         let data_hex = format!("0x{}", hex::encode(&data));
         let nonce = self
             .rpc
@@ -587,4 +602,41 @@ pub async fn record_key(key: &str, wallet: &str, expires_ms: i64, fund_tx: &str)
             Ok(())
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round(i: usize) -> Sealed {
+        Sealed {
+            bet_id: format!("bet_1793967557194_{i:012x}"),
+            wallet: "0x0f05df479fcb23b2281e28813fb47e57e47d1bb7".into(),
+            currency: "USDC".into(),
+            asset: "BTC".into(),
+            mode: "binomo".into(),
+            direction: "UP".into(),
+            stake: 100_000,
+            multiplier: 175,
+            strike_price: 8_146_001_000_000,
+            end_price: Some(8_146_002_000_000),
+            outcome: "win".into(),
+            payout: 175_000,
+            settled_at_us: 1_793_967_557_194_000,
+        }
+    }
+
+    #[test]
+    fn a_full_backlog_is_split_under_the_rpc_body_limit() {
+        let all: Vec<Sealed> = (0..BATCH as usize).map(round).collect();
+        let whole = calldata(&all, |i| i as u128).unwrap().len();
+        let (kept, data) = fit(all, |i| i as u128).unwrap();
+        assert!(data.len() <= MAX_CALLDATA, "{} bytes", data.len());
+        assert!(!kept.is_empty());
+        println!(
+            "50 rounds = {whole} bytes, sent {} rounds in {} bytes",
+            kept.len(),
+            data.len()
+        );
+    }
 }

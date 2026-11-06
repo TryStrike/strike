@@ -239,11 +239,20 @@ pub async fn treasury_view() -> ApiResult<(u16, String)> {
     }
     .await;
 
+    // ponytail: one process-wide last-good body, fine for a single treasury.
+    static LAST_GOOD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut last = LAST_GOOD.lock().unwrap_or_else(|p| p.into_inner());
     match result {
-        Ok(body) => Ok((200, body)),
+        Ok(body) => {
+            *last = Some(body.clone());
+            Ok((200, body))
+        }
         Err(err) => {
-            tracing::warn!("[arc/treasury] RPC read failed: {err}");
-            Ok((502, RPC_UNAVAILABLE_BODY.to_string()))
+            tracing::warn!("[arc/treasury] RPC read failed, serving the last good panel: {err}");
+            Ok(match last.as_ref() {
+                Some(body) => (200, body.clone()),
+                None => (502, RPC_UNAVAILABLE_BODY.to_string()),
+            })
         }
     }
 }

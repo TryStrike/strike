@@ -304,6 +304,12 @@ fn flag_root_drift(n: u64, ours: &[u8; 32], commit: &Commit) {
 // committer
 // ---------------------------------------------------------------------------
 
+/// Whether this server's committer will ever write epoch `n` onchain.
+fn committer_covers(n: u64) -> bool {
+    let cfg = config();
+    cfg.treasury_secret_key.is_some() && cfg.proofs_start_epoch.is_some_and(|start| n >= start)
+}
+
 /// Commits every closed epoch from `PROOFS_START_EPOCH` on, one per pass, for the
 /// life of the process. Empty epochs are never committed.
 pub async fn run_committer() {
@@ -458,7 +464,7 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
             "proof": null,
             "house_root": null,
             "commit_tx": null,
-            "status": "pending",
+            "status": if committer_covers(n) { "pending" } else { "off" },
         })));
     };
     let leaves = leaves_of(&rows.rounds)?;
