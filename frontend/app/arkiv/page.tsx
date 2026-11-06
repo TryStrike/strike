@@ -29,6 +29,7 @@ const DIAGRAMS = [
 ];
 
 const CHECKS = [
+  { label: "Check any round", href: "/verify", internal: true },
   {
     label: "An epoch on Arkiv",
     href: "https://rabdi.explorer.arkiv.network/entity/0x59c5ddf06b5605e27833d0a02c8f6e96cebf9f334a6470b39e31eccb34895807",
@@ -95,8 +96,7 @@ export default function ArkivPage() {
               <li key={c.href}>
                 <a
                   href={c.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  {...(c.internal ? {} : { target: "_blank", rel: "noopener noreferrer" })}
                   className="inline-flex items-center gap-1.5 text-sm font-medium text-ink underline-offset-4 hover:underline"
                 >
                   {c.label}

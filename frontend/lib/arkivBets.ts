@@ -216,7 +216,7 @@ export interface OpenBet {
 const ASSET = /^[A-Z0-9]{2,10}$/;
 const IN_PLAY_REFRESH_MS = 5_000;
 
-async function signedByWallet(e: Record<string, string>): Promise<boolean> {
+export async function signedByWallet(e: Record<string, string>): Promise<boolean> {
   try {
     const signer = await recoverMessageAddress({
       message: delegationMessage(e.wallet, e.creator, Number(e.delegationExpires)),

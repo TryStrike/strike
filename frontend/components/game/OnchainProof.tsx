@@ -189,6 +189,11 @@ const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
   return (
     <>
       <ArcVerdict data={data} />
+      {data.round && (
+        <a href={`/verify?bet=${encodeURIComponent(data.round.betId)}`} className="mt-1 inline-block text-[11px] text-up underline-offset-2 hover:underline">
+          Check this round
+        </a>
+      )}
       {commit_tx && (
         <div className="mt-2 text-xs">
           <TxLink hash={commit_tx} label="House commit" />
