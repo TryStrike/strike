@@ -13,5 +13,8 @@ pub fn routes() -> Router {
 
 async fn list() -> impl IntoResponse {
     let snapshot = markets::snapshot().await;
-    ([(header::CACHE_CONTROL, "public, max-age=15")], Json(snapshot.as_ref().clone()))
+    (
+        [(header::CACHE_CONTROL, "public, max-age=15")],
+        Json(snapshot.as_ref().clone()),
+    )
 }

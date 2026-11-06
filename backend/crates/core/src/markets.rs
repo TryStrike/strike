@@ -31,28 +31,115 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// or a drained pool, not a deal, so it is shown as unquoted.
 const MAX_PREMIUM_BPS: f64 = 2_000.0;
 
-pub const TICKERS: &[&str] = &["NVDA", "AAPL", "TSLA", "META", "SPY", "AMZN", "GOOGL", "MSFT", "AMD", "NFLX"];
+pub const TICKERS: &[&str] = &[
+    "NVDA", "AAPL", "TSLA", "META", "SPY", "AMZN", "GOOGL", "MSFT", "AMD", "NFLX",
+];
 
 /// (issuer, ticker, token symbol, BSC contract). Public addresses, same book
 /// OpenVenue (MIT) ships in `src/lib/venue/issuers.ts`.
 const WRAPPERS: &[(&str, &str, &str, &str)] = &[
-    ("bStocks", "NVDA", "NVDAB", "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436"),
-    ("bStocks", "AAPL", "AAPLB", "0x431a3BEE82E2ca41e49895CbECE5bB0F76A89b7A"),
-    ("bStocks", "TSLA", "TSLAB", "0x5b1910eAaD6450E50f816082Aa078C41F10C292f"),
-    ("bStocks", "META", "METAB", "0x7425889FE94F9d693E8daefE88BCCed6AcFEf4c0"),
-    ("bStocks", "SPY", "SPYB", "0x7138b48df7D98D7e3cc221BfE7192D0a178182D8"),
-    ("bStocks", "AMZN", "AMZNB", "0x1a4b499833A79A09ad7Cf1D42D7DacF71e92eb00"),
-    ("bStocks", "GOOGL", "GOOGLB", "0x3F53De71c126BdaBAe20f9cD64848d317f6C3238"),
-    ("bStocks", "MSFT", "MSFTB", "0x80106cb3EAD06659A5ad19DF39D9b4733863B9b0"),
-    ("bStocks", "AMD", "AMDB", "0x75Fd4cF6f8392E41E70391D60c90C0D5211603a1"),
-    ("bStocks", "NFLX", "NFLXB", "0xD6829Ea836b6FA224d099D40E54B31262f874631"),
-    ("Ondo", "NVDA", "NVDAon", "0xA9eE28C80f960B889dFbd1902055218cBa016F75"),
-    ("Ondo", "AAPL", "AAPLon", "0x390a684EF9cADE28A7AD0DFa61AB1Eb3842618c4"),
-    ("Ondo", "TSLA", "TSLAon", "0x2494b603319d4D9F9715c9f4496d9E0364B59d93"),
-    ("Ondo", "SPY", "SPYon", "0x6a708EAD771238919D85930b5a0f10454E1C331a"),
-    ("Ondo", "AMZN", "AMZNon", "0x4553cFe1C09f37f38b12dC509F676964e392F8Fc"),
-    ("Ondo", "GOOGL", "GOOGLon", "0x091FC7778e6932d4009B087B191D1EE3bac5729A"),
-    ("xStocks", "NVDA", "NVDAx", "0xc845b2894dbddd03858fd2d643b4ef725fe0849d"),
+    (
+        "bStocks",
+        "NVDA",
+        "NVDAB",
+        "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+    ),
+    (
+        "bStocks",
+        "AAPL",
+        "AAPLB",
+        "0x431a3BEE82E2ca41e49895CbECE5bB0F76A89b7A",
+    ),
+    (
+        "bStocks",
+        "TSLA",
+        "TSLAB",
+        "0x5b1910eAaD6450E50f816082Aa078C41F10C292f",
+    ),
+    (
+        "bStocks",
+        "META",
+        "METAB",
+        "0x7425889FE94F9d693E8daefE88BCCed6AcFEf4c0",
+    ),
+    (
+        "bStocks",
+        "SPY",
+        "SPYB",
+        "0x7138b48df7D98D7e3cc221BfE7192D0a178182D8",
+    ),
+    (
+        "bStocks",
+        "AMZN",
+        "AMZNB",
+        "0x1a4b499833A79A09ad7Cf1D42D7DacF71e92eb00",
+    ),
+    (
+        "bStocks",
+        "GOOGL",
+        "GOOGLB",
+        "0x3F53De71c126BdaBAe20f9cD64848d317f6C3238",
+    ),
+    (
+        "bStocks",
+        "MSFT",
+        "MSFTB",
+        "0x80106cb3EAD06659A5ad19DF39D9b4733863B9b0",
+    ),
+    (
+        "bStocks",
+        "AMD",
+        "AMDB",
+        "0x75Fd4cF6f8392E41E70391D60c90C0D5211603a1",
+    ),
+    (
+        "bStocks",
+        "NFLX",
+        "NFLXB",
+        "0xD6829Ea836b6FA224d099D40E54B31262f874631",
+    ),
+    (
+        "Ondo",
+        "NVDA",
+        "NVDAon",
+        "0xA9eE28C80f960B889dFbd1902055218cBa016F75",
+    ),
+    (
+        "Ondo",
+        "AAPL",
+        "AAPLon",
+        "0x390a684EF9cADE28A7AD0DFa61AB1Eb3842618c4",
+    ),
+    (
+        "Ondo",
+        "TSLA",
+        "TSLAon",
+        "0x2494b603319d4D9F9715c9f4496d9E0364B59d93",
+    ),
+    (
+        "Ondo",
+        "SPY",
+        "SPYon",
+        "0x6a708EAD771238919D85930b5a0f10454E1C331a",
+    ),
+    (
+        "Ondo",
+        "AMZN",
+        "AMZNon",
+        "0x4553cFe1C09f37f38b12dC509F676964e392F8Fc",
+    ),
+    (
+        "Ondo",
+        "GOOGL",
+        "GOOGLon",
+        "0x091FC7778e6932d4009B087B191D1EE3bac5729A",
+    ),
+    (
+        "xStocks",
+        "NVDA",
+        "NVDAx",
+        "0xc845b2894dbddd03858fd2d643b4ef725fe0849d",
+    ),
 ];
 
 #[derive(Serialize, Clone)]
@@ -124,17 +211,34 @@ pub async fn snapshot() -> Arc<Markets> {
 async fn fetch() -> Markets {
     let (spark, quotes) = tokio::join!(fetch_spark(), fetch_quotes());
     let now = now_millis();
-    let session = spark.as_ref().map(|s| session_at(s, now / 1000)).unwrap_or("closed");
+    let session = spark
+        .as_ref()
+        .map(|s| session_at(s, now / 1000))
+        .unwrap_or("closed");
     let assets = TICKERS
         .iter()
         .map(|ticker| build_asset(ticker, spark.as_ref(), &quotes))
         .collect();
-    Markets { at: now, session, quote_usd: QUOTE_USD, assets }
+    Markets {
+        at: now,
+        session,
+        quote_usd: QUOTE_USD,
+        assets,
+    }
 }
 
 async fn fetch_spark() -> Option<Value> {
-    let url = format!("{SPARK_URL}?symbols={}&interval=5m&range=1d&_={}", TICKERS.join(","), now_millis());
-    match HTTP.get(&url).send().await.and_then(|r| r.error_for_status()) {
+    let url = format!(
+        "{SPARK_URL}?symbols={}&interval=5m&range=1d&_={}",
+        TICKERS.join(","),
+        now_millis()
+    );
+    match HTTP
+        .get(&url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
         Ok(res) => res.json().await.ok(),
         Err(err) => {
             tracing::warn!("[markets] yahoo failed: {}", err.without_url());
@@ -146,13 +250,13 @@ async fn fetch_spark() -> Option<Value> {
 /// Symbol -> (USDT per share, route exchanges) or the reason it has no quote.
 async fn fetch_quotes() -> HashMap<&'static str, Result<(f64, Vec<String>), String>> {
     let jobs: Vec<_> = WRAPPERS.iter().map(|w| quote_one(w.2, w.3)).collect();
-    stream::iter(jobs)
-        .buffer_unordered(6)
-        .collect()
-        .await
+    stream::iter(jobs).buffer_unordered(6).collect().await
 }
 
-async fn quote_one(symbol: &'static str, token: &'static str) -> (&'static str, Result<(f64, Vec<String>), String>) {
+async fn quote_one(
+    symbol: &'static str,
+    token: &'static str,
+) -> (&'static str, Result<(f64, Vec<String>), String>) {
     (symbol, quote(token).await)
 }
 
@@ -161,17 +265,27 @@ async fn quote(token: &'static str) -> Result<(f64, Vec<String>), String> {
     let res = HTTP
         .get(KYBER_URL)
         .header("x-client-id", "strike")
-        .query(&[("tokenIn", USDT_BSC), ("tokenOut", token), ("amountIn", &amount_in)])
+        .query(&[
+            ("tokenIn", USDT_BSC),
+            ("tokenOut", token),
+            ("amountIn", &amount_in),
+        ])
         .send()
         .await
         .map_err(|e| e.without_url().to_string())?;
-    let body: Value = res.json().await.map_err(|_| "unreadable quote".to_string())?;
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|_| "unreadable quote".to_string())?;
     parse_quote(&body)
 }
 
 fn parse_quote(body: &Value) -> Result<(f64, Vec<String>), String> {
     let summary = body.pointer("/data/routeSummary").ok_or_else(|| {
-        body.get("message").and_then(Value::as_str).unwrap_or("no route").to_string()
+        body.get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("no route")
+            .to_string()
     })?;
     let out = summary
         .get("amountOut")
@@ -184,7 +298,11 @@ fn parse_quote(body: &Value) -> Result<(f64, Vec<String>), String> {
         .and_then(Value::as_array)
         .map(|legs| {
             legs.iter()
-                .filter_map(|leg| leg.pointer("/0/exchange").and_then(Value::as_str).map(str::to_string))
+                .filter_map(|leg| {
+                    leg.pointer("/0/exchange")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -201,11 +319,16 @@ fn spark_meta<'a>(spark: &'a Value, ticker: &str) -> Option<&'a Value> {
 }
 
 fn session_at(spark: &Value, now_s: i64) -> &'static str {
-    let Some(periods) = spark.pointer("/spark/result/0/response/0/meta/currentTradingPeriod") else {
+    let Some(periods) = spark.pointer("/spark/result/0/response/0/meta/currentTradingPeriod")
+    else {
         return "closed";
     };
     for (key, label) in [("pre", "pre"), ("regular", "open"), ("post", "post")] {
-        let bound = |edge: &str| periods.pointer(&format!("/{key}/{edge}")).and_then(Value::as_i64);
+        let bound = |edge: &str| {
+            periods
+                .pointer(&format!("/{key}/{edge}"))
+                .and_then(Value::as_i64)
+        };
         if let (Some(start), Some(end)) = (bound("start"), bound("end")) {
             if now_s >= start && now_s < end {
                 return label;
@@ -236,7 +359,10 @@ fn build_asset(
         .filter(|w| w.1 == ticker)
         .map(|&(issuer, _, symbol, address)| {
             let (quoted, error) = match quotes.get(symbol) {
-                Some(Ok((p, _))) if price.is_some_and(|r| ((p / r - 1.0) * 10_000.0).abs() > MAX_PREMIUM_BPS) => {
+                Some(Ok((p, _)))
+                    if price
+                        .is_some_and(|r| ((p / r - 1.0) * 10_000.0).abs() > MAX_PREMIUM_BPS) =>
+                {
                     (None, Some("quote too far from the stock price".into()))
                 }
                 Some(Ok((p, route))) => (Some((*p, route.clone())), None),
@@ -250,7 +376,9 @@ fn build_asset(
                 address,
                 chain: "bsc",
                 price: price_ps,
-                premium_bps: price_ps.zip(price).map(|(p, r)| ((p / r - 1.0) * 10_000.0).round()),
+                premium_bps: price_ps
+                    .zip(price)
+                    .map(|(p, r)| ((p / r - 1.0) * 10_000.0).round()),
                 route: quoted.map(|q| q.1).unwrap_or_default(),
                 error,
             }
@@ -264,7 +392,10 @@ fn build_asset(
 
     Asset {
         ticker,
-        name: meta.and_then(|m| m.get("shortName")).and_then(Value::as_str).map(str::to_string),
+        name: meta
+            .and_then(|m| m.get("shortName"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         price,
         prev_close,
         change_pct: num("regularMarketChangePercent")
@@ -288,7 +419,9 @@ mod tests {
                 "currentTradingPeriod":{"pre":{"start":0,"end":10},"regular":{"start":10,"end":20},"post":{"start":20,"end":30}}},
             "indicators":{"quote":[{"close":[1.0,null,2.0]}]}}]}]}});
         let quote = |shares: &str| {
-            parse_quote(&json!({"data":{"routeSummary":{"amountOut":shares,"route":[[{"exchange":"pancake-v3"}]]}}}))
+            parse_quote(
+                &json!({"data":{"routeSummary":{"amountOut":shares,"route":[[{"exchange":"pancake-v3"}]]}}}),
+            )
         };
         let mut quotes = HashMap::new();
         quotes.insert("NVDAB", quote("500000000000000000")); // 0.5 share -> $200
@@ -301,11 +434,29 @@ mod tests {
         drained.insert("NVDAon", quote("1000000000000")); // $100 for a dust amount
         let d = build_asset("NVDA", Some(&spark), &drained);
         assert_eq!(d.best, Some("bStocks"));
-        assert_eq!(d.venues[1].error.as_deref(), Some("quote too far from the stock price"));
+        assert_eq!(
+            d.venues[1].error.as_deref(),
+            Some("quote too far from the stock price")
+        );
         assert_eq!(a.points, vec![1.0, 2.0]);
         assert_eq!(a.change_pct.map(f64::round), Some(-10.0));
-        assert_eq!(a.venues.iter().find(|v| v.issuer == "bStocks").unwrap().premium_bps, Some(1111.0));
-        assert_eq!(a.venues.iter().find(|v| v.issuer == "xStocks").unwrap().error.as_deref(), Some("route not found"));
+        assert_eq!(
+            a.venues
+                .iter()
+                .find(|v| v.issuer == "bStocks")
+                .unwrap()
+                .premium_bps,
+            Some(1111.0)
+        );
+        assert_eq!(
+            a.venues
+                .iter()
+                .find(|v| v.issuer == "xStocks")
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("route not found")
+        );
         assert_eq!(a.venues[1].route, vec!["pancake-v3"]);
 
         assert_eq!(session_at(&spark, 5), "pre");

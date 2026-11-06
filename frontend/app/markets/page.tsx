@@ -116,7 +116,9 @@ export default function MarketsPage() {
     setOpen(ticker);
     setFilter('all');
     setQuery('');
-    requestAnimationFrame(() => document.getElementById(`market-${ticker}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    requestAnimationFrame(() =>
+      document.getElementById(`market-${ticker}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    );
   };
 
   const predict = (ticker: string) => {
@@ -183,7 +185,9 @@ export default function MarketsPage() {
                       )}
                     >
                       <div className="truncate text-[13px] font-semibold">{v.symbol}</div>
-                      <div className="mt-1 font-jet text-sm tabular-nums">{v.price == null ? 'no quote' : usd(v.price)}</div>
+                      <div className="mt-1 font-jet text-sm tabular-nums">
+                        {v.price == null ? 'no quote' : usd(v.price)}
+                      </div>
                       <div className="mt-0.5 text-[11px] text-white/55">
                         {v.issuer === hero.best ? 'Best price' : v.issuer}
                       </div>
@@ -194,8 +198,18 @@ export default function MarketsPage() {
             </section>
 
             <div className="grid gap-3 lg:grid-cols-3">
-              <MiniList title="Best today" rows={byChange.slice(0, 3)} value={(a) => pct(a.changePct)} onPick={reveal} />
-              <MiniList title="Worst today" rows={byChange.slice(-3).reverse()} value={(a) => pct(a.changePct)} onPick={reveal} />
+              <MiniList
+                title="Best today"
+                rows={byChange.slice(0, 3)}
+                value={(a) => pct(a.changePct)}
+                onPick={reveal}
+              />
+              <MiniList
+                title="Worst today"
+                rows={byChange.slice(-3).reverse()}
+                value={(a) => pct(a.changePct)}
+                onPick={reveal}
+              />
               <MiniList
                 title="Widest venue gap"
                 rows={bySpread.slice(0, 3)}
@@ -283,8 +297,12 @@ export default function MarketsPage() {
                               </div>
                             </td>
                             <td className="py-3 pr-3 text-right font-jet font-medium tabular-nums">{usd(a.price)}</td>
-                            <td className={cx('py-3 pr-3 text-right font-jet tabular-nums', tone(a.changePct))}>{pct(a.changePct)}</td>
-                            <td className="py-3 pr-3 text-right font-jet tabular-nums text-muted">{compact(a.volume)}</td>
+                            <td className={cx('py-3 pr-3 text-right font-jet tabular-nums', tone(a.changePct))}>
+                              {pct(a.changePct)}
+                            </td>
+                            <td className="py-3 pr-3 text-right font-jet tabular-nums text-muted">
+                              {compact(a.volume)}
+                            </td>
                             <td className="py-3 pr-3">
                               <Sparkline points={a.points} up={(a.changePct ?? 0) >= 0} />
                             </td>
@@ -465,7 +483,12 @@ function StockLogo({ ticker, small }: { ticker: string; small?: boolean }) {
   const size = small ? 'h-7 w-7' : 'h-8 w-8';
   if (broken) {
     return (
-      <span className={cx(size, 'flex shrink-0 items-center justify-center rounded-full bg-surface text-[11px] font-semibold text-muted')}>
+      <span
+        className={cx(
+          size,
+          'flex shrink-0 items-center justify-center rounded-full bg-surface text-[11px] font-semibold text-muted'
+        )}
+      >
         {ticker[0]}
       </span>
     );
@@ -488,7 +511,13 @@ function Sparkline({ points, up }: { points: number[]; up: boolean }) {
   const d = points.map((p, i) => `${(i / (points.length - 1)) * 100},${28 - ((p - min) / range) * 26}`).join(' ');
   return (
     <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-7 w-24" aria-hidden="true">
-      <polyline points={d} fill="none" stroke={up ? 'var(--up)' : 'var(--down)'} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      <polyline
+        points={d}
+        fill="none"
+        stroke={up ? 'var(--up)' : 'var(--down)'}
+        strokeWidth="1.5"
+        vectorEffect="non-scaling-stroke"
+      />
     </svg>
   );
 }
