@@ -107,6 +107,31 @@ pub fn hex32(word: &[u8; 32]) -> String {
     format!("0x{}", hex::encode(word))
 }
 
+/// The leaf's inputs as stored, so a browser can rebuild the leaf instead of trusting ours.
+/// Integers are strings: stakes and times overflow a JS number.
+fn round_fields(r: &Round) -> Value {
+    let int = |v: i64| v.to_string();
+    json!({
+        "betId": r.bet_id,
+        "user": r.user,
+        "asset": r.asset,
+        "mode": r.mode,
+        "direction": r.direction,
+        "stake": int(r.stake),
+        "multiplier": int(r.multiplier),
+        "strike": int(r.strike),
+        "top": int(r.top.unwrap_or(0)),
+        "bottom": int(r.bottom.unwrap_or(0)),
+        "strikeAt": int(r.strike_at),
+        "endPriceAt": int(r.end_price_at.unwrap_or(0)),
+        "endPrice": int(r.end_price.unwrap_or(0)),
+        "outcome": r.outcome,
+        "payout": int(r.payout),
+        "strikeSource": r.strike_source,
+        "endSource": r.end_source,
+    })
+}
+
 fn word_int(value: i64) -> [u8; 32] {
     let mut word = if value < 0 { [0xff; 32] } else { [0; 32] };
     word[24..].copy_from_slice(&value.to_be_bytes());
@@ -429,6 +454,7 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
             "epoch": n,
             "end_ms": epoch_bounds(n).1,
             "leaf": leaf.as_ref().map(hex32),
+            "round": round_fields(&round),
             "proof": null,
             "house_root": null,
             "commit_tx": null,
@@ -448,6 +474,7 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
         "epoch": n,
         "end_ms": epoch_bounds(n).1,
         "leaf": hex32(&leaves[index]),
+        "round": round_fields(&round),
         "proof": proof(&leaves, index).iter().map(hex32).collect::<Vec<_>>(),
         "house_root": commit.root,
         "commit_tx": commit.tx_hash,

@@ -208,7 +208,7 @@ function drawBoxBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, in
   ctx.fillText(`${bet.multiplier}x`, x + width / 2, y + height / 2 + 9);
 }
 
-function drawClassicBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, price: number, palette: OverlayPalette, symbol: string, fontFamily: string) {
+function drawClassicBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, price: number, palette: OverlayPalette, symbol: string, fontFamily: string, taken: number[]) {
   if (bet.strikePrice === undefined || bet.endTime === undefined) return;
   const strikeY = s.y(bet.strikePrice);
   const priceY = s.y(price);
@@ -243,7 +243,11 @@ function drawClassicBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet
   ctx.font = `10px ${fontFamily}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`${bet.direction} ${bet.amount} ${symbol} @ $${bet.strikePrice.toFixed(2)}`, s.tipX + 5, strikeY - 5);
+  // Bets at the same strike share a line; stack their labels upward instead of overprinting.
+  let labelY = strikeY - 5;
+  while (taken.some((y) => Math.abs(y - labelY) < 12)) labelY -= 12;
+  taken.push(labelY);
+  ctx.fillText(`${bet.direction} ${bet.amount} ${symbol} @ ${bet.strikePrice.toFixed(2)}`, s.tipX + 5, labelY);
 
   const seconds = Math.ceil((bet.endTime - s.now) / 1000);
   if (seconds > 0) {
@@ -260,9 +264,10 @@ export function drawBets(
   view: { mode: string; asset: string; price: number; intervalMs: number; symbol: string; fontFamily: string },
   palette: OverlayPalette,
 ) {
+  const taken: number[] = [];
   for (const bet of bets) {
     if (bet.mode !== view.mode || bet.asset !== view.asset) continue;
     if (bet.mode === 'box') drawBoxBet(ctx, s, bet, view.intervalMs, palette, view.symbol, view.fontFamily);
-    else drawClassicBet(ctx, s, bet, view.price, palette, view.symbol, view.fontFamily);
+    else drawClassicBet(ctx, s, bet, view.price, palette, view.symbol, view.fontFamily, taken);
   }
 }

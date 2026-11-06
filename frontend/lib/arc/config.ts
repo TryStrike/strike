@@ -20,7 +20,7 @@ interface NetworkConfig {
 const ARC_DEFAULTS: NetworkConfig = {
   chainId: 5042002,
   name: 'Arc Testnet',
-  rpcEndpoint: 'https://rpc.testnet.arc.io',
+  rpcEndpoint: 'https://rpc.testnet.arc.network',
   explorer: 'https://explorer.testnet.arc.io',
   usdc: '0x3600000000000000000000000000000000000000',
   eurc: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a',
@@ -44,6 +44,15 @@ function envKey(): string {
 
 let cachedKey: string | null = null;
 let cachedConfig: ArcConfig | null = null;
+
+/**
+ * Every Arc testnet RPC we can read from, preferred first. arc.network rate-limits bursts;
+ * arc.io is blocked by common ad-block lists. Reads fail over between them.
+ */
+export function arcRpcUrls(): string[] {
+  const primary = getArcConfig().rpcEndpoint;
+  return [...new Set([primary, 'https://rpc.testnet.arc.network', 'https://rpc.testnet.arc.io'])];
+}
 
 export function getArcConfig(): ArcConfig {
   const key = envKey();

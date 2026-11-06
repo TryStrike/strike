@@ -198,6 +198,12 @@ export const WalletConnectModal: React.FC = () => {
         run(key, `Could not connect ${name}.`, async () => {
             if (!connector) throw new Error(`${name} connector missing`);
             if (key === 'metamask' && !(await connector.getProvider())) {
+                // No MetaMask, but Brave Wallet, Rabby and the like inject window.ethereum: use that.
+                const browserWallet = connectors.find((c) => c.id === 'injected');
+                if (browserWallet && (await browserWallet.getProvider())) {
+                    await connectAsync({ connector: browserWallet, chainId: arcTargetChainId() });
+                    return;
+                }
                 window.open('https://metamask.io/download/', '_blank', 'noopener,noreferrer');
                 throw new Error('MetaMask is not installed in this browser');
             }

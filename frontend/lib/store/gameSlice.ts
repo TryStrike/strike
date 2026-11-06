@@ -9,6 +9,9 @@ import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
 
 export type GameMode = "binomo" | "box";
 
+const BET_DEBOUNCE_MS = 400;
+let lastBetAttemptAt = 0;
+
 export interface ActiveBet {
   id: string;
   mode: GameMode;
@@ -449,7 +452,9 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         endTime?: number;
       },
     ) => {
-      if (get().isPlacingBet) return;
+      // A double click, a key bounce or a touch plus click must not place two bets.
+      if (get().isPlacingBet || Date.now() - lastBetAttemptAt < BET_DEBOUNCE_MS) return;
+      lastBetAttemptAt = Date.now();
 
       set({ isPlacingBet: true, error: null });
 
@@ -610,6 +615,10 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         };
 
         addActiveBet(activeBet);
+        // The player's own key records the bet on Arkiv, off the bet path and with no popup.
+        void import("@/lib/arkivBets")
+          .then(({ recordBetOnArkiv }) => recordBetOnArkiv(userAddress, activeBet))
+          .catch((err) => console.warn("[arkiv] could not record bet", activeBet.id, err));
 
         set({
           isPlacingBet: false,

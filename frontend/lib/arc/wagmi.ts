@@ -1,8 +1,8 @@
 import { getDefaultConfig } from 'connectkit';
-import { createConfig, http } from 'wagmi';
+import { createConfig, fallback, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { baseSepolia } from 'viem/chains';
-import { getArcConfig } from './config';
+import { arcRpcUrls, getArcConfig } from './config';
 import { BRAND } from '@/lib/brand';
 import { passkeyConnector } from '@/lib/wallet/passkey';
 import { coinbaseWallet, injected, walletConnect } from 'wagmi/connectors';
@@ -33,7 +33,7 @@ export const config = createConfig(
   getDefaultConfig({
     chains: [arc, baseSepolia],
     transports: {
-      [arc.id]: http(arcConfig.rpcEndpoint),
+      [arc.id]: fallback(arcRpcUrls().map((url) => http(url))),
       [baseSepolia.id]: http(),
     },
     enableAaveAccount: false,

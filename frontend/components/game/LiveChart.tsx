@@ -45,6 +45,8 @@ const OVERLAY = "bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight";
 
 interface LiveChartProps {
   betAmount: string;
+  /** The live / polling / stale chip next to the price. Off on the trade page. */
+  showFeedState?: boolean;
 }
 
 interface BoxQuote {
@@ -892,6 +894,7 @@ const AssetIcon = ({
 
 export const LiveChart = React.memo(function LiveChart({
   betAmount,
+  showFeedState = true,
 }: LiveChartProps) {
   const priceHistory = useStore((state) => state.priceHistory);
   const currentPrice = useStore((state) => state.currentPrice);
@@ -1073,15 +1076,22 @@ export const LiveChart = React.memo(function LiveChart({
   const feedState = marketClosed
     ? "closed"
     : feedStalled
-    ? "stale"
-    : feedMode === "stream" && streamLive
-      ? "live"
-      : "polling";
+      ? "stale"
+      : feedMode === "stream" && streamLive
+        ? "live"
+        : "polling";
 
   const isMobile = dimensions.width < 640;
-  const historyWidthRatio = isMobile ? 0.35 : 0.5;
-  const targetColWidthPx = isMobile ? 100 : 250;
   const isBox = gameMode === "box";
+  // Box needs room ahead of the tip: about four open columns, not one under the price axis.
+  const historyWidthRatio = isBox
+    ? isMobile
+      ? 0.25
+      : 0.3
+    : isMobile
+      ? 0.35
+      : 0.5;
+  const targetColWidthPx = isMobile ? 80 : 150;
   const gridInterval = (isBox ? timeframeSeconds : 30) * 1000;
   const pixelsPerSecond = isBox
     ? Math.max(2, targetColWidthPx / (gridInterval / 1000))
@@ -1186,6 +1196,10 @@ export const LiveChart = React.memo(function LiveChart({
   );
 
   const handleCellTap = async (cell: Cell, label: CellLabel | null) => {
+    if (cell.state === "locked") {
+      toast.info("That column is about to close. Pick one further right.");
+      return;
+    }
     const quote = label?.value as BoxQuote | undefined;
     if (
       !quote ||
@@ -1375,30 +1389,32 @@ export const LiveChart = React.memo(function LiveChart({
                 </span>
               );
             })()}
-            <span
-              data-testid="feed-state"
-              title={
-                feedState === "closed"
-                  ? "Market closed, last traded price shown"
-                  : feedState === "live"
-                  ? "Streaming live ticks"
-                  : feedState === "stale"
-                    ? "Price feed delayed"
-                    : "Polling price feed (1s)"
-              }
-              className="self-center flex items-center gap-1 font-jet text-[10px] uppercase tracking-wide text-faint"
-            >
+            {showFeedState && (
               <span
-                className={`inline-block w-1.5 h-1.5 rounded-full ${
-                  feedState === "live"
-                    ? "bg-up"
-                    : feedState === "stale"
-                      ? "bg-down"
-                      : "bg-faint"
-                }`}
-              />
-              {feedState}
-            </span>
+                data-testid="feed-state"
+                title={
+                  feedState === "closed"
+                    ? "Market closed, last traded price shown"
+                    : feedState === "live"
+                      ? "Streaming live ticks"
+                      : feedState === "stale"
+                        ? "Price feed delayed"
+                        : "Polling price feed (1s)"
+                }
+                className="self-center flex items-center gap-1 font-jet text-[10px] uppercase tracking-wide text-faint"
+              >
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${
+                    feedState === "live"
+                      ? "bg-up"
+                      : feedState === "stale"
+                        ? "bg-down"
+                        : "bg-faint"
+                  }`}
+                />
+                {feedState}
+              </span>
+            )}
           </div>
         </div>
 

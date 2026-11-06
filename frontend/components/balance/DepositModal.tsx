@@ -538,7 +538,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const markCredited = useCallback(
     async (txHash: string, creditedAmount: number, walletAddress: string, credit?: ServerCredit) => {
-      await fetchBalance(walletAddress);
+      await Promise.all([fetchBalance(walletAddress), useStore.getState().refreshWalletBalance()]);
       toast.success(
         `Successfully deposited ${creditedAmount.toFixed(4)} ${asset}! Balance updated.`
       );
@@ -607,8 +607,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         },
       });
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Deposit failed. Please try again.';
+      const message = walletErrorText(err);
       console.error('Deposit error:', err);
       setPhase({ kind: 'idle' });
       setError(message);
@@ -956,3 +955,13 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     </Modal>
   );
 };
+
+/** One readable line for a wallet or RPC failure, never viem's multi-paragraph dump. */
+function walletErrorText(err: unknown): string {
+  const raw = err instanceof Error ? `${(err as { shortMessage?: string }).shortMessage ?? ''} ${err.message}` : String(err);
+  if (/user rejected|denied|rejected the request/i.test(raw)) return 'You cancelled the transaction in your wallet.';
+  if (/rate limit|429|too many requests/i.test(raw)) return 'Arc RPC is busy. Wait a few seconds and deposit again.';
+  if (/insufficient funds|exceeds balance/i.test(raw)) return 'Not enough USDC in your wallet for this amount plus gas.';
+  const short = (err as { shortMessage?: string })?.shortMessage;
+  return short || (err instanceof Error ? err.message.split('\n')[0] : 'Deposit failed. Please try again.');
+}

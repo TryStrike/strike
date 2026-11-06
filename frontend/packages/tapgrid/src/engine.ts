@@ -1,6 +1,8 @@
 import { cellState, ease, panCenter, priceOfRow, stepChange, stepFor, traceMonotone, visibleRange } from './grid';
 import type { Cell, CellLabel, Point, Scales, TapGrid, TapGridOptions } from './types';
 
+const AXIS_GUTTER_PX = 80;
+
 const TIP_EASE_MS = 90;
 const PAN_EASE_MS = 180;
 const DEAD_ZONE = 0.4;
@@ -176,7 +178,10 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
           if (!label) continue;
           ctx.fillStyle = label.accent ? colors.accentText : colors.cellText;
           ctx.globalAlpha = cell.state === 'locked' ? 0.4 : 1;
-          ctx.fillText(label.text, s.x(cell.time) + columnPx / 2, s.y(cell.top) + row / 2);
+          const labelX = s.x(cell.time) + columnPx / 2;
+          // The price axis owns the right edge; a multiplier there would print over it.
+          if (labelX > width - AXIS_GUTTER_PX) continue;
+          ctx.fillText(label.text, labelX, s.y(cell.top) + row / 2);
         }
       }
       ctx.globalAlpha = 1;
@@ -340,8 +345,11 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
 
   const onClick = (event: MouseEvent) => {
     const rect = canvas.getBoundingClientRect();
-    const cell = cellAt(event.clientX - rect.left, event.clientY - rect.top);
-    if (cell?.state === 'open') options.onCellTap?.(cell, labels.get(cell.key) ?? null);
+    const x = event.clientX - rect.left;
+    if (x > width - AXIS_GUTTER_PX) return;
+    const cell = cellAt(x, event.clientY - rect.top);
+    // Locked cells go through too, so the app can say why the tap did nothing.
+    if (cell?.state === 'open' || cell?.state === 'locked') options.onCellTap?.(cell, labels.get(cell.key) ?? null);
   };
 
   const observer = new ResizeObserver(resize);

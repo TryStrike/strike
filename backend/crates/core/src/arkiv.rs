@@ -10,7 +10,7 @@ use std::time::Duration;
 use k256::ecdsa::SigningKey;
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 
 use crate::address::keccak256;
 use crate::config::config;
@@ -236,6 +236,21 @@ pub struct Arkiv {
     rpc: Rpc,
     signer: SigningKey,
     operator: String,
+    /// Seal batches and key funding share the operator's nonce; one send at a time.
+    sending: Mutex<()>,
+}
+
+/// Gas sent once to each browser key: about 30 bet entities at Rabdi's gas price.
+pub const KEY_FUNDING_WEI: u128 = 20_000_000_000_000_000;
+
+/// What a wallet signs to let one browser key write its bets on Arkiv. The signature
+/// is stored on every entity that key writes, so the link checks out without us.
+pub fn delegation_message(wallet: &str, key: &str, expires_ms: i64) -> String {
+    format!(
+        "Strike: let this browser key record my bets on Arkiv\nWallet: {}\nKey: {}\nExpires: {expires_ms}",
+        wallet.to_lowercase(),
+        key.to_lowercase()
+    )
 }
 
 impl Arkiv {
@@ -252,7 +267,38 @@ impl Arkiv {
             rpc: Rpc::new(cfg.arkiv_rpc.clone(), CHAIN_ID),
             operator: address_from_signing_key(&signer).to_lowercase(),
             signer,
+            sending: Mutex::new(()),
         }))
+    }
+
+    /// Sends [`KEY_FUNDING_WEI`] of Arkiv gas to a browser key. Returns the tx hash.
+    pub async fn fund_key(&self, key: &str) -> ApiResult<String> {
+        let _sending = self.sending.lock().await;
+        let nonce = self
+            .rpc
+            .quantity("eth_getTransactionCount", json!([self.operator, "pending"]))
+            .await? as u64;
+        let gas_price = self.rpc.quantity("eth_gasPrice", json!([])).await?;
+        let raw = build_eip1559_raw(
+            &self.signer,
+            CHAIN_ID,
+            nonce,
+            21_000,
+            gas_price * 2,
+            gas_price / 10,
+            key,
+            KEY_FUNDING_WEI,
+            &[],
+        )?;
+        match self.rpc.broadcast(&raw).await {
+            Broadcast::Refused(reason) => Err(ApiError::Other(format!(
+                "arkiv refused key funding: {reason}"
+            ))),
+            Broadcast::Accepted(hash) => Ok(hash),
+            Broadcast::Unknown(reason) => Err(ApiError::Other(format!(
+                "key funding may not have been sent: {reason}"
+            ))),
+        }
     }
 
     async fn tick(&self) -> ApiResult<()> {
@@ -279,6 +325,7 @@ impl Arkiv {
         if rounds.is_empty() {
             return Ok(());
         }
+        let _sending = self.sending.lock().await;
         let data = calldata(&rounds, |_| uuid::Uuid::new_v4().as_u128())?;
         let data_hex = format!("0x{}", hex::encode(&data));
         let nonce = self
@@ -507,4 +554,37 @@ pub async fn run_sealer(arkiv: &'static Arkiv) {
         }
         tokio::time::sleep(TICK).await;
     }
+}
+
+/// The funding tx of `key` if we already funded it, and how many keys `wallet` set up in 24h.
+pub async fn key_status(key: &str, wallet: &str) -> ApiResult<(Option<String>, i64)> {
+    let (k, w) = (key.to_string(), wallet.to_string());
+    db().await?
+        .read(move |conn| {
+            let known: Option<String> = conn
+                .query_row("SELECT fund_tx FROM arkiv_keys WHERE key = ?1", [&k], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let recent: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM arkiv_keys WHERE wallet = ?1 AND created_at > ?2",
+                params![w, now_us() - 86_400_000_000],
+                |r| r.get(0),
+            )?;
+            Ok((known, recent))
+        })
+        .await
+}
+
+pub async fn record_key(key: &str, wallet: &str, expires_ms: i64, fund_tx: &str) -> ApiResult<()> {
+    let (k, w, t) = (key.to_string(), wallet.to_string(), fund_tx.to_string());
+    db().await?
+        .write(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO arkiv_keys (key, wallet, expires_ms, fund_tx) VALUES (?1, ?2, ?3, ?4)",
+                params![k, w, expires_ms, t],
+            )?;
+            Ok(())
+        })
+        .await
 }

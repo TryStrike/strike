@@ -132,9 +132,9 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
     }
 
     try {
-      const { getAssetBalance } = await import('@/lib/arc/client');
-      const asset = 'USDC' as const;
-      const bal = await getAssetBalance(address, asset);
+      // A failed read keeps the last balance instead of showing a false 0.
+      const { readAssetBalance } = await import('@/lib/arc/client');
+      const bal = await readAssetBalance(address, 'USDC');
       set({ walletBalance: bal });
     } catch (error) {
       console.error("Error refreshing wallet balance:", error);
