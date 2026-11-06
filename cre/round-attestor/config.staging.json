@@ -1,0 +1,25 @@
+{
+  "chainSelectorName": "arc-testnet",
+  "apiBase": "http://127.0.0.1:8080",
+  "treasury": "0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871",
+  "usdc": "0x3600000000000000000000000000000000000000",
+  "attestor": "",
+  "klineBase": "https://data-api.binance.vision/api/v3/klines",
+  "symbols": {
+    "ADA": "ADAUSDT",
+    "APT": "APTUSDT",
+    "BCH": "BCHUSDT",
+    "BNB": "BNBUSDT",
+    "BTC": "BTCUSDT",
+    "DOGE": "DOGEUSDT",
+    "ETH": "ETHUSDT",
+    "NEAR": "NEARUSDT",
+    "SOL": "SOLUSDT",
+    "SUI": "SUIUSDT",
+    "TRX": "TRXUSDT",
+    "XLM": "XLMUSDT",
+    "XRP": "XRPUSDT",
+    "XTZ": "XTZUSDT"
+  },
+  "gasLimit": "500000"
+}
