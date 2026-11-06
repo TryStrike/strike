@@ -59,10 +59,7 @@ export const Modal: React.FC<ModalProps> = ({
       Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [])
         .filter((el) => isFocusable(el) || el === document.activeElement);
 
-    const focusRaf = requestAnimationFrame(() => {
-      const focusable = getFocusable();
-      (focusable[0] ?? dialogRef.current)?.focus();
-    });
+    const focusRaf = requestAnimationFrame(() => dialogRef.current?.focus());
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
