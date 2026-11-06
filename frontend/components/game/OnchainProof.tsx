@@ -89,7 +89,8 @@ export const TxLink: React.FC<{ hash: string; label: string }> = ({ hash, label 
 );
 
 /** Reads raw bytes by reference; the web gateway answers 200 for any address, so it cannot tell a miss. */
-const SWARM_GATEWAY = 'https://api.gateway.ethswarm.org';
+/** Mainnet bundles open on Swarm's public API gateway; testnet (Sepolia) bundles need a testnet Bee node. */
+const SWARM_GATEWAY = (process.env.NEXT_PUBLIC_SWARM_GATEWAY?.trim() || 'https://api.gateway.ethswarm.org').replace(/\/+$/, '');
 
 const ArchiveLink: React.FC<{ href: string; label: string; id: string }> = ({ href, label, id }) => (
   <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-jet text-up">
