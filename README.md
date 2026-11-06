@@ -40,7 +40,7 @@ During the event: `TODO` list the commits after Nov 5, 21:00 IST with their rang
 
 **What.** A YOLO agent spends USDC with no tap per trade. It starts only after a live human approves in World App. One human, one YOLO agent. Bans follow the human across wallets. Normal mode, where every trade waits for a tap, needs no World.
 
-**How.** IDKit 4.0 on developer.world.org, checked and verified in Rust. World IdP OIDC stays as the fallback when no IDKit app is set. Local setup and test cases: [`docs/world.md`](docs/world.md).
+**How.** IDKit 4.0 on developer.world.org, checked and verified in Rust. Local setup and test cases: [`docs/world.md`](docs/world.md).
 
 - `POST /api/agent/start` in YOLO mode saves a pending attempt and answers `401` with `WWW-Authenticate` and `world`: app id, action `strike-yolo`, signal, preset and an `rp_context` the server signs with `WORLD_RP_SIGNING_KEY`.
 - The signal is `sha256(attempt id + signed start message)`, so a proof is for those exact terms only. The action is fixed, so the nullifier is one stable id per human.
@@ -53,9 +53,8 @@ During the event: `TODO` list the commits after Nov 5, 21:00 IST with their rang
 
 **Where.** `backend/crates/core/src/world.rs`, `backend/crates/server/src/routes/world.rs`, `backend/crates/server/src/routes/agent.rs`, `frontend/lib/agent/useAgent.ts`, `frontend/components/agent/AgentPanel.tsx`. Tables `world_attempts` and `world_links` in `backend/crates/core/src/db.rs`.
 
-**Run.** Create an app at https://developer.world.org, then set `NEXT_PUBLIC_WORLD_APP_ID`, `WORLD_RP_ID` and `WORLD_RP_SIGNING_KEY` in the root `.env.local` (see `.env.example`). `WORLD_ENVIRONMENT=staging` takes proofs from the simulator at https://simulator.worldcoin.org. Without an IDKit app or an OIDC client YOLO start answers `503`. Open `/agent`, pick YOLO, sign. Unit tests: `cargo test --manifest-path backend/Cargo.toml -p strike-core --lib world::`.
+**Run.** Create an app at https://developer.world.org, then set `NEXT_PUBLIC_WORLD_APP_ID`, `WORLD_RP_ID` and `WORLD_RP_SIGNING_KEY` in the root `.env.local` (see `.env.example`). `WORLD_ENVIRONMENT=staging` takes proofs from the simulator at https://simulator.worldcoin.org. Without an IDKit app YOLO agents start with no human check, and the server warns at boot. Open `/agent`, pick YOLO, sign. Unit tests: `cargo test --manifest-path backend/Cargo.toml -p strike-core --lib world::`.
 
-Debrief: [`docs/world-debrief.md`](docs/world-debrief.md).
 
 ### Settlement proofs on Arc
 
