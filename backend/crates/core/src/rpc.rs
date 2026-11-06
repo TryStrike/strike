@@ -22,6 +22,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
 
+use crate::config::config;
 use crate::db::{is_unique_violation, json_bind_text, now_us, parse_timestamp_us};
 use crate::error::{ApiError, ApiResult};
 use crate::money::{
@@ -745,15 +746,36 @@ fn place_bet_locked(
         Ok(_) => {}
     }
 
-    let deducted = deduct_balance_for_bet(conn, user, amount, currency)?;
-
-    if !deducted.success {
-        // No money moved: void the lock so the request id is not marked as spent.
+    // No money moved: voiding the lock leaves the request id unspent.
+    let void_lock = || {
         conn.prepare_cached(
             "DELETE FROM balance_audit_log \
              WHERE idempotency_key = ?1 AND operation_type = 'bet_lock'",
         )?
-        .execute(params![idempotency_key])?;
+        .execute(params![idempotency_key])
+    };
+
+    let open: i64 = conn
+        .prepare_cached(
+            "SELECT coalesce(sum(stake), 0) FROM bet_rounds \
+             WHERE user_address = ?1 AND outcome IS NULL",
+        )?
+        .query_row([user], |row| row.get(0))?;
+    let cap = config().max_wallet_open_stake;
+    if open + store(amount)?.unwrap_or(0) > store(Some(cap))?.unwrap_or(0) {
+        void_lock()?;
+        return Ok(json!({
+            "success": false,
+            "duplicate": false,
+            "error": format!("Open bets are limited to {cap} USDC per wallet"),
+            "new_balance": 0,
+        }));
+    }
+
+    let deducted = deduct_balance_for_bet(conn, user, amount, currency)?;
+
+    if !deducted.success {
+        void_lock()?;
         let error = deducted.json["error"]
             .as_str()
             .unwrap_or("Bet placement failed");
