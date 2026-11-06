@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { PaperPlaneRight, X } from '@phosphor-icons/react';
+import { CheckCircle, PaperPlaneRight, WarningCircle, X } from '@phosphor-icons/react';
 import { Button, Field, cx } from '@/components/ui/kit';
 import { useCopilot } from '@/lib/copilot/useCopilot';
 
@@ -40,7 +40,13 @@ export default function CopilotDrawer({ open, onClose }: { open: boolean; onClos
               m.role === 'user' ? 'ml-auto bg-ink text-white' : 'bg-surface'
             )}
           >
-            {m.content || '…'}
+            {m.steps?.map((step, s) => (
+              <p key={s} className={cx('mb-1 flex items-center gap-1.5 text-xs', step.ok ? 'text-subtle' : 'text-down')}>
+                {step.ok ? <CheckCircle size={13} weight="fill" className="text-up" /> : <WarningCircle size={13} weight="fill" />}
+                {step.ok ? step.label : `${step.label} failed: ${step.error}`}
+              </p>
+            ))}
+            {m.content || (m.steps?.length ? null : '…')}
           </li>
         ))}
       </ol>

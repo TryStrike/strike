@@ -3,9 +3,16 @@
 import { useCallback, useState } from 'react';
 import { dispatch, useCopilotView } from './actions';
 
+export interface ToolStep {
+  label: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  steps?: ToolStep[];
 }
 
 const KEEP = 10;
@@ -14,7 +21,7 @@ const KEEP = 10;
 function history(messages: ChatMessage[]): ChatMessage[] {
   const recent = messages.filter((m) => m.content.trim()).slice(-KEEP);
   while (recent[0]?.role === 'assistant') recent.shift();
-  return recent;
+  return recent.map(({ role, content }) => ({ role, content }));
 }
 
 export function useCopilot() {
@@ -26,6 +33,12 @@ export function useCopilot() {
     setMessages((all) => {
       const last = all[all.length - 1];
       return [...all.slice(0, -1), { ...last, content: last.content + text }];
+    });
+
+  const appendStep = (step: ToolStep) =>
+    setMessages((all) => {
+      const last = all[all.length - 1];
+      return [...all.slice(0, -1), { ...last, steps: [...(last.steps ?? []), step] }];
     });
 
   const send = useCallback(
@@ -60,6 +73,7 @@ export function useCopilot() {
             if (!event || !data) continue;
             const payload = JSON.parse(data);
             if (event === 'text') appendAnswer(payload.text);
+            else if (event === 'tool') appendStep(payload);
             else if (event === 'action') {
               try {
                 dispatch(payload);
@@ -73,7 +87,7 @@ export function useCopilot() {
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Copilot failed');
       } finally {
-        setMessages((all) => all.filter((m) => m.content.trim()));
+        setMessages((all) => all.filter((m) => m.content.trim() || m.steps?.length));
         setBusy(false);
       }
     },

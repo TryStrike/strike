@@ -92,6 +92,25 @@ pub const NO_SESSION: &str =
 pub const NAVIGATION_BLOCKED: &str =
     "The trader has a trade ticket open, so the copilot can't navigate away";
 
+/// The step the trader sees for a tool call. Fixed text, so tool input and model
+/// text never reach the client this way.
+pub fn step_label(tool: &str) -> &'static str {
+    match tool {
+        "get_market_movers" => "Read market movers",
+        "get_market_trend" => "Read market trend",
+        "get_agent_decisions" => "Read your decisions",
+        "get_session_limits" => "Read your limits",
+        "get_trade_history" => "Read your history",
+        "get_round_proof" => "Read a round proof",
+        "show_table" => "Opened a table",
+        "show_chart" => "Opened a chart",
+        "open_page" => "Opened a page",
+        "open_market" => "Opened a market",
+        "fill_trade_ticket" => "Filled a ticket",
+        _ => "Used a tool",
+    }
+}
+
 /// Every asset some upstream quotes: the only symbols a tool accepts.
 pub fn symbols() -> Vec<String> {
     prices::default_assets()

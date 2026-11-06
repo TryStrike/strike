@@ -139,6 +139,13 @@ async fn converse(
             if let Some(action) = ran.action {
                 send(tx, "action", action)?;
             }
+            let label = copilot::step_label(&tool.name);
+            let step = if ran.is_error {
+                json!({ "label": label, "ok": false, "error": ran.content })
+            } else {
+                json!({ "label": label, "ok": true })
+            };
+            send(tx, "tool", step)?;
             results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool.id,

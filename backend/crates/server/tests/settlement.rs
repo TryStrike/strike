@@ -1267,6 +1267,9 @@ fn script(question: &str) -> Vec<(&'static str, Value)> {
     if question.contains("trend") {
         return vec![("get_market_trend", json!({ "symbol": "BTC" }))];
     }
+    if question.contains("stop") {
+        return vec![("get_agent_decisions", json!({}))];
+    }
     if let Some(bet_id) = question.split_whitespace().find(|w| w.starts_with("bet_")) {
         return vec![
             ("get_agent_decisions", json!({})),
@@ -1456,6 +1459,41 @@ async fn whats_moving_streams_an_answer_and_opens_a_table_of_real_movers() {
     assert!(
         results[0]["content"].as_str().unwrap().contains("BTC"),
         "{results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_tool_call_streams_a_plain_step() {
+    let (s, _feed, _claude) = copilot_server(100.0).await;
+
+    let (_, frames) = s.ask("what's moving?").await;
+
+    assert_eq!(
+        of(&frames, "tool"),
+        [
+            &json!({ "label": "Read market movers", "ok": true }),
+            &json!({ "label": "Opened a table", "ok": true }),
+        ],
+        "{frames:?}"
+    );
+    let text = serde_json::to_string(&of(&frames, "tool")).unwrap();
+    assert!(!text.contains("market_movers"), "no raw tool input: {text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_tool_step_carries_its_real_error() {
+    let (s, _feed, _claude) = copilot_server(100.0).await;
+
+    let (_, frames) = s.ask("why did my agent stop?").await;
+
+    assert_eq!(
+        of(&frames, "tool"),
+        [&json!({
+            "label": "Read your decisions",
+            "ok": false,
+            "error": "The trader has no agent session. Tell them to start one on the Agent page first.",
+        })],
+        "{frames:?}"
     );
 }
 
