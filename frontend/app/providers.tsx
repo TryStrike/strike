@@ -14,6 +14,7 @@ import { ReferralSync } from './ReferralSync';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 import { useThemeSync } from '@/lib/useTheme';
 import { usePriceStream } from '@/lib/hooks/usePriceStream';
+import { bridging } from '@/lib/bridge/bridging';
 
 function WalletSync() {
   const { address: wagmiAddress, isConnected: wagmiConnected, chainId: wagmiChainId } = useAccount();
@@ -35,7 +36,7 @@ function WalletSync() {
   const connectedAddress = wagmiConnected && wagmiAddress ? wagmiAddress : null;
 
   useEffect(() => {
-    if (!wagmiConnected || wagmiChainId === arc.id || !switchChainAsync) return;
+    if (!wagmiConnected || wagmiChainId === arc.id || !switchChainAsync || bridging.get()) return;
     let cancelled = false;
     switchChainAsync({ chainId: arc.id }).catch((err: unknown) => {
       if (cancelled) return;

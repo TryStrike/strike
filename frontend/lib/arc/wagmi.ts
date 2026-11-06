@@ -1,6 +1,7 @@
 import { getDefaultConfig } from 'connectkit';
 import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
+import { baseSepolia } from 'viem/chains';
 import { getArcConfig } from './config';
 import { BRAND } from '@/lib/brand';
 import { passkeyConnector } from '@/lib/wallet/passkey';
@@ -30,9 +31,10 @@ const app = {
 
 export const config = createConfig(
   getDefaultConfig({
-    chains: [arc],
+    chains: [arc, baseSepolia],
     transports: {
       [arc.id]: http(arcConfig.rpcEndpoint),
+      [baseSepolia.id]: http(),
     },
     enableAaveAccount: false,
     walletConnectProjectId,
