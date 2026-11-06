@@ -48,6 +48,12 @@ export interface StartLimits {
   minutes: number;
 }
 
+export interface WorldAttempt {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'mismatch' | 'failed' | 'unknown';
+  reason: string;
+  acr: string | null;
+}
+
 const START_VALID_MS = 5 * 60_000;
 const KEEP = 100;
 
@@ -115,6 +121,7 @@ export function useAgent() {
       }
       setBusy(true);
       setError(null);
+      let leaving = false;
       try {
         const nonce = crypto.randomUUID().replaceAll('-', '');
         const message = startMessage(address, limits, Date.now() + START_VALID_MS, nonce);
@@ -125,7 +132,13 @@ export function useAgent() {
           body: JSON.stringify({ message, signature }),
         });
         if (!res.ok) {
-          setError(await errorOf(res));
+          const body = await res.json().catch(() => null);
+          if (res.status === 401 && body?.verifyUrl) {
+            leaving = true;
+            window.location.assign(body.verifyUrl);
+            return;
+          }
+          setError(body?.error ?? `Request failed with ${res.status}`);
           return;
         }
         setSession((await res.json()).session);
@@ -134,7 +147,7 @@ export function useAgent() {
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Signing failed');
       } finally {
-        setBusy(false);
+        if (!leaving) setBusy(false);
       }
     },
     [address, signMessageAsync]
@@ -165,4 +178,30 @@ export function useAgent() {
   }, []);
 
   return { session, decisions, error, busy, start, stop, answer };
+}
+
+/** Outcome of the World ID check the callback redirected back with as `?world=<attempt>`. Read once, never polled. */
+export function useWorldAttempt() {
+  const [attempt, setAttempt] = useState<WorldAttempt | null>(null);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const id = url.searchParams.get('world');
+    if (!id) return;
+    url.searchParams.delete('world');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    if (id === 'unknown') {
+      setAttempt({ status: 'unknown', reason: 'This approval link was already used', acr: null });
+      return;
+    }
+    fetch(`/api/world/attempts/${encodeURIComponent(id)}`)
+      .then(async (res) => {
+        if (res.status === 404) return setAttempt({ status: 'unknown', reason: 'This approval link was already used', acr: null });
+        if (!res.ok) return setAttempt({ status: 'failed', reason: await errorOf(res), acr: null });
+        setAttempt(await res.json());
+      })
+      .catch((e) => setAttempt({ status: 'failed', reason: `Could not read the human check: ${e.message}`, acr: null }));
+  }, []);
+
+  return [attempt, setAttempt] as const;
 }
