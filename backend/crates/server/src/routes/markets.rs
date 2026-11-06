@@ -7,7 +7,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use strike_core::markets;
+use strike_core::{markets, stock_trades};
 
 pub fn routes() -> Router {
     Router::new()
@@ -15,6 +15,7 @@ pub fn routes() -> Router {
         .route("/api/markets/quote", get(quote))
         .route("/api/markets/history", get(history))
         .route("/api/markets/stats", get(stats))
+        .route("/api/markets/trades", get(trades))
 }
 
 #[derive(Deserialize)]
@@ -62,6 +63,19 @@ async fn stats(Query(q): Query<StatsQuery>) -> Response {
             Json(body.as_ref().clone()),
         )
             .into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TradesQuery {
+    wallet: String,
+}
+
+/// `GET /api/markets/trades?wallet=0x..`: a wallet's stock trades. Chain events are public.
+async fn trades(Query(q): Query<TradesQuery>) -> Response {
+    match stock_trades::for_wallet(&q.wallet).await {
+        Ok(rows) => Json(rows).into_response(),
         Err(err) => err.into_response(),
     }
 }

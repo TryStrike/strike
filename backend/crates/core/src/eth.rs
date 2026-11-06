@@ -128,6 +128,9 @@ pub enum Broadcast {
     Unknown(String),
 }
 
+const READ_TRIES: u32 = 6;
+const READ_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(700);
+
 #[derive(Clone)]
 pub struct Rpc {
     client: reqwest::Client,
@@ -170,6 +173,21 @@ impl Rpc {
         json.get("result")
             .cloned()
             .ok_or_else(|| ApiError::Other("RPC response has no result".into()))
+    }
+
+    /// `call` for a read that is safe to repeat. Arc's public RPC refuses bursts
+    /// of contract reads with a 429, which says nothing about the answer.
+    pub async fn read(&self, method: &str, params: Value) -> ApiResult<Value> {
+        let mut tries = READ_TRIES;
+        loop {
+            match self.call(method, params.clone()).await {
+                Err(err) if tries > 1 && err.to_string().contains("429") => {
+                    tries -= 1;
+                    tokio::time::sleep(READ_RETRY_WAIT).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Hex quantity ("0x1a") to u128.
@@ -236,7 +254,7 @@ impl Rpc {
 
     pub async fn eth_call(&self, to: &str, data: &str) -> ApiResult<String> {
         let res = self
-            .call(
+            .read(
                 "eth_call",
                 json!([{ "to": to_checksum(to), "data": data }, "latest"]),
             )
@@ -470,7 +488,7 @@ pub async fn verify_personal_signature(
 
     let data = format!("{}{}", ERC6492_VALIDATOR.trim(), hex::encode(args));
     let result = Rpc::from_config()
-        .call("eth_call", json!([{ "data": data }, "latest"]))
+        .read("eth_call", json!([{ "data": data }, "latest"]))
         .await;
     match result {
         Ok(Value::String(out)) => {

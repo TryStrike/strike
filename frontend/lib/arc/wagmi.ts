@@ -42,7 +42,9 @@ export const config = createConfig(
     // Base, Ethereum and Arbitrum Sepolia can pay for a stock: Buy brings their USDC to Arc.
     chains: [arc, baseSepolia, sepolia, arbitrumSepolia],
     transports: {
-      [arc.id]: fallback(arcRpcUrls().map((url) => http(url))),
+      [arc.id]: fallback(
+        arcRpcUrls().map((url) => http(url, { retryCount: 0 })),
+      ),
       [baseSepolia.id]: http(),
       [sepolia.id]: http("https://ethereum-sepolia-rpc.publicnode.com"),
       [arbitrumSepolia.id]: http(),

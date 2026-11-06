@@ -13,7 +13,7 @@ import {
 } from "viem";
 import { useAccount, useSwitchChain } from "wagmi";
 import { bridging } from "@/lib/bridge/bridging";
-import { tradeLock } from "@/lib/markets/marketData";
+import { recordTrade, tradeLock } from "@/lib/markets/marketData";
 import { spendToArc } from "@/lib/gateway/gateway";
 import { planFunding, useUsdcSources } from "@/lib/gateway/usdcSources";
 import { CircleNotch } from "@phosphor-icons/react";
@@ -67,25 +67,87 @@ const readShares = (holder: Address, symbol: string) =>
  * Buy or sell test shares of a stock at its live price. Testnet simulation on Arc: the price is a
  * quote signed by Strike, so each trade is one transaction (plus a one-time USDC approval).
  */
+const SETTLE_TIMEOUT_MS = 90_000;
+const RECEIPT_EVERY_MS = 5_000;
+const SETTLE_READ_MS = 700;
+/** Long enough for a trade signed at the last moment to show up. */
+const QUOTE_GRACE_MS = 20_000;
+const SHARES_EVERY_MS = 1_500;
+const READ_TRIES = 12;
+const never = new Promise<never>(() => undefined);
+
+const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+/** Arc's public RPC refuses about half of its reads, so one refusal is not an answer. */
+async function persist<T>(read: () => Promise<T>): Promise<T> {
+  for (let tries = READ_TRIES; ; tries--) {
+    try {
+      return await read();
+    } catch (err) {
+      if (tries <= 1) throw err;
+      await wait(SETTLE_READ_MS);
+    }
+  }
+}
+
+/**
+ * Arc's public RPC refuses nearly every `eth_getTransactionReceipt` but serves
+ * contract reads, so a trade counts as landed the moment the balance moves.
+ */
+async function sharesMoved(
+  holder: Address,
+  ticker: string,
+  before: bigint,
+  stopped: () => boolean,
+) {
+  while (!stopped()) {
+    const now = await readShares(holder, ticker).catch(() => before);
+    if (now !== before) return;
+    await wait(SHARES_EVERY_MS);
+  }
+  return never;
+}
+
+/** Only here to catch a revert, which never moves the balance. */
+async function receiptOf(hash: `0x${string}`, stopped: () => boolean) {
+  while (!stopped()) {
+    const rcpt = await arcPublicClient()
+      .getTransactionReceipt({ hash })
+      .catch(() => null);
+    if (rcpt?.status === "reverted")
+      throw new Error("The trade reverted onchain");
+    await wait(RECEIPT_EVERY_MS);
+  }
+  return never;
+}
+
 export function StockTrade({
   ticker,
   name,
   price,
   mainnetRoute,
+  startSide = "buy",
+  ownedShares = null,
   onClose,
 }: {
   ticker: string;
   name: string | null;
   price: number | null;
   mainnetRoute: string | null;
+  startSide?: "buy" | "sell";
+  /** What the page already knows, so this shows before the chain read returns. */
+  ownedShares?: number | null;
   onClose: () => void;
 }) {
   const { address, connector, chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
-  const [side, setSide] = useState<"buy" | "sell">("buy");
+  const [side, setSide] = useState<"buy" | "sell">(startSide);
   const [currency, setCurrency] = useState<Currency>("USDC");
   const [amount, setAmount] = useState("1");
-  const [held, setHeld] = useState<bigint | null>(null);
+  const [chainShares, setHeld] = useState<bigint | null>(null);
+  const held =
+    chainShares ??
+    (ownedShares == null ? null : BigInt(Math.round(ownedShares * 1e6)));
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ text: string; tx: string } | null>(null);
@@ -99,7 +161,7 @@ export function StockTrade({
     let cancelled = false;
     readShares(address as Address, ticker)
       .then((n) => !cancelled && setHeld(n))
-      .catch(() => !cancelled && setHeld(null));
+      .catch((err) => console.warn("[stock] shares read failed", err));
     return () => {
       cancelled = true;
     };
@@ -129,6 +191,7 @@ export function StockTrade({
     tradeLock.set(true);
     setError(null);
     setDone(null);
+    setBusy("Getting ready…");
     try {
       const arcId = getArcConfig().chainId;
       const client = arcPublicClient();
@@ -173,12 +236,14 @@ export function StockTrade({
         });
       }
       if (funding && funding.kind !== "arc") {
-        const arrived = await client.readContract({
-          address: getArcConfig().usdc,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [address],
-        });
+        const arrived = await persist(() =>
+          client.readContract({
+            address: getArcConfig().usdc,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [address],
+          }),
+        );
         if (arrived < need)
           throw new Error(
             `Only ${formatUnits(arrived, 6)} USDC reached Arc. It is safe in your wallet. Lower the amount and try again.`,
@@ -188,32 +253,54 @@ export function StockTrade({
         currency === "EURC" ? getArcConfig().eurc : getArcConfig().usdc;
       const units = parseUnits(amount, 6);
       if (side === "buy") {
-        const allowance = await client.readContract({
-          address: token,
-          abi: erc20Abi,
-          functionName: "allowance",
-          args: [address as Address, MARKET],
-        });
+        const allowance = await persist(() =>
+          client.readContract({
+            address: token,
+            abi: erc20Abi,
+            functionName: "allowance",
+            args: [address as Address, MARKET],
+          }),
+        );
         if (allowance < units) {
           setBusy(`Approve ${currency} once in your wallet…`);
-          const ap = await wallet.writeContract({
+          await wallet.writeContract({
             address: token,
             abi: erc20Abi,
             functionName: "approve",
             args: [MARKET, parseUnits("1000000", 6)],
           });
-          await client.waitForTransactionReceipt({ hash: ap });
+          const approved = Date.now() + SETTLE_TIMEOUT_MS;
+          for (;;) {
+            const now = await client
+              .readContract({
+                address: token,
+                abi: erc20Abi,
+                functionName: "allowance",
+                args: [address as Address, MARKET],
+              })
+              .catch(() => BigInt(0));
+            if (now >= units) break;
+            if (Date.now() > approved)
+              throw new Error(
+                `The ${currency} approval did not land. Try again.`,
+              );
+            await wait(SETTLE_READ_MS);
+          }
         }
       }
       setBusy("Getting the live price…");
       const q = await fetchQuote(ticker, currency);
       const qPrice = BigInt(q.price);
       // Sell takes shares: the USDC amount at the quoted price, capped at what is held.
+      const sharesBefore = await persist(() =>
+        readShares(address as Address, ticker),
+      );
+      const wanted = (units * BigInt(1_000_000)) / qPrice;
       const sharesIn =
         side === "sell"
-          ? [(units * BigInt(1_000_000)) / qPrice, held ?? BigInt(0)].reduce(
-              (a, b) => (a < b ? a : b),
-            )
+          ? wanted < sharesBefore
+            ? wanted
+            : sharesBefore
           : BigInt(0);
       if (side === "sell" && sharesIn <= BigInt(0))
         throw new Error(`You hold no ${ticker} to sell`);
@@ -232,18 +319,47 @@ export function StockTrade({
         ],
       });
       setBusy("Settling on Arc…");
-      const rcpt = await client.waitForTransactionReceipt({ hash: tx });
-      if (rcpt.status !== "success")
-        throw new Error("The trade reverted onchain");
+      let settled = false;
+      await Promise.race([
+        sharesMoved(address as Address, ticker, sharesBefore, () => settled),
+        receiptOf(tx, () => settled),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "The price quote expired before this trade confirmed. Check History, then try again.",
+                ),
+              ),
+            Math.max(q.deadline * 1000 - Date.now(), 0) + QUOTE_GRACE_MS,
+          ),
+        ),
+      ]).finally(() => {
+        settled = true;
+      });
       const px = Number(qPrice) / 1e6;
       setDone({
         text:
           side === "buy"
-            ? `Bought ${(Number(units) / Number(qPrice)).toFixed(6)} ${ticker} at ${SIGN[currency]}${px.toFixed(2)}`
+            ? `Bought ${formatUnits((units * BigInt(1_000_000)) / qPrice, 6)} ${ticker} at ${SIGN[currency]}${px.toFixed(2)}`
             : `Sold ${formatUnits(sharesIn, 6)} ${ticker} at ${SIGN[currency]}${px.toFixed(2)}`,
         tx,
       });
       refresh();
+      recordTrade(address, {
+        txHash: tx.toLowerCase(),
+        block: 0,
+        side,
+        symbol: ticker,
+        currency,
+        total: Number(
+          side === "buy" ? units : (sharesIn * qPrice) / BigInt(1_000_000),
+        ),
+        shares: Number(
+          side === "buy" ? (units * BigInt(1_000_000)) / qPrice : sharesIn,
+        ),
+        price: Number(qPrice),
+      });
     } catch (err) {
       const e = err as { shortMessage?: string; message?: string };
       setError(

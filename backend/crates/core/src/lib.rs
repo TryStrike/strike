@@ -21,6 +21,7 @@ pub mod rpc;
 pub mod schema;
 pub mod settlement;
 pub mod shadow;
+pub mod stock_trades;
 pub mod stream;
 pub mod ticks;
 pub mod treasury_view;

@@ -212,6 +212,19 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("round_commits", "created_at", TS),
     ("round_commits", "swarm_ref", "text"),
     ("round_commits", "arkiv_key", "text"),
+    ("stock_trades", "tx_hash", "text"),
+    ("stock_trades", "log_index", "bigint"),
+    ("stock_trades", "block", "bigint"),
+    ("stock_trades", "traded_at", "bigint"),
+    ("stock_trades", "wallet", "text"),
+    ("stock_trades", "side", "text"),
+    ("stock_trades", "symbol", "text"),
+    ("stock_trades", "currency", "text"),
+    ("stock_trades", "total", "bigint"),
+    ("stock_trades", "shares", "bigint"),
+    ("stock_trades", "quote", "bigint"),
+    ("stock_trade_cursor", "id", "bigint"),
+    ("stock_trade_cursor", "block", "bigint"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

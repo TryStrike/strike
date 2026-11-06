@@ -478,7 +478,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 /// How long a signed price is good for.
-pub const QUOTE_TTL_SECS: u64 = 60;
+pub const QUOTE_TTL_SECS: u64 = 120;
 
 fn word_u(v: u128) -> [u8; 32] {
     let mut w = [0u8; 32];

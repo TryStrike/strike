@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
     supervise("agent result recorder", agent::run_result_recorder());
     supervise("shadow log", strike_core::shadow::run());
     supervise("stock stats", strike_core::markets::run_stats_refresher());
+    supervise("stock trades", strike_core::stock_trades::run());
     if strike_core::world::dev_bypass() {
         tracing::warn!(
             "STRIKE_DEV_NO_WORLD=1: every wallet is its own Orb human and step-ups approve themselves. Dev only."

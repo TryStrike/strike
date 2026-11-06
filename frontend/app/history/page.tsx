@@ -21,6 +21,7 @@ import {
   HistoryFilters,
   HistoryPager,
   HistoryTable,
+  StockTrades,
 } from '@/components/history';
 import {
   buildHistoryCsv,
@@ -292,10 +293,10 @@ function HistoryPageInner() {
               Trade history
             </div>
             <h1 className="text-[28px] font-semibold leading-tight tracking-tight sm:text-[34px]">
-              Every round you settled
+              Every trade and round you settled
             </h1>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
-              Straight from the ledger. Nothing here moves your balance.
+              Stock trades from the chain, rounds from the ledger. Nothing here moves your balance.
             </p>
           </div>
 
@@ -317,6 +318,10 @@ function HistoryPageInner() {
             </button>
           </div>
         </header>
+
+        <div className="mb-6">
+          <StockTrades wallet={address} />
+        </div>
 
         <section aria-label="Round summary" className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat
