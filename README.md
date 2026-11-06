@@ -391,5 +391,3 @@ Set the Arc env vars in the project. `next.config.ts` applies CSP, `X-Frame-Opti
 - The browser has no database access. Every read and write goes through a typed backend route
 - Admin routes behind `requireAdminAuth`
 - Balance mutation routes gated by session cookie / `BALANCE_INTERNAL_SECRET`
-
-Report issues on [GitHub](https://example.com/strike/issues).
