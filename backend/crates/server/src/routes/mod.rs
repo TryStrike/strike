@@ -1,6 +1,3 @@
-//! Route families. Each module owns one area of `/api/...` and exposes
-//! `routes()`; `router()` merges them so the Next proxy is a 1:1 rewrite.
-
 pub mod agent;
 pub mod arc;
 pub mod arkiv;
@@ -14,6 +11,7 @@ pub mod precheck;
 pub mod prices;
 pub mod proofs;
 pub mod session;
+pub mod stepup;
 pub mod stream;
 pub mod withdrawals;
 pub mod world;
@@ -41,12 +39,11 @@ pub fn router() -> Router {
         .merge(proofs::routes())
         .merge(session::routes())
         .merge(stream::routes())
+        .merge(stepup::routes())
         .merge(withdrawals::routes())
         .merge(world::routes())
 }
 
-/// Liveness for the container orchestrator and the migration cutover check.
-/// `{"ok":true}` matches the shape the rest of the API answers with.
 async fn health() -> ApiResult<Json<Value>> {
     let database = match db::ping().await {
         Ok(()) => "up",

@@ -1,35 +1,3 @@
-//! Pure money-movement logic behind `/api/balance/{bet,deposit,win,withdraw}`.
-//!
-//! Everything here is side-effect free: no DB, no network, no ambient config
-//! or clock — handlers pass rows, secrets and timestamps in explicitly, and
-//! tests pin every branch offline. The HTTP layer in the server crate
-//! (`routes/balance_mutation.rs`) owns I/O; this module owns validation
-//! order, amount math and the exact JSON bodies.
-//!
-//! Wire rules:
-//!   * a `Rejection` is `(status, body)` and reproduces `NextResponse.json`
-//!     byte-for-byte, key order included (`serde_json/preserve_order`);
-//!   * every check fires in a fixed order, including the quirks that
-//!     decide which 400 a caller gets (e.g. bet validates the ban *before*
-//!     the positivity check, withdraw crashes on `currency.toUpperCase()`
-//!     before it ever reaches the address);
-//!   * money that only JS touches in f64 (balance comparisons, the token's
-//!     `toFixed(8)` ceiling) is ported as the same f64 operations. Fees are not:
-//!     [`split_fee`] is exact, because a float fee could not be sent on-chain.
-//!     Multi-row cap totals use the exact-integer `amount_to_base_units`.
-//!
-//! Deliberate, documented deviations:
-//!   * `amount_to_base_units` saturates at `i128::MAX` where JS BigInt would
-//!     grow unbounded. Every consumer compares the total against amounts a
-//!     `numeric(30,10)` ledger can hold (≤ 1e26 base units), six orders of
-//!     magnitude below the saturation point, so the clamp cannot change a
-//!     verdict — absurd magnitudes still fail the cap closed.
-//!   * `to_fixed(8)` uses Rust's exact decimal formatting. A binary tie
-//!     (JS `toFixed` picks the larger digit; Rust rounds half-to-even) would
-//!     need an exact binary value with the digit past the cut equal to 5 and
-//!     only zeros after — impossible at 6/8 decimals because those ties
-//!     require a `5^k` factor no IEEE double carries. The two agree.
-
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{json, Map, Value};
 
@@ -37,26 +5,20 @@ use crate::address;
 use crate::bets::{self, value_to_string};
 use crate::money::parse_decimal;
 
-/// `(status, body)` — the exact HTTP answer a rejection path produces.
 pub type Rejection = (u16, Value);
-
-// ---------------------------------------------------------------------------
-// Shared JS-semantics helpers
-// ---------------------------------------------------------------------------
 
 pub fn error_body(message: &str) -> Value {
     json!({ "error": message })
 }
 
-/// The outer `catch` of every TS route.
+pub fn coded_body(code: &str, message: &str) -> Value {
+    json!({ "error": message, "code": code })
+}
+
 pub fn route_crash() -> Rejection {
     (500, error_body("An error occurred processing your request"))
 }
 
-/// `Number(x)` for a JSON value: strings parse in full (hex, exponent and
-/// `Infinity` included), `null` is 0, booleans are 1/0, everything else is
-/// NaN (`None`). Differs from `bets::number_coerce` only for objects/arrays,
-/// which JS reads as NaN but the coerce helper reads as 0.
 pub fn number_of(value: &Value) -> Option<f64> {
     match value {
         Value::Null => Some(0.0),
@@ -81,7 +43,6 @@ fn js_number_string(raw: &str) -> Option<f64> {
     if t.eq_ignore_ascii_case("-infinity") {
         return Some(f64::NEG_INFINITY);
     }
-    // Number("0x10") === 16 — hex literals are valid JS Number input.
     if t.len() > 2 && (t.starts_with("0x") || t.starts_with("0X")) {
         let body = &t[2..];
         if body.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -91,10 +52,6 @@ fn js_number_string(raw: &str) -> Option<f64> {
     t.parse::<f64>().ok().filter(|f| !f.is_nan())
 }
 
-/// `String(value)` in a template literal — objects become `[object Object]`,
-/// arrays join with commas, and null/undefined/bool/number print their
-/// literal spellings. `value_to_string` is serde-shaped for composites, which
-/// matters for the withdrawal intent message.
 pub fn js_to_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -106,9 +63,6 @@ pub fn js_to_string(value: &Value) -> String {
     }
 }
 
-/// `toNumber(value)` from the bet route: typeof-number keeps its value,
-/// anything else goes through `Number()`, and non-finite becomes JS `null`
-/// (`None`). A missing key is `undefined` -> `Number(undefined)` -> NaN.
 pub fn to_number_opt(value: Option<&Value>) -> Option<f64> {
     let value = value?;
     let n = match value {
@@ -118,7 +72,6 @@ pub fn to_number_opt(value: Option<&Value>) -> Option<f64> {
     n.filter(|f| f.is_finite())
 }
 
-/// `parseFloat(String(x))`, with the TS null/undefined short-circuit.
 pub fn parse_float_of(value: Option<&Value>) -> Option<f64> {
     let value = value?;
     match value {
@@ -131,24 +84,12 @@ fn parse_f64_string(s: &str) -> Option<f64> {
     bets::parse_float_prefix_str(s)
 }
 
-/// JS `value.toFixed(digits)`. Exponent-form output above 1e21 is not
-/// reproduced: the ledger cannot produce a value that large through
-/// `numeric(30,10)` after the conversions callers apply, and everything
-/// below prints in fixed notation both languages agree on.
 pub fn to_fixed(value: f64, digits: usize) -> String {
     format!("{value:.digits$}")
 }
 
-// ---------------------------------------------------------------------------
-// ledgerMath.ts: exact base-unit sums for the withdrawal cap
-// ---------------------------------------------------------------------------
-
-/// USDC settles at 6 decimals (`USDC_DECIMALS`).
 pub const USDC_DECIMALS: u32 = 6;
 
-/// `amountToBaseUnits(value, decimals)`: whole-token amount -> 6-decimal
-/// base units, rounding UP for fractional digits beyond the token precision.
-/// Rejects NaN/Infinity/negatives/garbage with `None` so sums fail closed.
 pub fn amount_to_base_units(value: &Value, decimals: u32) -> Option<i128> {
     let raw = match value {
         Value::String(s) => s.trim().to_string(),
@@ -158,13 +99,11 @@ pub fn amount_to_base_units(value: &Value, decimals: u32) -> Option<i128> {
     if raw.is_empty() {
         return None;
     }
-    // The shape guard `/^-?(\d+(\.\d*)?|\.\d+)(e[-+]?\d+)?$/i` — rejecting
-    // garbage before any parsing, exactly like the TS.
     if !decimal_shape_ok(&raw) {
         return None;
     }
     if raw.starts_with('-') {
-        return None; // ledger amounts are never negative
+        return None;
     }
 
     let plain = is_plain_decimal(&raw);
@@ -184,15 +123,12 @@ pub fn amount_to_base_units(value: &Value, decimals: u32) -> Option<i128> {
         return Some(units);
     }
 
-    // Exponent form / anything outside plain decimal notation: JS falls back
-    // to `Math.ceil(num * 10**decimals)` on the double.
     let num = raw.parse::<f64>().ok()?;
     if !num.is_finite() || num < 0.0 {
         return None;
     }
     let scaled = (num * 10f64.powi(decimals as i32)).ceil();
     if !scaled.is_finite() {
-        // `BigInt(Number.MAX_SAFE_INTEGER)` in the TS.
         return Some(9_007_199_254_740_991);
     }
     Some(if scaled > 0.0 {
@@ -202,8 +138,6 @@ pub fn amount_to_base_units(value: &Value, decimals: u32) -> Option<i128> {
     })
 }
 
-/// `String(1e21)` prints `1e+21`; serde prints `1e21`. Both spellings parse
-/// here, so both languages take the same branch.
 fn saturating_f64_to_i128(v: f64) -> i128 {
     if v >= i128::MAX as f64 {
         i128::MAX
@@ -213,9 +147,6 @@ fn saturating_f64_to_i128(v: f64) -> i128 {
 }
 
 fn parse_units_decimal(digits: &str) -> i128 {
-    // A `numeric(30,10)` row can never carry more than ~31 significant
-    // digits, and anything longer is absurd magnitude: clamp instead of
-    // poisoning the cap with a panic (BigInt would just keep growing).
     digits.parse::<i128>().unwrap_or(i128::MAX)
 }
 
@@ -250,7 +181,7 @@ fn decimal_shape_ok(raw: &str) -> bool {
         return false;
     }
     match frac {
-        Some(f) => f.chars().all(|c| c.is_ascii_digit()), // empty fraction allowed ("1.")
+        Some(f) => f.chars().all(|c| c.is_ascii_digit()),
         None => true,
     }
 }
@@ -282,8 +213,6 @@ fn split_decimal(raw: &str) -> (String, String) {
     }
 }
 
-/// `sumAmountsToBaseUnits`: exact sum; `None` when any entry is unparseable,
-/// so a corrupt ledger row fails the cap closed instead of disabling it.
 pub fn sum_amounts_to_base_units<'a, I: IntoIterator<Item = &'a Value>>(
     values: I,
     decimals: u32,
@@ -296,13 +225,9 @@ pub fn sum_amounts_to_base_units<'a, I: IntoIterator<Item = &'a Value>>(
     Some(total)
 }
 
-/// `baseUnitsToNumber`: base units -> whole tokens via the exact digit
-/// split (not a division), so 1_500_000 is 1.5 and 1 is 0.000001.
 pub fn base_units_to_number(base: i128, decimals: u32) -> f64 {
     let negative = base < 0;
     let magnitude = if base == i128::MIN {
-        // -i128::MIN is not representable; the digit string below is what JS
-        // would print for the magnitude anyway.
         (i128::MAX as u128 + 1).to_string()
     } else {
         base.abs().to_string()
@@ -318,8 +243,6 @@ pub fn base_units_to_number(base: i128, decimals: u32) -> f64 {
     let fraction = &digits[split..];
     let trimmed = fraction.trim_end_matches('0');
     let text = if trimmed.is_empty() {
-        // An all-zero fraction prints as the integer part alone: appending a
-        // digit here would silently scale the balance by ten.
         if whole.is_empty() {
             "0".to_string()
         } else {
@@ -328,20 +251,15 @@ pub fn base_units_to_number(base: i128, decimals: u32) -> f64 {
     } else {
         format!("{whole}.{trimmed}")
     };
-    let n: f64 = text.parse().unwrap_or({
-        // Degenerate fallback: divide, which is what a float model would do.
-        (base.abs() as f64) / 10f64.powi(decimals as i32)
-    });
+    let n: f64 = text
+        .parse()
+        .unwrap_or((base.abs() as f64) / 10f64.powi(decimals as i32));
     if negative {
         -n
     } else {
         n
     }
 }
-
-// ---------------------------------------------------------------------------
-// platformFee.ts: tiered fee maths
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
@@ -360,8 +278,6 @@ impl Tier {
     }
 }
 
-/// The deposit/withdraw tier lookups only accept these three spellings;
-/// anything else (including a missing or erroring row) is `free`.
 pub fn resolve_tier(tier_value: Option<&Value>) -> Tier {
     match tier_value.and_then(Value::as_str) {
         Some("standard") => Tier::Standard,
@@ -370,7 +286,6 @@ pub fn resolve_tier(tier_value: Option<&Value>) -> Tier {
     }
 }
 
-/// The player keeps `100 - fee_percent` of the gross.
 pub fn fee_percent(tier: Tier) -> u32 {
     match tier {
         Tier::Free => 10,
@@ -379,8 +294,6 @@ pub fn fee_percent(tier: Tier) -> u32 {
     }
 }
 
-/// `getFeePercentLabel` — `Math.round(percent * 100)`, which is 10/9/8 for
-/// the three tiers.
 pub fn fee_percent_label(tier: Tier) -> &'static str {
     match tier {
         Tier::Free => "10%",
@@ -389,43 +302,26 @@ pub fn fee_percent_label(tier: Tier) -> &'static str {
     }
 }
 
-/// An amount as the decimal it was written as: the shortest text that round-trips
-/// the double. `None` past what a `Decimal` holds.
 pub fn exact_amount(amount: f64) -> Option<Decimal> {
     parse_decimal(&format!("{amount}")).ok()
 }
 
-/// Rounds down to what the token can represent.
 pub fn floor_to_token(amount: Decimal) -> Decimal {
     amount.round_dp_with_strategy(USDC_DECIMALS, RoundingStrategy::ToZero)
 }
 
-/// `(fee, net)`. The player's net floors to the token's 6 decimals and the fee is
-/// the remainder, so fee + net is exactly the gross and the net is always a
-/// payable amount. A gross with more than 6 decimals leaves a fee that does too:
-/// only the fee's on-chain transfer floors, and that dust stays in the treasury.
-/// `None` when the sum overflows a `Decimal`.
 pub fn split_fee(gross: Decimal, tier: Tier) -> Option<(Decimal, Decimal)> {
     let kept = gross.checked_mul(Decimal::from(100 - fee_percent(tier)))? / Decimal::ONE_HUNDRED;
     let net = floor_to_token(kept);
     Some((gross - net, net))
 }
 
-// ---------------------------------------------------------------------------
-// The banned-wallet message every path shares
-// ---------------------------------------------------------------------------
-
 pub const BANNED_MESSAGE: &str = "This wallet is banned from the platform.";
 
 pub fn banned_rejection() -> Rejection {
-    (403, error_body(BANNED_MESSAGE))
+    (403, coded_body("banned", BANNED_MESSAGE))
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/balance/bet
-// ---------------------------------------------------------------------------
-
-/// `BALANCE_SETTLEMENT_SECRET` missing: the TS 503 body depends on NODE_ENV.
 pub fn bet_signing_unavailable(is_development: bool) -> Rejection {
     let message = if is_development {
         "Set BALANCE_SETTLEMENT_SECRET in .env (any long random string) and restart the dev server."
@@ -438,14 +334,9 @@ pub fn bet_signing_unavailable(is_development: bool) -> Rejection {
 pub struct BetHead<'a> {
     pub user_address: &'a Value,
     pub bet_amount: &'a Value,
-    /// `Number(betAmount)` — used for every comparison; the *original* value
-    /// is what reaches the RPC (a stringified amount must land verbatim, as
-    /// the driver stringified it).
     pub amount: f64,
 }
 
-/// Checks 1-3 of the bet route: required fields, finiteness, address shape.
-/// The ban check runs between this and `bet_tail`.
 pub fn bet_head(body: &Value) -> Result<BetHead<'_>, Rejection> {
     let user_address = body.get("userAddress");
     let bet_amount = body.get("betAmount");
@@ -476,16 +367,12 @@ pub fn bet_head(body: &Value) -> Result<BetHead<'_>, Rejection> {
 
 pub struct BetPlan {
     pub amount: f64,
-    /// The raw betAmount JSON value for the `p_bet_amount` bind.
     pub bet_amount: Value,
     pub user_key: String,
     pub currency: String,
 }
 
-/// Checks after the ban probe: positivity, multiplier, target cell, then the
-/// currency normalisation (which *crashes* the TS route on a non-string, so
-/// it must run last and only after everything else passed).
-#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0)` is the NaN-safe spelling
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
     if !(head.amount > 0.0) {
         return Err((400, error_body("Bet amount must be greater than zero")));
@@ -511,7 +398,6 @@ pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
             let price_change_missing = cell.get("priceChange").is_none();
             !(id_missing || price_change_missing)
         }
-        // Truthy non-objects pass `!targetCell` but have no usable `id`.
         Some(cell) if bets::is_truthy(Some(cell)) => {
             cell.get("id").is_some_and(|v| !v.is_null()) && cell.get("priceChange").is_some()
         }
@@ -521,8 +407,6 @@ pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
         return Err((400, error_body("Invalid target cell data")));
     }
 
-    // `currency.toUpperCase()` after the default destructure: null and
-    // non-strings throw a TypeError into the route's outer catch (500).
     let currency = match body.get("currency") {
         None => "USDC".to_string(),
         Some(Value::String(s)) => s.to_uppercase(),
@@ -539,14 +423,10 @@ pub fn bet_tail(head: BetHead<'_>, body: &Value) -> Result<BetPlan, Rejection> {
 
 #[derive(Debug)]
 pub enum BetRows {
-    /// The ledger row the deduction will hit; carries its `user_address`.
     Ledger(String),
     Reject(Rejection),
 }
 
-/// Empty / frozen / banned / pick-the-richest-sufficient-row, in TS order.
-/// `rows` come from `SELECT user_address, balance, status` and are scanned in
-/// result order for the status guards before any sorting.
 pub fn bet_choose_row(rows: &[Value], amount: f64, currency: &str) -> BetRows {
     if rows.is_empty() {
         return BetRows::Reject((
@@ -566,9 +446,6 @@ pub fn bet_choose_row(rows: &[Value], amount: f64, currency: &str) -> BetRows {
         }
     }
     let mut sorted: Vec<&Value> = rows.iter().collect();
-    // JS sort comparator `Number(b.balance) - Number(a.balance)`; NaN results
-    // leave the order implementation-defined in V8, matching here is moot
-    // because balances are NOT NULL numerics.
     sorted.sort_by(|a, b| {
         let ba = to_number_opt(a.get("balance")).unwrap_or(f64::NAN);
         let bb = to_number_opt(b.get("balance")).unwrap_or(f64::NAN);
@@ -595,8 +472,6 @@ pub fn bet_choose_row(rows: &[Value], amount: f64, currency: &str) -> BetRows {
     }
 }
 
-/// `sanitizeBetRequestId`: client keys must look like `crypto.randomUUID()`
-/// output or trimmed neighbours; garbage never reaches the unique index.
 pub fn sanitize_bet_request_id(value: Option<&Value>) -> Option<String> {
     let raw = value.and_then(Value::as_str).map(str::trim)?;
     let len = raw.chars().count();
@@ -611,7 +486,6 @@ pub fn sanitize_bet_request_id(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// `bet_req_${roundId}_${userKey.slice(-8)}_${Date.now()}`.
 pub fn derived_bet_request_id(round_id: Option<&Value>, user_key: &str, now_ms: i64) -> String {
     let round = round_id
         .map(value_to_string)
@@ -627,12 +501,10 @@ pub fn derived_bet_request_id(round_id: Option<&Value>, user_key: &str, now_ms: 
     format!("bet_req_{round}_{tail}_{now_ms}")
 }
 
-/// `bet_${Date.now()}_${randomUUID().replace(/-/g,'').slice(0,12)}`.
 pub fn build_bet_id(now_ms: i64, uuid_hex12: &str) -> String {
     format!("bet_{now_ms}_{uuid_hex12}")
 }
 
-/// `createSettlementToken` inputs the route must sign *before* the deduction.
 #[derive(Debug)]
 pub struct TokenMint {
     pub bet_id: String,
@@ -643,19 +515,19 @@ pub struct TokenMint {
 
 #[derive(Debug)]
 pub enum BetRpcDecision {
-    /// Duplicate that minted a token first time: re-sign with the stored
-    /// payout ceiling so the retry keeps a settlement window.
     ReplayMint(TokenMint),
-    /// Duplicate with a stored token and no usable ceiling: replay it.
     ReplayStored {
         bet_id: String,
         token: String,
         new_balance: Option<f64>,
     },
-    /// Duplicate that never got a token: 409.
-    Conflict { body: Value },
-    /// Anything not an explicit well-formed success.
-    FailClosed { status: u16, body: Value },
+    Conflict {
+        body: Value,
+    },
+    FailClosed {
+        status: u16,
+        body: Value,
+    },
     Success {
         new_balance: f64,
         bet_id: String,
@@ -663,9 +535,6 @@ pub enum BetRpcDecision {
     },
 }
 
-/// Maps the `place_bet_locked` JSON onto the exact TS responses. The replay
-/// re-sign branch returns the mint inputs; the HTTP layer owns signing because
-/// the secret lives in `config()`.
 pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -> BetRpcDecision {
     let new_balance = to_number_opt(result.get("new_balance"));
     if result
@@ -713,11 +582,10 @@ pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -
             .filter(|s| !s.is_empty())
             .unwrap_or("Bet already processed. Please place a new bet.");
         return BetRpcDecision::Conflict {
-            body: error_body(error),
+            body: coded_body("duplicate", error),
         };
     }
 
-    // Fail closed unless every success field is explicitly present.
     let explicit_success = result.get("success").and_then(Value::as_bool) == Some(true);
     let bet_id = result
         .get("bet_id")
@@ -741,23 +609,42 @@ pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -
         .get("error")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
+    if let (Some(code), Some(message)) = (result.get("code").and_then(Value::as_str), error) {
+        let mut body = coded_body(code, message);
+        if let Some(until) = result.get("until").filter(|u| !u.is_null()) {
+            body["until"] = until.clone();
+        }
+        return BetRpcDecision::FailClosed {
+            status: crate::error::status_of(code),
+            body,
+        };
+    }
     let status_and_body: (u16, Value) = match error {
         Some("Insufficient balance") => (
             400,
-            error_body(&format!(
-                "Insufficient house balance. Deposit more {currency}."
-            )),
+            coded_body(
+                "insufficient_balance",
+                &format!("Insufficient house balance. Deposit more {currency}."),
+            ),
         ),
         Some("User not found") => (
             400,
-            error_body(&format!(
-                "No house balance for this wallet in {currency}. Deposit from the Wallet tab first."
-            )),
+            coded_body(
+                "insufficient_balance",
+                &format!(
+                    "No house balance for this wallet in {currency}. Deposit from the Wallet tab first."
+                ),
+            ),
         ),
-        Some(BANNED_MESSAGE) => (403, error_body(BANNED_MESSAGE)),
-        Some(other) if other.to_lowercase().contains("frozen") => (403, error_body(other)),
+        Some(BANNED_MESSAGE) => (403, coded_body("banned", BANNED_MESSAGE)),
+        Some(other) if other.to_lowercase().contains("frozen") => {
+            (403, coded_body("frozen", other))
+        }
         Some(other) => (400, error_body(other)),
-        None => (503, error_body("Bet placement failed")),
+        None => (
+            503,
+            json!({ "error": "Bet placement failed", "retryable": true }),
+        ),
     };
     BetRpcDecision::FailClosed {
         status: status_and_body.0,
@@ -765,8 +652,6 @@ pub fn bet_rpc_decision(result: &Value, ledger_user_key: &str, currency: &str) -
     }
 }
 
-/// `round` is the frozen view `place_bet_locked` answered with, the numbers a
-/// client must show instead of its own.
 pub fn bet_success_body(
     remaining_balance: Value,
     bet_id: &str,
@@ -791,7 +676,6 @@ pub fn bet_success_body(
     Value::Object(map)
 }
 
-/// What an in-process caller learns from the locked bet path.
 #[derive(Debug, PartialEq)]
 pub enum BetOutcome {
     Placed { bet_id: String },
@@ -821,6 +705,7 @@ pub fn bet_outcome(result: &Result<Value, Rejection>) -> BetOutcome {
     match body.get("code").and_then(Value::as_str) {
         Some("price_moved") => BetOutcome::PriceMoved,
         Some("price_unavailable") => BetOutcome::PriceUnavailable,
+        Some("banned") => BetOutcome::Banned,
         _ if message == BANNED_MESSAGE => BetOutcome::Banned,
         _ if message.starts_with("Insufficient house balance")
             || message.starts_with("No house balance for this wallet") =>
@@ -831,14 +716,9 @@ pub fn bet_outcome(result: &Result<Value, Rejection>) -> BetOutcome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/balance/deposit
-// ---------------------------------------------------------------------------
-
 pub struct DepositHead<'a> {
     pub user_address: &'a Value,
     pub tx_hash: &'a Value,
-    /// `Number(amount)` — every fee/verification/RPC number derives from it.
     pub amount: f64,
 }
 
@@ -867,9 +747,7 @@ pub fn deposit_head(body: &Value) -> Result<DepositHead<'_>, Rejection> {
     })
 }
 
-/// Post-ban deposit checks: positivity, the `String(currency ?? '')`
-/// normalisation and the supported-currency gate.
-#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0)` is the NaN-safe spelling
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn deposit_currency(body: &Value, amount: f64) -> Result<String, Rejection> {
     if !(amount > 0.0) {
         return Err((400, error_body("Deposit amount must be greater than zero")));
@@ -888,8 +766,6 @@ pub fn deposit_currency(body: &Value, amount: f64) -> Result<String, Rejection> 
     }
 }
 
-/// `verification.retryable` branch: 502 with progress keys *only* when the
-/// TS included them (insufficient confirmations).
 pub fn deposit_pending_body(reason: &str, confirmations: Option<u64>) -> (u16, Value) {
     let mut map = Map::new();
     map.insert(
@@ -907,7 +783,6 @@ pub fn deposit_pending_body(reason: &str, confirmations: Option<u64>) -> (u16, V
 
 pub const MIN_CONFIRMATIONS_TS: u64 = 3;
 
-/// Same, with the real reason code.
 pub fn deposit_terminal(reason: &str, message: &str) -> (u16, Value) {
     (
         400,
@@ -937,13 +812,11 @@ pub fn deposit_unavailable() -> (u16, Value) {
     )
 }
 
-/// `/duplicate key|unique/i` on the RPC's error string.
 pub fn is_audit_duplicate(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("duplicate key") || lower.contains("unique")
 }
 
-/// `` `${txHash}|feeTx:${feeTxHash}` `` when a fee transfer happened.
 pub fn combined_tx_hash(tx_hash: &Value, fee_tx: Option<&str>) -> String {
     let tx = js_to_string(tx_hash);
     match fee_tx {
@@ -952,16 +825,9 @@ pub fn combined_tx_hash(tx_hash: &Value, fee_tx: Option<&str>) -> String {
     }
 }
 
-/// The amount string `verify_deposit` must be handed: the claimed amount in
-/// base units rounded UP to 6 decimals (the `requiredBaseUnits` direction —
-/// the treasury must have received at least this). Values beyond what u128
-/// can express are clamped; no real transfer can satisfy them, so the
-/// verification fails closed exactly like the TS one does.
 pub fn deposit_required_amount_string(amount: f64) -> String {
     let units = amount_to_base_units(&Value::from(amount), USDC_DECIMALS);
     let units = units.unwrap_or(9_007_199_254_740_991);
-    // `i128` already tops out below `u128::MAX`; a negative clamp would wrap
-    // the whole amount to 2^128-1 and demand an impossible transfer.
     let units = units.max(0) as u128;
     let whole = units / 1_000_000;
     let frac = units % 1_000_000;
@@ -996,10 +862,6 @@ pub fn deposit_success_body(
     })
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/balance/win
-// ---------------------------------------------------------------------------
-
 pub struct WinRequest<'a> {
     pub user_address: &'a str,
     pub currency: Value,
@@ -1007,8 +869,6 @@ pub struct WinRequest<'a> {
     pub settlement_token: Value,
 }
 
-/// A claim names a bet and proves it holds the bet's token. Any `winAmount` or
-/// price in the body is ignored: the server computes the result.
 pub fn win_head(body: &Value) -> Result<WinRequest<'_>, Rejection> {
     let user_address = body.get("userAddress");
     if !bets::is_truthy(user_address) {
@@ -1033,8 +893,6 @@ pub fn win_head(body: &Value) -> Result<WinRequest<'_>, Rejection> {
     })
 }
 
-/// The currency normalisation (a non-string truthy currency is a TS TypeError ->
-/// 500; falsy falls back to USDC before `.toUpperCase`).
 pub fn win_after_ban(req: &WinRequest<'_>) -> Result<String, Rejection> {
     let currency = match &req.currency {
         Value::String(s) if !s.is_empty() => s.to_uppercase(),
@@ -1047,8 +905,6 @@ pub fn win_after_ban(req: &WinRequest<'_>) -> Result<String, Rejection> {
     }
 }
 
-/// The settlement-token binding: bet, wallet and currency. Caller verifies the
-/// HMAC first; a `None` payload maps to the 401 here.
 pub fn win_token_failure(
     payload: Option<&crate::crypto::SettlementPayload>,
     bet_id: &Value,
@@ -1079,7 +935,6 @@ pub fn win_unknown_bet() -> Rejection {
     )
 }
 
-/// The claim came early. The client keeps its token and tries again at `end_ms`.
 pub fn win_round_open(end_ms: i64) -> Rejection {
     (
         409,
@@ -1091,8 +946,6 @@ pub fn win_round_open(end_ms: i64) -> Rejection {
     )
 }
 
-/// The server's result, whoever settled it. `won` and `payout` are what a client
-/// shows; `winAmount` is the old name for the payout.
 pub fn win_body(result: &Value, bet_id: &str) -> Value {
     let outcome = result["outcome"].as_str().unwrap_or_default();
     let payout = parse_float_of(result.get("payout")).unwrap_or(0.0);
@@ -1121,14 +974,9 @@ pub fn win_body(result: &Value, bet_id: &str) -> Value {
     Value::Object(map)
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/balance/withdraw
-// ---------------------------------------------------------------------------
-
 pub struct WithdrawHead<'a> {
     pub user_address: &'a Value,
     pub amount: &'a Value,
-    /// `Number(amount)` for the comparisons before the exact-integer path.
     pub amount_num: f64,
     pub currency: String,
 }
@@ -1147,8 +995,6 @@ pub fn withdraw_head(body: &Value) -> Result<WithdrawHead<'_>, Rejection> {
     if value.is_none() || !value.map(|f| f.is_finite()).unwrap_or(false) {
         return Err((400, error_body("Invalid withdrawal amount")));
     }
-    // `currency.toUpperCase()` right after destructuring: null/non-strings
-    // crash the TS route (500) before the address check even runs.
     let currency = match body.get("currency") {
         None => "USDC".to_string(),
         Some(Value::String(s)) => s.to_uppercase(),
@@ -1190,10 +1036,6 @@ pub fn withdraw_signature_mismatch() -> Rejection {
     )
 }
 
-/// The exact EIP-191 message from `withdraw`: the *raw* userAddress
-/// spelling, `amount.toFixed(8)`, the uppercased currency and the raw
-/// signedAt. `amount.toFixed` throws on anything that is not a number — the
-/// outer catch answers 500.
 pub fn withdraw_intent_message(
     user_address: &Value,
     amount: &Value,
@@ -1206,9 +1048,6 @@ pub fn withdraw_intent_message(
     };
     let amount_fixed = match amount_num {
         Some(a) if a.is_finite() => to_fixed(a, 8),
-        // (1e21).toFixed(8) is legal in JS and prints exponent form; the
-        // ledger caps make that unreachable for a signed intent — a
-        // non-finite or non-numeric amount is the TypeError path either way.
         _ => return Err(route_crash()),
     };
     Ok(format!(
@@ -1220,7 +1059,6 @@ pub fn withdraw_intent_message(
 
 #[derive(Debug)]
 pub enum WithdrawRows {
-    /// `(dbAddress, balance row value)` of the row the payout is keyed on.
     Ledger(String, Value),
     Reject(Rejection),
 }
@@ -1259,7 +1097,6 @@ pub fn withdraw_choose_row(rows: &[Value], amount: f64, currency_raw: &str) -> W
                 .to_string(),
             row.get("balance").cloned().unwrap_or(Value::Null),
         ),
-        // NOTE the TS interpolates the *raw* (un-normalised) currency here.
         None => WithdrawRows::Reject((
             400,
             error_body(&format!("Insufficient house balance in {currency_raw}")),
@@ -1267,7 +1104,6 @@ pub fn withdraw_choose_row(rows: &[Value], amount: f64, currency_raw: &str) -> W
     }
 }
 
-/// `withdraw` row pass-through for the replay branch.
 pub fn withdraw_replay_body(existing: &Value, balance: &Value) -> Value {
     json!({
         "success": true,
@@ -1280,8 +1116,6 @@ pub fn withdraw_replay_body(existing: &Value, balance: &Value) -> Value {
     })
 }
 
-/// The `max payout = floor(total_deposited * 1.08)` cap in exact base units.
-/// `Err` carries the response; `Ok(())` means "within cap or no deposits".
 pub fn withdraw_cap_check(
     amount: &Value,
     deposits: &[Value],
@@ -1306,7 +1140,6 @@ pub fn withdraw_cap_check(
     let (amount_base, deposited, withdrawn_sum, pending_sum) =
         match (amount_base, deposited, withdrawn_sum, pending_sum) {
             (Some(a), Some(d), Some(w), Some(p)) => (a, d, w, p),
-            // An unparseable row disables the comparison: fail closed, 503.
             _ => {
                 return Err((
                     503,
@@ -1317,7 +1150,6 @@ pub fn withdraw_cap_check(
     if deposited <= 0 {
         return Ok(());
     }
-    // floor(deposited * 1.08), never rounded up.
     let max_withdrawable = deposited.saturating_mul(108) / 100;
     let already_out = withdrawn_sum.saturating_add(pending_sum);
     if already_out.saturating_add(amount_base) > max_withdrawable {
@@ -1342,8 +1174,6 @@ pub fn withdraw_cap_check(
 
 pub const FREQUENCY_REVIEW_THRESHOLD: i64 = 10;
 
-/// `isWithdrawalFrequencyReviewExemptWallet` — canonical-set membership,
-/// with the env list and the candidate both canonicalised.
 pub fn frequency_review_exempt(address: &str, exempt_list: &[String]) -> bool {
     let normalized = address::canonical(address.trim());
     !normalized.is_empty() && exempt_list.iter().any(|entry| entry == &normalized)
@@ -1400,18 +1230,12 @@ pub fn withdraw_success_body(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     const ADDR: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
-
-    // -- amount parsing -----------------------------------------------------
 
     #[test]
     fn base_units_rejects_garbage_and_negatives() {
@@ -1456,14 +1280,10 @@ mod tests {
 
     #[test]
     fn base_units_handles_float_noise_and_exponents() {
-        // 0.1 + 0.2 in JS doubles -> "0.30000000000000004" -> rounds UP to
-        // 300001, exactly like the TS BigInt path.
         let sum = 0.1f64 + 0.2f64;
         assert_eq!(amount_to_base_units(&json!(sum), 6), Some(300_001));
-        // Number#toString() exponent form below one micro-unit.
         assert_eq!(amount_to_base_units(&json!(1e-7), 6), Some(1));
         assert_eq!(amount_to_base_units(&json!("1e+2"), 6), Some(100_000_000));
-        // Absurd magnitudes clamp (JS would grow a BigInt; i128 saturates).
         assert_eq!(amount_to_base_units(&json!(1e40), 6), Some(i128::MAX));
     }
 
@@ -1488,8 +1308,6 @@ mod tests {
         assert_eq!(base_units_to_number(-2_500_000, 6), -2.5);
     }
 
-    // -- fees ---------------------------------------------------------------
-
     #[test]
     fn tier_fees_and_labels() {
         let split = |amount: &str, tier| split_fee(parse_decimal(amount).unwrap(), tier).unwrap();
@@ -1497,9 +1315,6 @@ mod tests {
         assert_eq!(split("100", Tier::Free), (dec("10"), dec("90")));
         assert_eq!(split("100", Tier::Standard), (dec("9"), dec("91")));
         assert_eq!(split("100", Tier::Vip), (dec("8"), dec("92")));
-        // floor at 1e-8, in double order: JS and Rust both print 0.1 * 0.09 as
-        // 0.009, but scaled by 1e8 it is 899999.9999999999, so the floor loses
-        // a digit. Pinned from node: calculateFeeAmount(0.1, 'standard').
         assert_eq!(split("0.1", Tier::Standard), (dec("0.009"), dec("0.091")));
         assert_eq!(fee_percent_label(Tier::Free), "10%");
         assert_eq!(fee_percent_label(Tier::Standard), "9%");
@@ -1509,8 +1324,6 @@ mod tests {
         assert_eq!(resolve_tier(None), Tier::Free);
         assert_eq!(resolve_tier(Some(&json!(null))), Tier::Free);
     }
-
-    // -- bet validation order -----------------------------------------------
 
     fn bet_body(extra: Value) -> Value {
         let mut base = json!({
@@ -1535,7 +1348,6 @@ mod tests {
 
     #[test]
     fn bet_rejects_missing_fields_in_order() {
-        // missing session is the HTTP layer's guard; shape errors come next.
         let (status, resp) = bet_head(&json!({ "betAmount": 1 })).err().unwrap();
         assert_eq!(status, 400);
         assert_eq!(
@@ -1548,7 +1360,6 @@ mod tests {
             error_body("Missing required fields: userAddress, betAmount")
         );
         assert_eq!(status, 400);
-        // null betAmount is "missing", 0 is not (it fails the positivity gate).
         let (_, resp) = bet_head(&bet_body(json!({"betAmount": null})))
             .err()
             .unwrap();
@@ -1566,7 +1377,6 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(resp, error_body("Invalid bet amount"));
-        // JSON cannot carry Infinity: it arrives as null, the TS "missing" 400.
         let (_, resp) = bet_head(&bet_body(json!({"betAmount": json!(f64::INFINITY)})))
             .err()
             .unwrap();
@@ -1590,8 +1400,6 @@ mod tests {
 
     #[test]
     fn bet_stringified_amount_survives_to_the_rpc_bind() {
-        // The TS coerces for comparisons but binds the raw value; "10" must
-        // pass validation and reach p_bet_amount verbatim.
         let plan = bet_full(&bet_body(json!({"betAmount": "10"}))).expect("string amount passes");
         assert_eq!(plan.bet_amount, json!("10"));
         assert_eq!(plan.amount, 10.0);
@@ -1599,7 +1407,6 @@ mod tests {
 
     #[test]
     fn bet_positivity_and_ban_gate_order() {
-        // head passes for 0; the "greater than zero" rejection is post-ban.
         let zero = bet_body(json!({"betAmount": 0}));
         let head = bet_head(&zero).unwrap();
         let (_, resp) = bet_tail(head, &zero).err().unwrap();
@@ -1652,7 +1459,6 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(resp, error_body("Invalid target cell data"));
-        // id null counts as missing, priceChange null does not (=== undefined).
         assert!(bet_full(&bet_body(
             json!({"targetCell": {"id": null, "priceChange": 1}})
         ))
@@ -1674,7 +1480,6 @@ mod tests {
         let mut body = bet_body(json!({}));
         body.as_object_mut().unwrap().remove("currency");
         assert_eq!(bet_full(&body).unwrap().currency, "USDC");
-        // null / non-string currency: `.toUpperCase()` TypeError -> outer 500.
         assert_eq!(
             bet_full(&bet_body(json!({"currency": null})))
                 .err()
@@ -1720,7 +1525,6 @@ mod tests {
             BetRows::Reject((403, resp)) => assert_eq!(resp, error_body("Account is banned.")),
             other => panic!("expected banned, got {other:?}"),
         }
-        // Picks the richest *sufficient* row, not the richest row.
         let mixed = vec![
             json!({"user_address": "lo@x", "balance": 5, "status": "active"}),
             json!({"user_address": "hi@x", "balance": 50, "status": "active"}),
@@ -1754,7 +1558,6 @@ mod tests {
     fn bet_derived_request_id_and_bet_id_shapes() {
         let key = derived_bet_request_id(Some(&json!(7)), "0x1234567890abcdef", 1700000000000);
         assert_eq!(key, "bet_req_7_90abcdef_1700000000000");
-        // A missing roundId interpolates "undefined" exactly like JS.
         assert_eq!(
             derived_bet_request_id(None, "0xdeadbeef", 1),
             "bet_req_undefined_deadbeef_1",
@@ -1788,8 +1591,6 @@ mod tests {
             error_body("Betting is temporarily unavailable. Please try again later.")
         );
     }
-
-    // -- in-process bet outcome ----------------------------------------------
 
     #[test]
     fn bet_outcome_types_every_bet_path_result() {
@@ -1863,8 +1664,6 @@ mod tests {
         );
     }
 
-    // -- place_bet_locked outcome mapping ------------------------------------
-
     fn lock_result(overrides: Value) -> Value {
         let mut base = json!({
             "success": true, "duplicate": false, "error": null,
@@ -1892,15 +1691,12 @@ mod tests {
             }
             other => panic!("expected success, got {other:?}"),
         }
-        // A missing betId is a fail-closed ambiguity, never a minted token.
         let d = bet_rpc_decision(
             &lock_result(json!({"bet_id": null, "error": null})),
             ADDR,
             "USDC",
         );
         assert!(matches!(d, BetRpcDecision::FailClosed { status: 503, .. }));
-        // new_balance null is JS-null via toNumber(null)=0? No: null -> 0,
-        // which is a *number*, so the gate passes on explicit success.
         let d = bet_rpc_decision(&lock_result(json!({"new_balance": null})), ADDR, "USDC");
         assert!(matches!(
             d,
@@ -1909,7 +1705,6 @@ mod tests {
                 ..
             }
         ));
-        // undefined (absent) new_balance -> toNumber -> NaN -> fail closed 503.
         let mut r = lock_result(json!({}));
         r.as_object_mut().unwrap().remove("new_balance");
         assert!(matches!(
@@ -1929,7 +1724,6 @@ mod tests {
             }
             other => panic!("expected replay-mint, got {other:?}"),
         }
-        // Stored ceiling 0 -> falsy -> replay the stored token verbatim.
         let dup0 = lock_result(json!({"duplicate": true, "success": false, "max_payout": 0}));
         match bet_rpc_decision(&dup0, "ledger@x", "USDC") {
             BetRpcDecision::ReplayStored {
@@ -1949,7 +1743,7 @@ mod tests {
         );
         match bet_rpc_decision(&dup, "l@x", "USDC") {
             BetRpcDecision::Conflict { body } => {
-                assert_eq!(body, error_body("Bet already processed"))
+                assert_eq!(body, coded_body("duplicate", "Bet already processed"))
             }
             other => panic!("got {other:?}"),
         }
@@ -1960,7 +1754,10 @@ mod tests {
             BetRpcDecision::Conflict { body } => {
                 assert_eq!(
                     body,
-                    error_body("Bet already processed. Please place a new bet.")
+                    coded_body(
+                        "duplicate",
+                        "Bet already processed. Please place a new bet."
+                    )
                 )
             }
             other => panic!("got {other:?}"),
@@ -1969,22 +1766,33 @@ mod tests {
 
     #[test]
     fn bet_fail_closed_error_mapping() {
-        let cases = vec![
+        let cases =
+            vec![
             (
                 "Insufficient balance",
                 400u16,
-                "Insufficient house balance. Deposit more USDC.",
+                coded_body(
+                    "insufficient_balance",
+                    "Insufficient house balance. Deposit more USDC.",
+                ),
             ),
             (
                 "User not found",
                 400,
-                "No house balance for this wallet in USDC. Deposit from the Wallet tab first.",
+                coded_body(
+                    "insufficient_balance",
+                    "No house balance for this wallet in USDC. Deposit from the Wallet tab first.",
+                ),
             ),
-            (BANNED_MESSAGE, 403, BANNED_MESSAGE),
-            ("Account is FROZEN", 403, "Account is FROZEN"),
-            ("some ledger trouble", 400, "some ledger trouble"),
+            (BANNED_MESSAGE, 403, coded_body("banned", BANNED_MESSAGE)),
+            (
+                "Account is FROZEN",
+                403,
+                coded_body("frozen", "Account is FROZEN"),
+            ),
+            ("some ledger trouble", 400, error_body("some ledger trouble")),
         ];
-        for (rpc_error, status, message) in cases {
+        for (rpc_error, status, expected) in cases {
             let d = bet_rpc_decision(
                 &lock_result(json!({"success": false, "error": rpc_error})),
                 "l@x",
@@ -1993,10 +1801,31 @@ mod tests {
             match d {
                 BetRpcDecision::FailClosed { status: s, body } => {
                     assert_eq!(s, status, "{rpc_error}");
-                    assert_eq!(body, error_body(message), "{rpc_error}");
+                    assert_eq!(body, expected, "{rpc_error}");
                 }
                 other => panic!("{rpc_error}: got {other:?}"),
             }
+        }
+        let human =
+            json!({"success": false, "error": "Cooling off", "code": "human_cooloff", "until": 7});
+        match bet_rpc_decision(&lock_result(human), "l@x", "USDC") {
+            BetRpcDecision::FailClosed { status, body } => {
+                assert_eq!(status, 409);
+                assert_eq!(
+                    body,
+                    json!({"error": "Cooling off", "code": "human_cooloff", "until": 7})
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+        let gate =
+            json!({"success": false, "error": "Verify", "code": "human_required", "until": null});
+        match bet_rpc_decision(&lock_result(gate), "l@x", "USDC") {
+            BetRpcDecision::FailClosed { status, body } => {
+                assert_eq!(status, 403);
+                assert_eq!(body, coded_body("human_required", "Verify"));
+            }
+            other => panic!("got {other:?}"),
         }
     }
 
@@ -2023,13 +1852,10 @@ mod tests {
         assert_eq!(body["remainingBalance"], json!(4.5));
         assert_eq!(body["betId"], json!("bet_9"));
         assert_eq!(body["settlementToken"], json!("tok"));
-        // The non-duplicate success carries no duplicate/message keys at all.
         let plain = bet_success_body(json!(4.5), "bet_9", "tok", false, None);
         assert!(plain.get("duplicate").is_none());
         assert!(plain.get("message").is_none());
     }
-
-    // -- deposit --------------------------------------------------------------
 
     #[test]
     fn deposit_head_rejections() {
@@ -2059,7 +1885,6 @@ mod tests {
                 .err()
                 .unwrap();
         assert_eq!(resp, error_body("Invalid deposit amount"));
-        // A stringified amount normalises through Number(), as the TS did.
         let body = json!({"userAddress": ADDR, "amount": "10", "txHash": "0x1"});
         let head = deposit_head(&body).unwrap();
         assert_eq!(head.amount, 10.0);
@@ -2090,7 +1915,6 @@ mod tests {
     fn deposit_fee_net_and_rejection_label() {
         let (fee, net) = deposit_net(10.0, Tier::Free).unwrap();
         assert_eq!((fee, net), (Decimal::ONE, Decimal::from(9)));
-        // The smallest deposit nets nothing, and the route refuses that.
         let (fee, net) = deposit_net(0.000001, Tier::Free).unwrap();
         assert_eq!((fee, net), (Decimal::new(1, 6), Decimal::ZERO));
         let (status, resp) = deposit_net_rejection(fee_percent_label(Tier::Free));
@@ -2163,12 +1987,8 @@ mod tests {
     #[test]
     fn deposit_required_amount_string_rounds_up_and_clamps() {
         assert_eq!(deposit_required_amount_string(1.5), "1.500000");
-        // 1e-7 must demand a full micro-unit, never 0.000000.
         assert_eq!(deposit_required_amount_string(1e-7), "0.000001");
         assert_eq!(deposit_required_amount_string(0.1234567), "0.123457");
-        // Absurd magnitude still fails verification closed, not open: the
-        // i128 clamp must survive the round trip through `verify_deposit`'s
-        // parse, far above USDC's whole supply.
         let huge = deposit_required_amount_string(1e40);
         assert_eq!(huge, "170141183460469231731687303715884.105727");
         assert_eq!(
@@ -2190,12 +2010,9 @@ mod tests {
                 "creditedAt": "2026-01-01T00:00:00.000Z",
             })
         );
-        // Unparseable new_balance -> parseFloat NaN -> JSON null, key present.
         let body = deposit_success_body(None, 1.0, 9.0, "x");
         assert_eq!(body["newBalance"], Value::Null);
     }
-
-    // -- fee rounding ---------------------------------------------------------
 
     fn assert_payable(gross: Decimal, tier: Tier) {
         let (fee, net) = split_fee(gross, tier).unwrap();
@@ -2207,8 +2024,6 @@ mod tests {
 
     #[test]
     fn point_five_seven_at_ten_percent_pays() {
-        // 0.57 * 0.1 is 0.05699999999999999 in doubles: the old fee was 0.05699999,
-        // which the token cannot represent.
         let (fee, net) = withdraw_net(0.57, Tier::Free).unwrap();
         assert_eq!(fee, Decimal::new(57, 3));
         assert_eq!(net, Decimal::new(513, 3));
@@ -2232,8 +2047,6 @@ mod tests {
         assert_eq!(net, Decimal::new(1_111_111, 6));
         assert_eq!(floor_to_token(fee), Decimal::new(123_456, 6));
     }
-
-    // -- win ------------------------------------------------------------------
 
     fn win_request(extra: Value) -> Value {
         let mut base = json!({
@@ -2281,7 +2094,6 @@ mod tests {
 
     #[test]
     fn win_currency_rules() {
-        // Falsy currency falls back to USDC before the case fold.
         let empty = win_request(json!({"currency": ""}));
         let req = win_head(&empty).unwrap();
         assert_eq!(win_after_ban(&req).unwrap(), "USDC");
@@ -2293,7 +2105,6 @@ mod tests {
         let (status, resp) = win_after_ban(&req).err().unwrap();
         assert_eq!(status, 400);
         assert_eq!(resp, error_body("Unsupported currency"));
-        // Truthy non-string: `.toUpperCase()` TypeError -> outer 500.
         let numeric = win_request(json!({"currency": 7}));
         let req = win_head(&numeric).unwrap();
         assert_eq!(win_after_ban(&req).err().unwrap(), route_crash());
@@ -2322,8 +2133,6 @@ mod tests {
     #[test]
     fn win_token_binding_rejections() {
         let user_key = address::canonical(ADDR);
-        // Invalid token -> the caller hands None here; 401 'Invalid settlement
-        // token' is emitted by the HTTP layer (crypto::verify).
         let mismatch = win_token_failure(
             Some(&payload("bet_OTHER", ADDR, "USDC", 10.0)),
             &json!("bet_1"),
@@ -2372,8 +2181,6 @@ mod tests {
         assert_eq!((&body["won"], &body["payout"]), (&json!(false), &json!(0)));
     }
 
-    // -- withdraw ---------------------------------------------------------------
-
     fn wd_body(extra: Value) -> Value {
         let mut base = json!({
             "userAddress": ADDR, "amount": 10, "currency": "USDC",
@@ -2401,7 +2208,6 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(resp, error_body("Invalid withdrawal amount"));
-        // currency.toUpperCase() runs before the address gate in the TS.
         assert_eq!(
             withdraw_head(&wd_body(json!({"currency": null})))
                 .err()
@@ -2418,7 +2224,6 @@ mod tests {
 
     #[test]
     fn withdraw_intent_message_is_the_exact_signed_string() {
-        // Mirrors the message in lib/balance/withdrawalIntent.ts call sites.
         let message =
             withdraw_intent_message(&json!(ADDR), &json!(1), "USDC", &json!(1700000000000u64))
                 .unwrap();
@@ -2426,12 +2231,10 @@ mod tests {
             message,
             format!("Strike withdrawal authorization\naddress:{ADDR}\namount:1.00000000\ncurrency:USDC\nsignedAt:1700000000000")
         );
-        // The raw address spelling is signed, not the canonical one.
         let message =
             withdraw_intent_message(&json!("0xABC"), &json!(2.5), "USDC", &json!(7)).unwrap();
         assert!(message.contains("address:0xABC"));
         assert!(message.contains("amount:2.50000000"));
-        // A stringified amount has no .toFixed -> TypeError -> 500.
         assert_eq!(
             withdraw_intent_message(&json!(ADDR), &json!("10"), "USDC", &json!(7))
                 .err()
@@ -2470,7 +2273,6 @@ mod tests {
             },
             (404, error_body("User record not found"))
         );
-        // The insufficient message keeps the RAW (un-normalised) currency.
         let rows = vec![json!({"user_address": "a@x", "balance": 1, "status": "active"})];
         match withdraw_choose_row(&rows, 5.0, "usdc") {
             WithdrawRows::Reject((400, body)) => {
@@ -2511,10 +2313,8 @@ mod tests {
     fn withdraw_cap_exact_integer_semantics() {
         let deposits = vec![json!({"amount": 100})];
         let none = Vec::<Value>::new();
-        // Exactly floor(100 * 1.08) = 108 is allowed.
         assert!(withdraw_cap_check(&json!(108), &deposits, &none, &none, "USDC").is_ok());
         assert!(withdraw_cap_check(&json!(108.000001), &deposits, &none, &none, "USDC").is_err());
-        // Pending rows count against the cap.
         let pending = vec![json!({"amount": 100})];
         assert!(
             withdraw_cap_check(&json!(8), &deposits, &none, &pending, "USDC").is_ok(),
@@ -2528,7 +2328,6 @@ mod tests {
             body,
             error_body("Withdrawal amount exceeds your available limit. You have no remaining withdrawal allowance. Please contact support if you believe this is an error.")
         );
-        // Partial remaining is printed with 6 decimals and the currency.
         let withdrawn = vec![json!({"amount": 100})];
         let (_, body) = withdraw_cap_check(&json!(9), &deposits, &withdrawn, &none, "USDC")
             .err()
@@ -2541,7 +2340,6 @@ mod tests {
 
     #[test]
     fn withdraw_cap_floor_never_rounds_up() {
-        // floor(0.000001 * 1.08) = 1 unit; 2 units must be refused.
         let deposits = vec![json!({"amount": 0.000001})];
         let none = Vec::<Value>::new();
         assert!(withdraw_cap_check(&json!("0.000001"), &deposits, &none, &none, "USDC").is_ok());
@@ -2557,7 +2355,6 @@ mod tests {
     #[test]
     fn withdraw_cap_without_deposits_does_not_govern() {
         let none = Vec::<Value>::new();
-        // totalDeposited == 0 -> no cap at all, however absurd the claim.
         assert!(withdraw_cap_check(&json!(1e12), &none, &none, &none, "USDC").is_ok());
     }
 
@@ -2575,7 +2372,6 @@ mod tests {
                 error_body("Service temporarily unavailable. Please try again.")
             )
         );
-        // A row with no amount column is a JS `undefined` -> unparseable too.
         let holey = vec![json!({"id": 1})];
         assert!(withdraw_cap_check(&json!(1), &holey, &none, &none, "USDC").is_err());
     }
@@ -2590,7 +2386,6 @@ mod tests {
         assert!(!frequency_review_triggered(false, 9));
         assert!(!frequency_review_triggered(true, 999));
         assert_eq!(frequency_review_stamp(10), "FREQUENCY_REVIEW:count=11");
-        // Exemption matches on the canonical spelling of the env list entry.
         let list = vec![address::canonical(ADDR)];
         assert!(frequency_review_exempt(ADDR, &list));
         assert!(frequency_review_exempt(
@@ -2642,10 +2437,8 @@ mod tests {
 
     #[test]
     fn bet_and_withdraw_amounts_share_the_number_matrix() {
-        // NaN / Infinity / negative / over-precision / absurd magnitude all
-        // have defined answers on every path; pin the shared primitives.
         assert_eq!(number_of(&json!("NaN")), None);
-        assert_eq!(number_of(&json!(f64::NAN)), Some(0.0)); // JSON has no NaN: it arrives as null
+        assert_eq!(number_of(&json!(f64::NAN)), Some(0.0));
         assert!(number_of(&json!("1e400"))
             .map(|f| f.is_infinite())
             .unwrap_or(false));

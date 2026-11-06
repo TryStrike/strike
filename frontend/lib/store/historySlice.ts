@@ -2,6 +2,7 @@
 import { StateCreator } from "zustand";
 import type { Store } from "./index";
 import { BetRecord } from "@/lib/types/bet";
+import { ApiFailure, needsSession, readApiError } from "@/lib/api/errors";
 
 export interface BetHistoryRow {
   id: string;
@@ -113,20 +114,13 @@ export async function fetchBetHistoryPage(args: LoadBetHistoryArgs): Promise<Bet
 
   let res = await fetch(url, { credentials: 'include', signal: args.signal });
 
-  if (res.status === 401) {
+  if (needsSession(await readApiError(res.clone()))) {
     const { ensureBalanceSession } = await import('@/lib/balance/balanceClientHeaders');
     await ensureBalanceSession();
     res = await fetch(url, { credentials: 'include', signal: args.signal });
   }
 
-  if (!res.ok) {
-    let message = `History request failed (${res.status})`;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body?.error) message = body.error;
-    } catch {}
-    throw new Error(message);
-  }
+  if (!res.ok) throw new ApiFailure(await readApiError(res));
 
   const json = (await res.json()) as {
     bets?: BetHistoryRow[];

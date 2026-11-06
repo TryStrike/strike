@@ -25,6 +25,7 @@ tracing.workspace = true
 once_cell.workspace = true
 futures.workspace = true
 tokio-tungstenite.workspace = true
+jsonwebtoken.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

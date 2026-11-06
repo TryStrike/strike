@@ -1,11 +1,11 @@
 import { create } from "zustand";
+import { errorMessage, readApiError } from "@/lib/api/errors";
 import type { ToolStep } from "@/lib/agent/agentFeed";
 import { dispatch } from "./actions";
 
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-  /** What the stream shows when it isn't what the model was asked. */
   label?: string;
   at: number;
   steps?: ToolStep[];
@@ -69,8 +69,7 @@ export const useCopilot = create<CopilotChat>((set, get) => {
           signal: mine.signal,
         });
         if (!res.ok || !res.body) {
-          const body = await res.json().catch(() => null);
-          set({ error: body?.error ?? `Copilot failed with ${res.status}` });
+          set({ error: errorMessage(await readApiError(res)) });
           return;
         }
         const reader = res.body

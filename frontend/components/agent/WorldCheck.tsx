@@ -2,7 +2,7 @@
 
 import { useCallback, useRef } from 'react';
 import { any, CredentialRequest, IDKitErrorCodes, IDKitRequestWidget, proofOfHuman, type IDKitResult } from '@worldcoin/idkit';
-import { attemptOf, type WorldAttempt, type WorldChallenge } from '@/lib/agent/useAgent';
+import { attemptOf, type WorldAttempt, type WorldChallenge } from '@/lib/world/human';
 
 export default function WorldCheck({ challenge, onDone }: { challenge: WorldChallenge; onDone: (a: WorldAttempt) => void }) {
   const { attempt, world } = challenge;

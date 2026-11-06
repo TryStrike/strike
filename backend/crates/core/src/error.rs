@@ -1,6 +1,3 @@
-//! The single error type every handler returns, shaped so the JSON the browser
-//! receives matches the Next.js routes byte for byte.
-
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
@@ -24,8 +21,6 @@ pub enum ApiError {
     Other(String),
 }
 
-/// Some RPC URLs carry an access key in the path, so a request error drops its URL
-/// before it can reach a log line or a response body.
 impl From<reqwest::Error> for ApiError {
     fn from(err: reqwest::Error) -> Self {
         Self::Http(err.without_url())
@@ -33,7 +28,6 @@ impl From<reqwest::Error> for ApiError {
 }
 
 impl ApiError {
-    /// `{"error": message, ...extra}` with the given status.
     pub fn json(status: StatusCode, message: impl Into<String>) -> Self {
         Self::Json {
             status,
@@ -62,7 +56,16 @@ impl ApiError {
         Self::json(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
 
-    /// Adds top-level fields to the error body (e.g. `retryable: true`).
+    pub fn coded(code: &str, message: impl Into<String>) -> Self {
+        let status = StatusCode::from_u16(status_of(code)).unwrap_or(StatusCode::BAD_REQUEST);
+        let err = Self::json(status, message).with("code", Value::String(code.to_string()));
+        if status.is_server_error() {
+            err.with("retryable", Value::Bool(true))
+        } else {
+            err
+        }
+    }
+
     pub fn with(mut self, key: &str, value: Value) -> Self {
         if let Self::Json { extra, .. } = &mut self {
             let map = extra.get_or_insert_with(Map::new);
@@ -75,8 +78,6 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message, extra) = match self {
-            // rusqlite::Error can carry query text; never forward it to a
-            // browser.
             ApiError::Db(err) => {
                 tracing::error!("database error: {err}");
                 (
@@ -134,6 +135,23 @@ impl IntoResponse for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+pub fn status_of(code: &str) -> u16 {
+    match code {
+        "session_required" | "step_up_required" => 401,
+        "human_required" | "human_tier_too_low" | "human_mismatch" | "banned" | "frozen"
+        | "stepup_denied" | "attempt_denied" | "attempt_failed" => 403,
+        "not_found" => 404,
+        "human_exposure_cap" | "human_daily_loss" | "human_cooloff" | "stepup_pending"
+        | "stepup_used" | "not_paused" | "duplicate" | "betting_closed" | "market_quiet"
+        | "market_closed" | "price_moved" | "round_open" | "attempt_pending" | "dev_bypass" => 409,
+        "stepup_expired" | "attempt_expired" => 410,
+        "invalid_body" => 422,
+        "rate_limited" | "daily_cap" => 429,
+        "world_unavailable" | "world_unconfigured" | "price_unavailable" => 503,
+        _ => 400,
+    }
+}
 
 #[cfg(test)]
 mod tests {

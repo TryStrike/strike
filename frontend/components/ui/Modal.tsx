@@ -21,7 +21,6 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-
 const noopSubscribe = () => () => {};
 
 export const Modal: React.FC<ModalProps> = ({
@@ -66,6 +65,8 @@ export const Modal: React.FC<ModalProps> = ({
     const focusRaf = requestAnimationFrame(() => dialogRef.current?.focus());
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      const open = document.querySelectorAll('[aria-modal="true"]');
+      if (open[open.length - 1] !== dialogRef.current) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         onCloseRef.current();

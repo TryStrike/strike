@@ -31,7 +31,7 @@ import {
 } from '@/lib/withdrawals/readAuth';
 import { formatRemaining, windowMinutes } from '@/lib/withdrawals/expiry';
 import { formatUsdc, formatWhen, shortHash } from '@/lib/withdrawals/format';
-
+import { ApiFailure, readApiError } from '@/lib/api/errors';
 
 type WithdrawalRow = {
   id: number;
@@ -302,7 +302,7 @@ export default function WithdrawalsPage() {
           headers: { [WITHDRAWAL_READ_AUTH_HEADER]: proof },
           cache: 'no-store',
         });
-        const body = await res.json().catch(() => null);
+        const body = await res.clone().json().catch(() => null);
         return { res, body };
       };
 
@@ -319,7 +319,7 @@ export default function WithdrawalsPage() {
           setLoadError(null);
           return;
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new ApiFailure(await readApiError(res));
 
         const incoming: WithdrawalRow[] = Array.isArray(body?.withdrawals) ? body.withdrawals : [];
         const pg: Paging = {
@@ -357,7 +357,7 @@ export default function WithdrawalsPage() {
   }, [load]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading the ledger on connect is a fetch effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (isConnected && address) void load('refresh');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, isConnected]);
@@ -368,7 +368,6 @@ export default function WithdrawalsPage() {
     const int = setInterval(() => void load('refresh'), POLL_INTERVAL_MS);
     return () => clearInterval(int);
   }, [address, pollingActive, load]);
-
 
   const counts = useMemo(() => {
     const acc: Record<FilterKey, number> = { all: rows.length, open: 0, paid: 0, rejected: 0, review: 0, expired: 0 };

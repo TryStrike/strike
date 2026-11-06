@@ -1,19 +1,17 @@
-//! `/api/agent/*`: start a session from one signed message, stop it, and
-//! stream its decisions. The wallet always comes from the agent cookie.
-
 use std::convert::Infallible;
 
 use axum::body::Bytes;
 use axum::extract::Path;
-use axum::http::header::WWW_AUTHENTICATE;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rust_decimal::Decimal;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
 
 use strike_core::agent;
+use strike_core::agentpass::{self, Action};
 use strike_core::bets::now_ms;
 use strike_core::config::config;
 use strike_core::crypto::{self, AgentClaims, AGENT_COOKIE};
@@ -23,17 +21,14 @@ use strike_core::eth;
 use strike_core::ledger::Rejection;
 use strike_core::prices;
 use strike_core::stream;
-use strike_core::world::{self, HumanGrant};
 
 use crate::agent as live;
 use crate::bans;
 use crate::http::{self, Cookie};
+use crate::routes::stepup::{reply, stepup_id};
 use crate::routes::stream::sse_headers;
 
-/// Decisions replayed to a feed that connects.
 const REPLAY: i64 = 50;
-/// The cookie outlives the session by an hour so the trader can still read
-/// how it ended.
 const COOKIE_GRACE_SECONDS: i64 = 3_600;
 pub(crate) const AGENTS_NOT_CONFIGURED: &str = "Agent sessions are not configured on this server";
 
@@ -42,14 +37,14 @@ pub fn routes() -> Router {
         .route("/api/agent/start", post(start))
         .route("/api/agent/stop", post(stop))
         .route("/api/agent/checkpoint", post(checkpoint))
+        .route("/api/agent/state", get(state))
         .route("/api/agent/decisions", get(decisions))
         .route("/api/agent/decisions/{id}/approve", post(approve))
         .route("/api/agent/decisions/{id}/reject", post(reject_proposal))
 }
 
-fn reject((status, body): Rejection) -> Response {
-    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(body)).into_response()
+fn reject(rejection: Rejection) -> Response {
+    reply(rejection)
 }
 
 fn claims(headers: &HeaderMap) -> Result<AgentClaims, ApiError> {
@@ -87,35 +82,70 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
         return Ok(reject(rejection));
     }
     if bans::is_globally_banned(&terms.wallet).await {
-        return Err(ApiError::json(StatusCode::FORBIDDEN, "Wallet is banned"));
+        return Ok(reject(agentpass::refusal(
+            403,
+            "banned",
+            "Wallet is banned",
+        )));
     }
     if !config().is_settlement_signing_configured() {
         return Err(ApiError::unavailable(AGENTS_NOT_CONFIGURED));
     }
     let database = db::db().await?;
-    if terms.mode == "yolo" && world::enabled() {
-        return Ok(match world::begin(database, &terms, message, now).await? {
-            Ok(challenge) => human_check(&challenge),
-            Err(rejection) => reject(rejection),
-        });
+    let human = match agentpass::require_human(database, &terms.wallet).await? {
+        Ok(human) => human,
+        Err(rejection) => return Ok(reject(rejection)),
+    };
+    let stepup = stepup_id(&body);
+    if terms.mode == "yolo" {
+        if human.tier != "orb" {
+            return Ok(reject(agentpass::refusal(
+                403,
+                "human_tier_too_low",
+                "A YOLO agent needs an Orb-verified World ID",
+            )));
+        }
+        if stepup.is_none() {
+            if let Some(rejection) = agent::start_precheck(database, &terms, &human.id).await? {
+                return Ok(reject(rejection));
+            }
+            let action = Action {
+                kind: "yolo_start",
+                key: agent::start_key(&terms),
+                summary: format!(
+                    "Start YOLO agent: {} USDC, {}, {} min",
+                    terms.budget.normalize(),
+                    terms.asset,
+                    terms.minutes
+                ),
+                session_id: None,
+            };
+            let asked = agentpass::begin(database, &human, &terms.wallet, action, now).await?;
+            return Ok(reject(match asked {
+                Ok(stepup) => agentpass::step_up_required(&stepup),
+                Err(rejection) => rejection,
+            }));
+        }
     }
-    Ok(match start_session(database, terms, now, None).await? {
-        Ok((session, cookie)) => http::json_with_cookie(json!({ "session": session }), cookie),
-        Err(rejection) => reject(rejection),
-    })
+    Ok(
+        match start_session(database, terms, now, &human.id, stepup).await? {
+            Ok((session, cookie)) => http::json_with_cookie(json!({ "session": session }), cookie),
+            Err(rejection) => reject(rejection),
+        },
+    )
 }
 
-/// Its own task: a client hanging up after the row commits must not leave a
-/// running session with no task and no cookie.
 pub(crate) async fn start_session(
     database: &'static Db,
     terms: agent::StartTerms,
     now: i64,
-    human: Option<HumanGrant>,
+    human_id: &str,
+    stepup: Option<String>,
 ) -> Result<Result<(Value, Cookie), Rejection>, ApiError> {
+    let human_id = human_id.to_string();
     tokio::spawn(async move {
         Ok(
-            match agent::create_session(database, terms, now, human).await? {
+            match agent::create_session(database, terms, now, &human_id, stepup).await? {
                 Ok(session) => Ok((session.to_json(), started(session)?)),
                 Err(rejection) => Err(rejection),
             },
@@ -128,28 +158,6 @@ pub(crate) async fn start_session(
     })?
 }
 
-/// RFC 9470 step-up: the browser goes to `verifyUrl`, and only this browser,
-/// holding the `strike_world` cookie, can finish the attempt.
-fn human_check(challenge: &world::Challenge) -> Response {
-    let mut response = http::json_with_cookie(
-        challenge.to_json(),
-        Cookie {
-            name: world::WORLD_COOKIE,
-            value: challenge.browser_secret.clone(),
-            max_age: world::ATTEMPT_TTL_MS / 1_000,
-            same_site: "Lax",
-            http_only: true,
-        },
-    );
-    *response.status_mut() = StatusCode::UNAUTHORIZED;
-    if let Ok(value) = HeaderValue::from_str(&challenge.www_authenticate()) {
-        response.headers_mut().insert(WWW_AUTHENTICATE, value);
-    }
-    response
-}
-
-/// Runs a created session and returns the cookie that reads and stops it.
-/// Both starts refuse before any write when the cookie can't be minted.
 pub(crate) fn started(session: agent::Session) -> Result<Cookie, ApiError> {
     let ttl = (session.ends_at_ms - session.starts_at_ms) / 1_000 + COOKIE_GRACE_SECONDS;
     let token = crypto::mint_agent_token(&session.id, &session.wallet, ttl).map_err(|err| {
@@ -182,23 +190,98 @@ async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({ "session": session.to_json() })))
 }
 
-/// The step-up that resumes a YOLO agent paused for its human, in the same
-/// 401 challenge shape as a YOLO start.
 async fn checkpoint(headers: HeaderMap) -> Result<Response, ApiError> {
     let claims = claims(&headers)?;
     let database = db::db().await?;
     let session = agent::session_for(database, &claims.session_id, &claims.wallet)
         .await?
         .ok_or_else(no_session)?;
-    let Some(until) = live::paused_until(&session.id) else {
-        return Err(ApiError::conflict(world::NOT_PAUSED));
+    let now = now_ms();
+    let not_paused = || {
+        reject(agentpass::refusal(
+            409,
+            "not_paused",
+            "The agent is not waiting for a human",
+        ))
     };
-    Ok(
-        match world::begin_checkpoint(database, &session, until, now_ms()).await? {
-            Ok(challenge) => human_check(&challenge),
-            Err(rejection) => reject(rejection),
-        },
-    )
+    if session.status != "running" || session.paused_until_ms.is_none_or(|until| until <= now) {
+        return Ok(not_paused());
+    }
+    let current = match &session.pause_stepup_id {
+        Some(id) => agentpass::get(database, id, now).await?,
+        None => None,
+    };
+    if let Some(stepup) = current
+        .as_ref()
+        .filter(|s| matches!(s.status.as_str(), "pending" | "approved"))
+    {
+        return Ok(Json(json!({ "stepup": stepup.to_json() })).into_response());
+    }
+    let human = match agentpass::require_human(database, &session.wallet).await? {
+        Ok(human) => human,
+        Err(rejection) => return Ok(reject(rejection)),
+    };
+    let (kind, key, summary) = match &current {
+        Some(old) if old.kind == "agent_chase" => (
+            "agent_chase",
+            old.key().to_string(),
+            old.subject["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        _ => (
+            "agent_checkpoint",
+            format!("{}:checkpoint:{}", session.id, session.checks_passed),
+            format!(
+                "Keep YOLO agent trading: {} USDC stop-loss, {}",
+                session.stop_loss.normalize(),
+                session.asset
+            ),
+        ),
+    };
+    let action = Action {
+        kind,
+        key,
+        summary,
+        session_id: Some(&session.id),
+    };
+    let stepup = match agentpass::begin(database, &human, &session.wallet, action, now).await? {
+        Ok(stepup) => stepup,
+        Err(rejection) => return Ok(reject(rejection)),
+    };
+    if !agent::repoint_pause(database, &session.id, &stepup.id).await? {
+        agentpass::cancel(database, &stepup.id, "The agent is not paused").await?;
+        return Ok(not_paused());
+    }
+    live::publish(&session.id, live::stepup_frame(&stepup));
+    Ok(Json(json!({ "stepup": stepup.to_json() })).into_response())
+}
+
+async fn state(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    let claims = claims(&headers)?;
+    let database = db::db().await?;
+    let session = agent::session_for(database, &claims.session_id, &claims.wallet)
+        .await?
+        .ok_or_else(no_session)?;
+    let now = now_ms();
+    let stepup = match &session.pause_stepup_id {
+        Some(id) => agentpass::get(database, id, now).await?,
+        None => None,
+    };
+    let status = match (session.status.as_str(), session.paused_until_ms) {
+        ("running", Some(_)) => "paused",
+        ("running", None) => "running",
+        _ => "stopped",
+    };
+    Ok(Json(json!({
+        "sessionId": session.id,
+        "status": status,
+        "stoppedReason": session.stopped_reason,
+        "pausedUntil": session.paused_until_ms,
+        "checksPassed": session.checks_passed,
+        "stepup": stepup.map(|s| s.to_json()),
+    })))
 }
 
 fn no_session() -> ApiError {
@@ -207,27 +290,30 @@ fn no_session() -> ApiError {
 
 fn decision_reply(decision: &agent::Decision) -> Response {
     if decision.verdict == "skipped" && decision.reason == agent::PROPOSAL_EXPIRED {
-        return ApiError::conflict("proposal expired").into_response();
+        return ApiError::conflict("proposal expired")
+            .with("code", "proposal_expired".into())
+            .into_response();
     }
     Json(json!({ "decision": decision.to_json() })).into_response()
 }
 
-/// Places a waiting proposal after re-running the signal and every limit. The
-/// session's approval lock makes a repeat wait for the first answer and get it.
-async fn approve(Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    answer_in_task(id, headers, true).await
+async fn approve(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    raw: Bytes,
+) -> Result<Response, ApiError> {
+    let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+    answer_in_task(id, headers, Some(stepup_id(&body))).await
 }
 
 async fn reject_proposal(Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    answer_in_task(id, headers, false).await
+    answer_in_task(id, headers, None).await
 }
 
-/// Its own task: a client hanging up mid-placement must not leave the stake held
-/// with no bet behind it.
 async fn answer_in_task(
     id: String,
     headers: HeaderMap,
-    approve: bool,
+    approve: Option<Option<String>>,
 ) -> Result<Response, ApiError> {
     tokio::spawn(async move { answer_proposal(&id, &headers, approve).await })
         .await
@@ -237,7 +323,7 @@ async fn answer_in_task(
 async fn answer_proposal(
     id: &str,
     headers: &HeaderMap,
-    approve: bool,
+    approve: Option<Option<String>>,
 ) -> Result<Response, ApiError> {
     let claims = claims(headers)?;
     let database = db::db().await?;
@@ -251,24 +337,72 @@ async fn answer_proposal(
     let Some(approval) = live::approval(&claims.session_id) else {
         return Ok(decision_reply(&decision));
     };
+    let over = config().world_limits.stepup_proposal_over;
+    let mut spend = None;
+    if let Some(stepup) = &approve {
+        let big = decision.stake.unwrap_or(Decimal::ZERO) > over;
+        if big && decision.verdict == "awaiting" {
+            let human = match agentpass::require_human(database, &claims.wallet).await? {
+                Ok(human) => human,
+                Err(rejection) => return Ok(reject(rejection)),
+            };
+            let Some(stepup) = stepup else {
+                return ask_for_stake(database, &decision, &human, &claims, &approval).await;
+            };
+            spend = Some(stepup.clone());
+        }
+    }
     let answered = {
         let _answering = approval.lock.lock().await;
-        settle_proposal(database, &claims, id, approve).await?
+        settle_proposal(database, &claims, id, approve.is_some(), spend.as_deref()).await?
     };
     approval.answered.notify_one();
-    Ok(decision_reply(&answered))
+    Ok(match answered {
+        Ok(decision) => decision_reply(&decision),
+        Err(rejection) => reject(rejection),
+    })
 }
 
-/// Runs under the approval lock. Returns the decision as it now stands.
+async fn ask_for_stake(
+    database: &'static Db,
+    decision: &agent::Decision,
+    human: &strike_core::world::Human,
+    claims: &AgentClaims,
+    approval: &live::Approval,
+) -> Result<Response, ApiError> {
+    let stake = decision.stake.unwrap_or(Decimal::ZERO).normalize();
+    let action = Action {
+        kind: "proposal",
+        key: decision.id.clone(),
+        summary: format!(
+            "Approve agent trade: {stake} USDC {}",
+            decision.direction.as_deref().unwrap_or_default()
+        ),
+        session_id: Some(&claims.session_id),
+    };
+    let now = now_ms();
+    Ok(
+        match agentpass::begin(database, human, &claims.wallet, action, now).await? {
+            Ok(stepup) => {
+                agent::extend_proposal(database, &decision.id, stepup.expires_at_ms).await?;
+                approval.answered.notify_one();
+                reject(agentpass::step_up_required(&stepup))
+            }
+            Err(rejection) => reject(rejection),
+        },
+    )
+}
+
 async fn settle_proposal(
     database: &db::Db,
     claims: &AgentClaims,
     id: &str,
     approve: bool,
-) -> Result<agent::Decision, ApiError> {
+    stepup: Option<&str>,
+) -> Result<Result<agent::Decision, Rejection>, ApiError> {
     let current = agent::decision(database, id).await?;
     if current.verdict != "awaiting" {
-        return Ok(current);
+        return Ok(Ok(current));
     }
     let mut session = agent::session_for(database, &claims.session_id, &claims.wallet)
         .await?
@@ -294,11 +428,12 @@ async fn settle_proposal(
                     proposal: true,
                     confidence: None,
                     trace: None,
+                    stepup,
                 };
-                if let live::Placement::Stop(why) =
-                    live::place(database, &mut session, trade).await?
-                {
-                    live::stop(database, &session.id, &why).await;
+                match live::place(database, &mut session, trade).await? {
+                    live::Placement::Stop(why) => live::stop(database, &session.id, &why).await,
+                    live::Placement::Refused(refused) => return Ok(Err(refused)),
+                    _ => {}
                 }
             }
             agent::Signal::Trade { .. } => {
@@ -309,14 +444,11 @@ async fn settle_proposal(
             }
         }
     }
-    agent::decision(database, id).await
+    Ok(Ok(agent::decision(database, id).await?))
 }
 
-/// Replays the session and its recent decisions, then streams changes. Frames
-/// are whole rows keyed by id, so a client upserts and a duplicate is harmless.
 async fn decisions(headers: HeaderMap) -> Result<Response, ApiError> {
     let claims = claims(&headers)?;
-    // Subscribed before the replay is read, so nothing falls between the two.
     let frames = live::subscribe(&claims.session_id);
     let database = db::db().await?;
     let session = agent::session_for(database, &claims.session_id, &claims.wallet)
@@ -330,8 +462,6 @@ async fn decisions(headers: HeaderMap) -> Result<Response, ApiError> {
     Ok((StatusCode::OK, sse_headers(), body).into_response())
 }
 
-/// Live frames until the task ends, then heartbeats only, so an EventSource
-/// stays connected instead of reconnecting in a loop.
 fn feed(
     replay: Vec<String>,
     frames: Option<tokio::sync::broadcast::Receiver<String>>,
@@ -342,7 +472,6 @@ fn feed(
             Some(rx) => tokio::select! {
                 received = rx.recv() => match received {
                     Ok(frame) => frame,
-                    // Missed frames: end it, the reconnect replays the truth.
                     Err(RecvError::Lagged(_)) => return None,
                     Err(RecvError::Closed) => {
                         frames = None;

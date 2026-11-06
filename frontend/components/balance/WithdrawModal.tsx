@@ -11,6 +11,9 @@ import { useWalletClient, useAccount } from 'wagmi';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 import { ARC_ASSETS, type ArcAsset } from '@/lib/arc/config';
 import { calculateFeeAmount, getFeePercentLabel } from '@/lib/fees/platformFee';
+import { ApiFailure, wait } from '@/lib/api/errors';
+import { useWorldConfig } from '@/lib/world/human';
+import { useNow } from '@/components/world/StepUpCard';
 
 const Bridge = dynamic(() => import('./Bridge'), { ssr: false });
 
@@ -41,6 +44,10 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const [retryAt, setRetryAt] = useState<number | null>(null);
+  const now = useNow(retryAt != null);
+  const coolingDown = retryAt != null && retryAt > now;
+  const stepupOver = useWorldConfig().data?.stepup.withdrawOver;
 
   const address = useStore(state => state.address);
   const withdrawFunds = useStore(state => state.withdrawFunds);
@@ -174,6 +181,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       setAmount('');
       onClose();
     } catch (err: unknown) {
+      if (err instanceof ApiFailure) setRetryAt(err.api.retryAfter ?? null);
       const errorMessage = (err instanceof Error && err.message) || 'Failed to withdraw funds';
       console.error('Withdrawal error:', err);
       setError(errorMessage);
@@ -198,6 +206,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
     >
       <p className="-mt-4 mb-6 text-[15px] text-muted">
         Paid automatically to your wallet on Arc. Up to 50 {asset} per request and 200 per day.
+        {stepupOver != null && ` Over ${stepupOver} ${asset} needs a quick approval in World App.`}
       </p>
 
       {ARC_ASSETS.length > 1 && (
@@ -264,10 +273,10 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       <Button
         size="lg"
         onClick={handleWithdraw}
-        disabled={isLoading || !amount || houseBalance <= 0}
+        disabled={isLoading || coolingDown || !amount || houseBalance <= 0}
         className="mt-6 w-full"
       >
-        {isLoading ? 'Withdrawing…' : `Withdraw ${asset}`}
+        {isLoading ? 'Withdrawing…' : coolingDown ? `Try again in ${wait(retryAt, now)}` : `Withdraw ${asset}`}
       </Button>
 
       {asset === 'USDC' && (

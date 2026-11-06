@@ -1,12 +1,6 @@
-//! Strike backend core: configuration, storage, chain and crypto primitives
-//! shared by the Axum handlers.
-//!
-//! The only web dependency is the error type's `IntoResponse` impl, so a
-//! handler can return `Result<T, ApiError>` directly; everything else here is
-//! testable without a server.
-
 pub mod address;
 pub mod agent;
+pub mod agentpass;
 pub mod arkiv;
 pub mod bets;
 pub mod binance_ws;

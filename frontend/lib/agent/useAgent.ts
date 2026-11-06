@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { RpContext } from "@worldcoin/idkit";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAccount, useSignMessage } from "wagmi";
 import { getArcConfig } from "@/lib/arc/config";
 import { useStore } from "@/lib/store";
+import { errorMessage, readApiError, type StepUp } from "@/lib/api/errors";
+import { sendGuarded } from "@/lib/world/gate";
 import { useAgentFeed, type Decision } from "./agentFeed";
 
 export type { AgentSession, Decision } from "./agentFeed";
@@ -18,36 +19,19 @@ export interface StartLimits {
   minutes: number;
 }
 
-export interface WorldAttempt {
-  status:
-    | "pending"
-    | "approved"
-    | "denied"
-    | "expired"
-    | "mismatch"
-    | "failed"
-    | "unknown";
-  reason: string;
-  acr: string | null;
-  kind?: "start" | "checkpoint";
-}
-
-export interface WorldChallenge {
-  attempt: string;
-  world: {
-    app_id: `app_${string}`;
-    action: string;
-    signal: string;
-    environment: "production" | "staging";
-    preset: "selfie" | "orb";
-    require_user_presence: boolean;
-    rp_context: RpContext;
-  };
+export interface AgentState {
+  sessionId: string;
+  status: "running" | "paused" | "stopped";
+  stoppedReason: string | null;
+  pausedUntil: number | null;
+  checksPassed: number;
+  stepup: StepUp | null;
 }
 
 const START_VALID_MS = 5 * 60_000;
 /** A reconnect replays many rows at once, and they need one balance fetch. */
 const BALANCE_SETTLE_MS = 300;
+const STATE_POLL_MS = 3_000;
 
 function startMessage(
   wallet: string,
@@ -70,23 +54,38 @@ function startMessage(
   ].join("\n");
 }
 
-async function errorOf(res: Response): Promise<string> {
-  const body = await res.json().catch(() => null);
-  return body?.error ?? `Request failed with ${res.status}`;
-}
+const json = (body: object) => ({
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
 
-export async function attemptOf(res: Response): Promise<WorldAttempt> {
-  if (res.status === 404) {
-    return {
-      status: "unknown",
-      reason:
-        "Open the World App link in the browser where you started, then sign again",
-      acr: null,
+export function useAgentState(active: boolean) {
+  const [state, setState] = useState<AgentState | null>(null);
+  const pushed = useAgentFeed(
+    (s) => `${s.session?.pausedUntil}:${s.session?.pauseStepupId}:${s.stepup?.id}:${s.stepup?.status}`,
+  );
+  useEffect(() => {
+    if (!active) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setState(null);
+      return;
+    }
+    let stop = false;
+    const tick = async () => {
+      try {
+        const res = await fetch("/api/agent/state", { cache: "no-store" });
+        if (!stop && res.ok) setState(await res.json());
+      } catch {}
     };
-  }
-  if (!res.ok)
-    return { status: "failed", reason: await errorOf(res), acr: null };
-  return res.json();
+    void tick();
+    const t = setInterval(tick, STATE_POLL_MS);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [active, pushed]);
+  return state;
 }
 
 export function useAgent() {
@@ -96,25 +95,7 @@ export function useAgent() {
     useAgentFeed();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
-
-  const toWorld = useCallback(
-    (res: Response, body: Partial<WorldChallenge> | null) => {
-      if (res.status !== 401 || !body?.attempt || !body.world) return false;
-      setChallenge({ attempt: body.attempt, world: body.world });
-      return true;
-    },
-    [],
-  );
-
-  const settle = useCallback(
-    (a: WorldAttempt) => {
-      setChallenge(null);
-      setBusy(false);
-      if (a.status === "approved" && a.kind !== "checkpoint") connect(true);
-    },
-    [connect],
-  );
+  const starting = useRef(false);
 
   useEffect(() => connect(), [connect]);
 
@@ -137,9 +118,10 @@ export function useAgent() {
         setError("Connect a wallet first");
         return;
       }
+      if (starting.current) return;
+      starting.current = true;
       setBusy(true);
       setError(null);
-      let leaving = false;
       try {
         const nonce = crypto.randomUUID().replaceAll("-", "");
         const message = startMessage(
@@ -149,18 +131,13 @@ export function useAgent() {
           nonce,
         );
         const signature = await signMessageAsync({ message });
-        const res = await fetch("/api/agent/start", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message, signature }),
-        });
+        const res = await sendGuarded(
+          (stepupId) =>
+            fetch("/api/agent/start", json({ message, signature, stepupId })),
+          { session: false },
+        );
         if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          if (toWorld(res, body)) {
-            leaving = true;
-            return;
-          }
-          setError(body?.error ?? `Request failed with ${res.status}`);
+          setError(errorMessage(await readApiError(res)));
           return;
         }
         showSession((await res.json()).session);
@@ -168,55 +145,57 @@ export function useAgent() {
       } catch (e) {
         setError(e instanceof Error ? e.message : "Signing failed");
       } finally {
-        if (!leaving) setBusy(false);
+        starting.current = false;
+        setBusy(false);
       }
     },
-    [address, signMessageAsync, toWorld, showSession, connect],
+    [address, signMessageAsync, showSession, connect],
   );
 
-  const checkpoint = useCallback(async () => {
-    setBusy(true);
+  const retryApproval = useCallback(async () => {
     setError(null);
-    let leaving = false;
     try {
       const res = await fetch("/api/agent/checkpoint", { method: "POST" });
-      const body = await res.json().catch(() => null);
-      if (toWorld(res, body)) {
-        leaving = true;
-        return;
-      }
-      setError(body?.error ?? `Request failed with ${res.status}`);
-    } finally {
-      if (!leaving) setBusy(false);
+      if (res.ok) return;
+      const e = await readApiError(res);
+      if (e.stepup) return;
+      setError(
+        res.status === 404 || res.status === 405
+          ? "A new approval can't be requested. The agent stops when the pause ends."
+          : errorMessage(e),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not request a new approval");
     }
-  }, [toWorld]);
+  }, []);
 
   const answer = useCallback(
     async (id: string, action: "approve" | "reject") => {
       setError(null);
-      const res = await fetch(
-        `/api/agent/decisions/${encodeURIComponent(id)}/${action}`,
-        { method: "POST" },
-      );
-      if (!res.ok) {
-        setError(await errorOf(res));
-        return;
+      const url = `/api/agent/decisions/${encodeURIComponent(id)}/${action}`;
+      try {
+        const res = await sendGuarded(
+          (stepupId) =>
+            fetch(url, stepupId ? json({ stepupId }) : { method: "POST" }),
+          { session: false },
+        );
+        if (!res.ok) {
+          const e = await readApiError(res);
+          setError(
+            e.status === 409 && !e.code && /expired/i.test(e.error)
+              ? errorMessage({ ...e, code: "proposal_expired" })
+              : errorMessage(e),
+          );
+          return;
+        }
+        const { decision } = (await res.json()) as { decision: Decision };
+        showDecision(decision);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Request failed");
       }
-      const { decision } = (await res.json()) as { decision: Decision };
-      showDecision(decision);
     },
     [showDecision],
   );
 
-  return {
-    session,
-    decisions,
-    error,
-    busy,
-    start,
-    answer,
-    checkpoint,
-    challenge,
-    settle,
-  };
+  return { session, decisions, error, busy, start, answer, retryApproval };
 }
