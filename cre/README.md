@@ -16,8 +16,10 @@ Rounds priced from Yahoo, withheld rounds and assets past the call budget count 
 Needs the CRE CLI (v1.0.7 or newer for Arc) and Bun 1.2.21 or newer.
 
 ```powershell
-irm https://app.chain.link/cre/install.ps1 | iex   # new shell after, then: cre version
-cre login
+irm https://app.chain.link/cre/install.ps1 | iex   # new shell after this
+cre version                                        # 1.0.7 or newer
+cre login                                          # browser login, needed even to simulate
+cre whoami
 cd cre/round-attestor; bun install; cd ..          # postinstall runs bunx cre-setup
 ```
 
@@ -27,9 +29,26 @@ cd cre/round-attestor; bun install; cd ..          # postinstall runs bunx cre-s
 CRE_ETH_PRIVATE_KEY=<64 hex, no 0x>
 ```
 
-Deploy `contracts/RoundAttestor.sol` in Arc Studio with `forwarder = 0x6E9EE680ef59ef64Aa8C7371279c27E496b5eDc1` (MockKeystoneForwarder) and `treasury_ = 0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871`, then put its address in `round-attestor/config.staging.json` as `attestor`. The workflow refuses to start without it.
+### Deploy RoundAttestor
 
-With the backend running on `127.0.0.1:8080` and a `commitRounds` tx on Arc, from `cre/`:
+Deploy `contracts/RoundAttestor.sol` (contract `RoundAttestor`) in Arc Studio on Arc testnet (chain id `5042002`):
+
+| Constructor arg | Value |
+|---|---|
+| `forwarder` | `0x6E9EE680ef59ef64Aa8C7371279c27E496b5eDc1` (MockKeystoneForwarder, Arc testnet) |
+| `treasury_` | `0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871` (`StrikeTreasury`, see `contracts/deployments/arc-5042002.json`) |
+
+The deployer becomes the owner. Leave expected author, workflow name and workflow id unset while on the MockForwarder, it sends no metadata. Then:
+
+1. Put the address in `round-attestor/config.staging.json` as `attestor`. The workflow refuses to start without it.
+2. Set `NEXT_PUBLIC_ROUND_ATTESTOR_ADDRESS` in the root `.env.local` (and the prod backend env) so `/api/proofs/*` reads the verdicts.
+3. Set `PROOFS_START_EPOCH` (epoch = unix ms / 600000) so the backend committer runs. It also needs `ARC_TREASURY_SECRET_KEY` (the treasury operator). Without either it logs that it is off.
+
+### Simulate
+
+The newest `commitRounds` tx is `commit_tx` in `curl http://127.0.0.1:8080/api/proofs/epochs?limit=1`.
+
+With the backend running on `127.0.0.1:8080` and that tx on Arc, from `cre/`:
 
 ```powershell
 # dry run, no tx
