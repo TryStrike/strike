@@ -20,9 +20,9 @@ use crate::settlement;
 use crate::ticks;
 
 /// About 15 seconds of frames for a client that has stopped reading.
-const FRAME_BUFFER: usize = 64;
+const FRAME_BUFFER: usize = 150;
 /// Band limits move slowly, so they ride on one frame a second.
-const FRAMES_PER_BAND_UPDATE: u32 = 4;
+const FRAMES_PER_BAND_UPDATE: u32 = 10;
 
 pub type FrameTx = mpsc::Sender<String>;
 pub type FrameRx = mpsc::Receiver<String>;
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn tick_and_heartbeat_cadences_match_the_ts_constants() {
-        assert_eq!(tick_interval(), std::time::Duration::from_millis(250));
+        assert_eq!(tick_interval(), std::time::Duration::from_millis(100));
         assert_eq!(
             heartbeat_interval(),
             std::time::Duration::from_millis(15_000)

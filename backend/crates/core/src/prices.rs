@@ -51,8 +51,8 @@ pub const BINANCE_WS_ENDPOINT: &str = "wss://stream.binance.com:9443/stream";
 /// `CRYPTO_CACHE_MS`: clients poll once a second, so crypto stays live but
 /// bounded. The aggregator *does* cache, so this TTL is mirrored, not invented.
 pub const CRYPTO_CACHE_MS: i64 = 1_000;
-/// `SLOW_CACHE_MS`: Yahoo quotes refresh every 15s+ at source.
-pub const SLOW_CACHE_MS: i64 = 15_000;
+/// How often slow assets are re-quoted.
+pub const SLOW_CACHE_MS: i64 = 5_000;
 /// `REQUEST_TIMEOUT_MS`: per upstream HTTP call, including body read
 /// (`AbortSignal.timeout`).
 pub const REQUEST_TIMEOUT_MS: u64 = 8_000;
@@ -60,7 +60,7 @@ pub const REQUEST_TIMEOUT_MS: u64 = 8_000;
 pub const BATCH_SIZE: usize = 15;
 
 /// The SSE frame beat.
-pub const PRICE_TICK_MS: u64 = 250;
+pub const PRICE_TICK_MS: u64 = 100;
 /// `HEARTBEAT_MS` in priceStream.ts — SSE comment-line cadence.
 pub const HEARTBEAT_MS: u64 = 15_000;
 
@@ -504,9 +504,11 @@ async fn fetch_yahoo_batch(symbols: &[&str]) -> Vec<(String, f64)> {
         .map(|s| encode_uri_component(s))
         .collect::<Vec<_>>()
         .join(",");
+    // Yahoo's edge serves a repeated URL from cache, up to minutes old.
     let url = format!(
-        "{}?symbols={query}&interval=1d&range=1d",
-        config().yahoo_spark_endpoint
+        "{}?symbols={query}&interval=1d&range=1d&_={}",
+        config().yahoo_spark_endpoint,
+        now_millis()
     );
 
     let data = match get_json(&url, "upstream", Some(YAHOO_USER_AGENT)).await {
@@ -586,7 +588,7 @@ pub async fn fetch_latest_prices(
     for asset in &wanted {
         let crypto_asset = is_crypto(asset);
         // The SSE ticker re-quotes crypto every tick; slow quotes refresh every
-        // 15s+ at source, so the bypass never applies to them.
+        // every few seconds, so the bypass never applies to them.
         let cached = if binance_ws::covers(asset, now) {
             cache_get(asset).map(|entry| entry.price)
         } else if crypto_asset && bypass_crypto_cache {
@@ -657,7 +659,7 @@ pub async fn fetch_latest_prices(
 
 /// Samples every tradable asset for the life of the process, so a round's prices
 /// never depend on a client being connected. Crypto skips the cache to get a tick
-/// per sample; slow assets refresh on their own 15 s window. The two loops are
+/// per sample; slow assets refresh on their own 5 s window. The two loops are
 /// separate so a slow Yahoo call can't stall crypto. During an outage this
 /// records nothing, which is what the staleness and refund rules read.
 pub async fn run_sampler() {
@@ -1127,8 +1129,8 @@ mod tests {
     fn cache_windows_match_the_ts() {
         assert_eq!(cache_window_ms("BTC"), 1_000);
         assert_eq!(cache_window_ms("APT"), 1_000);
-        assert_eq!(cache_window_ms("AAPL"), 15_000);
-        assert_eq!(cache_window_ms("GOLD"), 15_000);
+        assert_eq!(cache_window_ms("AAPL"), 5_000);
+        assert_eq!(cache_window_ms("GOLD"), 5_000);
     }
 
     #[test]
@@ -1137,9 +1139,9 @@ mod tests {
         assert!(is_fresh(0, 999, 1_000));
         assert!(!is_fresh(0, 1_000, 1_000));
         assert!(!is_fresh(0, 1_001, 1_000));
-        // Slow assets live 15s.
-        assert!(is_fresh(0, 14_999, 15_000));
-        assert!(!is_fresh(0, 15_000, 15_000));
+        // Slow assets live 5s.
+        assert!(is_fresh(0, 4_999, 5_000));
+        assert!(!is_fresh(0, 5_000, 5_000));
     }
 
     #[test]
@@ -1147,9 +1149,9 @@ mod tests {
         let asset = "AAPL";
         cache_set(asset, 123.4, 500, "yahoo");
         // Inside the window -> served from cache.
-        assert_eq!(fresh(asset, 500 + 14_000), Some(123.4));
+        assert_eq!(fresh(asset, 500 + 4_000), Some(123.4));
         // Past the window -> not fresh...
-        assert_eq!(fresh(asset, 500 + 15_000), None);
+        assert_eq!(fresh(asset, 500 + 5_000), None);
         // ...but the stale fallback still returns the last-seen price.
         assert_eq!(cache_get(asset).map(|e| e.price), Some(123.4));
     }
