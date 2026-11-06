@@ -159,6 +159,12 @@ pub fn check_start(t: &StartTerms, now_ms: i64) -> Result<(), Rejection> {
                 &format!("{name} must be a positive USDC amount"),
             ));
         }
+        if value < stake_floor() {
+            return Err(refuse(
+                400,
+                &format!("{name} must be at least {} USDC", stake_floor().normalize()),
+            ));
+        }
     }
     let ceiling = |name: &str, max: Decimal| {
         refuse(
@@ -1106,6 +1112,38 @@ mod tests {
         for mode in ["normal", "yolo"] {
             assert_eq!(stake(&session(mode), Decimal::ZERO), Ok(Decimal::new(2, 1)));
         }
+    }
+
+    #[test]
+    fn limits_too_small_to_trade_are_refused_at_the_start() {
+        let now = terms().expires_ms - 60_000;
+        let small = Decimal::new(9, 2);
+        for t in [
+            StartTerms {
+                budget: small,
+                max_per_trade: small,
+                stop_loss: small,
+                ..terms()
+            },
+            StartTerms {
+                max_per_trade: small,
+                ..terms()
+            },
+            StartTerms {
+                stop_loss: small,
+                ..terms()
+            },
+        ] {
+            assert_eq!(check_start(&t, now).unwrap_err().0, 400, "{t:?}");
+        }
+        let floor = stake_floor();
+        let t = StartTerms {
+            budget: floor,
+            max_per_trade: floor,
+            stop_loss: floor,
+            ..terms()
+        };
+        assert!(check_start(&t, now).is_ok());
     }
 
     #[test]

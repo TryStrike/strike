@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { RpContext } from "@worldcoin/idkit";
 import { useAccount, useSignMessage } from "wagmi";
 import { getArcConfig } from "@/lib/arc/config";
-import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
+import { useStore } from "@/lib/store";
 import { useAgentFeed, type Decision } from "./agentFeed";
 
 export type { AgentSession, Decision } from "./agentFeed";
@@ -46,6 +46,8 @@ export interface WorldChallenge {
 }
 
 const START_VALID_MS = 5 * 60_000;
+/** A reconnect replays many rows at once, and they need one balance fetch. */
+const BALANCE_SETTLE_MS = 300;
 
 function startMessage(
   wallet: string,
@@ -95,7 +97,6 @@ export function useAgent() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
-  const proofSession = useRef(false);
 
   const toWorld = useCallback(
     (res: Response, body: Partial<WorldChallenge> | null) => {
@@ -117,13 +118,18 @@ export function useAgent() {
 
   useEffect(() => connect(), [connect]);
 
+  const balanceMoves = decisions.reduce(
+    (moves, d) => moves + (d.betId ? 1 : 0) + (d.result ? 1 : 0),
+    0,
+  );
   useEffect(() => {
-    if (proofSession.current || !decisions.some((d) => d.betId)) return;
-    proofSession.current = true;
-    ensureBalanceSession().catch(() => {
-      proofSession.current = false;
-    });
-  }, [decisions]);
+    if (!address || !balanceMoves) return;
+    const timer = setTimeout(
+      () => useStore.getState().fetchBalance(address),
+      BALANCE_SETTLE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [address, balanceMoves]);
 
   const start = useCallback(
     async (limits: StartLimits) => {
