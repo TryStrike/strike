@@ -39,7 +39,7 @@ const app = {
 
 export const config = createConfig(
   getDefaultConfig({
-    // Base, Ethereum and Arbitrum Sepolia fund a Circle Gateway balance that deposits into Strike.
+    // Base, Ethereum and Arbitrum Sepolia can pay for a stock: Buy brings their USDC to Arc.
     chains: [arc, baseSepolia, sepolia, arbitrumSepolia],
     transports: {
       [arc.id]: fallback(arcRpcUrls().map((url) => http(url))),

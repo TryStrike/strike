@@ -12,6 +12,10 @@ import {
   type EIP1193Provider,
 } from "viem";
 import { useAccount, useSwitchChain } from "wagmi";
+import { bridging } from "@/lib/bridge/bridging";
+import { tradeLock } from "@/lib/markets/marketData";
+import { spendToArc } from "@/lib/gateway/gateway";
+import { planFunding, useUsdcSources } from "@/lib/gateway/usdcSources";
 import { CircleNotch } from "@phosphor-icons/react";
 import { Modal } from "@/components/ui/Modal";
 import { Button, Segmented } from "@/components/ui/kit";
@@ -51,15 +55,13 @@ const fetchQuote = async (
   return body as Quote;
 };
 
-export const readShares = (holder: Address, symbol: string) =>
+const readShares = (holder: Address, symbol: string) =>
   arcPublicClient().readContract({
     address: MARKET,
     abi: marketAbi,
     functionName: "shares",
     args: [keccak256(toBytes(symbol)), holder],
   });
-
-export const stockMarketEnabled = () => /^0x[0-9a-fA-F]{40}$/.test(MARKET);
 
 /**
  * Buy or sell test shares of a stock at its live price. Testnet simulation on Arc: the price is a
@@ -105,21 +107,83 @@ export function StockTrade({
 
   const usd = Number(amount);
   const valid = Number.isFinite(usd) && usd > 0;
+  const buyingUsdc = side === "buy" && currency === "USDC";
+  const { sources, refresh: refreshSources } = useUsdcSources(
+    address as Address | undefined,
+    buyingUsdc,
+  );
+  const need = valid ? parseUnits(amount, 6) : BigInt(0);
+  const funding =
+    buyingUsdc && sources && valid ? planFunding(need, sources) : undefined;
   const heldValue = held != null && price ? (Number(held) / 1e6) * price : null;
   const estShares = valid && price ? usd / price : 0;
 
   const trade = async () => {
     if (!address || !connector || !valid) return;
+    if (tradeLock.get()) {
+      setError(
+        "A wallet request is still open. Answer it in your wallet, or reload the page.",
+      );
+      return;
+    }
+    tradeLock.set(true);
     setError(null);
     setDone(null);
     try {
       const arcId = getArcConfig().chainId;
-      if (chainId !== arcId) await switchChainAsync({ chainId: arcId });
+      const client = arcPublicClient();
+      if (funding?.kind === "bridge") {
+        setBusy(`Bringing USDC from ${funding.chain.name}…`);
+        bridging.set(true);
+        try {
+          await switchChainAsync({
+            chainId: funding.chain.chainId as Parameters<
+              typeof switchChainAsync
+            >[0]["chainId"],
+          });
+          const { bridgeUsdc } = await import("@/lib/bridge/cctp");
+          await bridgeUsdc(
+            (await connector.getProvider()) as EIP1193Provider,
+            address,
+            formatUnits(funding.amount, 6),
+            "in",
+            () => undefined,
+            funding.cctp,
+          );
+        } finally {
+          bridging.set(false);
+        }
+      }
+      if (chainId !== arcId || funding?.kind === "bridge")
+        await switchChainAsync({ chainId: arcId });
       const wallet = arcWalletClient(
         (await connector.getProvider()) as EIP1193Provider,
         address as Address,
       );
-      const client = arcPublicClient();
+      if (funding?.kind === "gateway") {
+        setBusy(`Bringing USDC from your Gateway balance…`);
+        await spendToArc({
+          signer: wallet,
+          arcWallet: wallet,
+          arcClient: client,
+          source: funding.chain,
+          recipient: address,
+          amount: funding.amount,
+          maxFee: funding.maxFee,
+        });
+      }
+      if (funding && funding.kind !== "arc") {
+        const arrived = await client.readContract({
+          address: getArcConfig().usdc,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [address],
+        });
+        if (arrived < need)
+          throw new Error(
+            `Only ${formatUnits(arrived, 6)} USDC reached Arc. It is safe in your wallet. Lower the amount and try again.`,
+          );
+      }
       const token =
         currency === "EURC" ? getArcConfig().eurc : getArcConfig().usdc;
       const units = parseUnits(amount, 6);
@@ -188,7 +252,9 @@ export function StockTrade({
           : (e.shortMessage ?? e.message ?? "Trade failed").split("\n")[0],
       );
     } finally {
+      tradeLock.set(false);
       setBusy(null);
+      refreshSources();
     }
   };
 
@@ -276,7 +342,20 @@ export function StockTrade({
           : `Sells ≈ ${estShares.toFixed(6)} ${ticker}, capped at what you own, paid in ${currency}`}
         {mainnetRoute && ` · on mainnet this routes to ${mainnetRoute}`}
       </p>
+      {funding && funding.kind !== "arc" && (
+        <p className="mt-2 font-jet text-[12px] text-up">
+          {funding.kind === "gateway"
+            ? `Uses ${formatUnits(funding.amount, 6)} USDC from your Gateway balance first.`
+            : `Brings ${formatUnits(funding.amount, 6)} USDC from ${funding.chain.name} to Arc first, then buys.`}
+        </p>
+      )}
 
+      {connector?.id === "coinbaseWalletSDK" && (
+        <p role="alert" className="mt-4 text-[13px] text-down">
+          Coinbase Wallet cannot load transaction signing on Arc testnet.
+          Connect MetaMask to trade.
+        </p>
+      )}
       {busy && (
         <p
           role="status"
@@ -314,13 +393,22 @@ export function StockTrade({
         size="lg"
         className="mt-5 w-full"
         onClick={trade}
-        disabled={!address || !valid || !!busy || !price}
+        disabled={
+          !address ||
+          !valid ||
+          !!busy ||
+          !price ||
+          funding === null ||
+          (buyingUsdc && !sources)
+        }
       >
         {!address
           ? "Connect a wallet to trade"
-          : side === "buy"
-            ? `Buy ${SIGN[currency]}${amount || 0} of ${ticker}`
-            : `Sell ${SIGN[currency]}${amount || 0} of ${ticker}`}
+          : funding === null
+            ? "Not enough USDC on any chain"
+            : side === "buy"
+              ? `Buy ${SIGN[currency]}${amount || 0} of ${ticker}`
+              : `Sell ${SIGN[currency]}${amount || 0} of ${ticker}`}
       </Button>
     </Modal>
   );

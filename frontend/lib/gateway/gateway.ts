@@ -4,7 +4,6 @@
  * names the player as the source depositor.
  */
 import {
-  erc20Abi,
   pad,
   parseAbi,
   toHex,
@@ -15,10 +14,8 @@ import {
 import { arbitrumSepolia, baseSepolia, sepolia } from "viem/chains";
 
 export const GATEWAY_API = "https://gateway-api-testnet.circle.com/v1";
-export const GATEWAY_WALLET: Address =
-  "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
-export const GATEWAY_MINTER: Address =
-  "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B";
+const GATEWAY_WALLET: Address = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
+const GATEWAY_MINTER: Address = "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B";
 
 export interface GatewayChain {
   key: string;
@@ -60,7 +57,6 @@ export const GATEWAY_CHAINS: GatewayChain[] = [
 ];
 const ARC = GATEWAY_CHAINS[0];
 
-const walletAbi = parseAbi(["function deposit(address token, uint256 value)"]);
 /** Only what the flows need, so a client for any testnet chain fits. */
 type ReceiptClient = {
   waitForTransactionReceipt: (args: {
@@ -108,35 +104,6 @@ export async function gatewayBalances(
       balances.find((b) => b.domain === chain.domain)?.balance ?? "0",
     ),
   }));
-}
-
-/** Moves USDC from the wallet into Gateway on `chain`. Counts once that chain finalizes it. */
-export async function depositToGateway(
-  wallet: WalletClient,
-  client: ReceiptClient,
-  chain: GatewayChain,
-  amount: bigint,
-): Promise<Hex> {
-  const account = wallet.account!;
-  const approve = await wallet.writeContract({
-    account,
-    chain: wallet.chain,
-    address: chain.usdc,
-    abi: erc20Abi,
-    functionName: "approve",
-    args: [GATEWAY_WALLET, amount],
-  });
-  await client.waitForTransactionReceipt({ hash: approve });
-  const hash = await wallet.writeContract({
-    account,
-    chain: wallet.chain,
-    address: GATEWAY_WALLET,
-    abi: walletAbi,
-    functionName: "deposit",
-    args: [chain.usdc, amount],
-  });
-  await client.waitForTransactionReceipt({ hash });
-  return hash;
 }
 
 const word = (address: Address): Hex =>
@@ -204,6 +171,40 @@ const json = (v: unknown) =>
   JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x));
 
 /**
+ * The fee to allow per source chain, from Circle's live estimate plus a 20% buffer for gas
+ * moves. It differs a lot by chain: 0.004 USDC from Arc, 1.10 from Ethereum Sepolia.
+ */
+export async function gatewayFees(
+  depositor: Address,
+  recipient: Address,
+): Promise<Record<string, bigint>> {
+  const intents = GATEWAY_CHAINS.map(
+    (chain) =>
+      burnIntent(chain, depositor, recipient, BigInt(1_000_000), BigInt(1))
+        .message,
+  );
+  const res = await fetch(`${GATEWAY_API}/estimate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: json(intents),
+  });
+  if (!res.ok) throw new Error(`Gateway fee estimate failed (${res.status})`);
+  const estimated = (await res.json()) as Array<{
+    burnIntent: { maxFee: string; spec: { sourceDomain: number } };
+  }>;
+  const fees: Record<string, bigint> = {};
+  for (const chain of GATEWAY_CHAINS) {
+    const entry = estimated.find(
+      (e) => e.burnIntent.spec.sourceDomain === chain.domain,
+    );
+    if (!entry) throw new Error(`No Gateway fee for ${chain.name}`);
+    fees[chain.key] =
+      (BigInt(entry.burnIntent.maxFee) * BigInt(12)) / BigInt(10);
+  }
+  return fees;
+}
+
+/**
  * Signs a burn intent on `source`, gets Circle's attestation and mints on Arc into `recipient`.
  * `arcWallet` must be on Arc; it pays the mint's gas in USDC. Returns the mint tx hash.
  */
@@ -251,16 +252,22 @@ export async function spendToArc(params: {
     );
   }
   onStep?.("mint");
-  const hash = await arcWallet.writeContract({
-    account: arcWallet.account!,
-    chain: arcWallet.chain,
-    address: GATEWAY_MINTER,
-    abi: minterAbi,
-    functionName: "gatewayMint",
-    args: [body.attestation, body.signature],
-  });
-  const receipt = await arcClient.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success")
-    throw new Error("Gateway mint reverted on Arc");
-  return hash;
+  try {
+    const hash = await arcWallet.writeContract({
+      account: arcWallet.account!,
+      chain: arcWallet.chain,
+      address: GATEWAY_MINTER,
+      abi: minterAbi,
+      functionName: "gatewayMint",
+      args: [body.attestation, body.signature],
+    });
+    const receipt = await arcClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") throw new Error("the mint reverted");
+    return hash;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message.split("\n")[0] : "";
+    throw new Error(
+      `The mint did not finish (${reason}). Your Gateway balance returns in about 10 minutes.`,
+    );
+  }
 }

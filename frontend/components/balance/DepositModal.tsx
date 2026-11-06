@@ -23,6 +23,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge, Button, Segmented, glassSelected } from "@/components/ui/kit";
 import {
   ArrowUpRight,
+  CaretDown,
   CheckCircle,
   CircleNotch,
   WarningCircle,
@@ -42,7 +43,6 @@ import {
 } from "@/lib/arc/config";
 import { shortenAddress } from "@/lib/utils/address";
 import { calculateFeeAmount, getFeePercentLabel } from "@/lib/fees/platformFee";
-import { GatewayDeposit } from "./GatewayDeposit";
 import { needsSession } from "@/lib/api/errors";
 import { HumanStatus } from "@/components/world/HumanStatus";
 
@@ -344,14 +344,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   );
   const [precheck, setPrecheck] = useState<PreFlight | null>(null);
   const [recheckKey, setRecheckKey] = useState(0);
-  const [source, setSource] = useState<"wallet" | "gateway">("wallet");
 
   const config = useMemo(() => getArcConfig(), []);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
   const asset: ArcAsset = resolveHouseLedgerCurrency({ selectedCurrency });
   const assetConfig = config.assets[asset];
-  // Gateway moves USDC only.
-  const fromGateway = source === "gateway" && asset === "USDC";
   const quickAmounts = [1, 5, 10, 25];
   const gasReserve = gasFee == null ? null : gasFee + GAS_BUFFER;
 
@@ -740,32 +737,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     }
   };
 
-  const handleGatewayMinted = (txHash: string) => {
-    const walletAddress = address as string;
-    const depositAmount = parseFloat(amount);
-    submitted.current = {
-      txHash,
-      amount: depositAmount,
-      userAddress: walletAddress,
-    };
-    startVerification(txHash, {
-      userAddress: walletAddress,
-      amount: depositAmount,
-      currency: asset,
-      onCredited: (hash, credit) => {
-        void markCredited(hash, depositAmount, walletAddress, credit);
-      },
-    });
-  };
-
-  const handleGatewayError = useCallback(
-    (message: string) => {
-      setError(message);
-      toast.error(message);
-    },
-    [toast],
-  );
-
   const recheckSameTx = () => {
     const last = submitted.current;
     if (!last) return;
@@ -806,9 +777,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       showCloseButton={phase.kind !== "signing"}
     >
       <p className="-mt-4 mb-6 text-[15px] text-muted">
-        {fromGateway
-          ? "Spend your Circle Gateway balance from any chain. It lands on Arc in seconds."
-          : `Move ${asset} from your Arc wallet to your trading balance.`}
+        Move {asset} from your Arc wallet to your trading balance.
       </p>
       <div className="-mt-4 mb-6">
         <HumanStatus nudge />
@@ -834,22 +803,6 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           disabled={isBusy}
         />
       )}
-      {asset === "USDC" && (
-        <Segmented
-          className="mb-4"
-          options={[
-            { value: "wallet", label: "From Arc wallet" },
-            { value: "gateway", label: "Gateway · any chain" },
-          ]}
-          value={source}
-          onChange={(next) => {
-            setSource(next as "wallet" | "gateway");
-            setError(null);
-          }}
-          disabled={isBusy}
-        />
-      )}
-
       <label htmlFor="deposit-amount" className="sr-only">
         Amount to deposit
       </label>
@@ -880,8 +833,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
             onClick={() => handleQuickSelect(quickAmount)}
             disabled={
               isBusy ||
-              (!fromGateway &&
-                balanceState === "ready" &&
+              (balanceState === "ready" &&
                 gasReserve != null &&
                 quickAmount + gasReserve > walletBalance + FLOAT_EPSILON)
             }
@@ -893,14 +845,14 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         <button
           type="button"
           onClick={handleMaxClick}
-          disabled={isBusy || fromGateway || walletBalance <= 0}
+          disabled={isBusy || walletBalance <= 0}
           className={chip(false)}
         >
           Max
         </button>
       </div>
 
-      {wrongNetwork && !fromGateway && (
+      {wrongNetwork && (
         <div
           role="alert"
           className="mt-5 flex items-start gap-2 rounded-2xl bg-down-soft px-3.5 py-3 text-[13px]"
@@ -928,43 +880,39 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         </div>
       )}
 
-      {fromGateway && (
-        <GatewayDeposit
-          amount={hasAmount ? amount : ""}
-          disabled={isBusy || phase.kind === "credited"}
-          onMinted={handleGatewayMinted}
-          onError={handleGatewayError}
-        />
-      )}
-
       <dl className="mt-6 space-y-2 font-jet text-[13px]">
         {summaryRow(
           "You send",
           hasAmount ? `${parsedAmount.toFixed(4)} ${asset}` : `— ${asset}`,
         )}
-        {!fromGateway &&
-          summaryRow(
-            "Wallet",
-            balanceState === "loading"
-              ? `reading…`
-              : `${walletBalance.toFixed(4)} ${asset}`,
-          )}
-        {!fromGateway &&
-          summaryRow(
-            "Network fee (est.)",
-            balanceState === "error"
-              ? "unavailable"
-              : feeState === "loading" || gasFee == null
-                ? "checking…"
-                : `~${gasFee.toFixed(4)} ${asset}`,
-          )}
+        {summaryRow(
+          "Wallet",
+          balanceState === "loading"
+            ? `reading…`
+            : `${walletBalance.toFixed(4)} ${asset}`,
+        )}
+        {summaryRow(
+          "Network fee (est.)",
+          balanceState === "error"
+            ? "unavailable"
+            : feeState === "loading" || gasFee == null
+              ? "checking…"
+              : `~${gasFee.toFixed(4)} ${asset}`,
+        )}
         {summaryRow(
           `Credited after ${getFeePercentLabel(userTier)} fee`,
           hasAmount ? `${netPreview.toFixed(4)} ${asset}` : `0.0000 ${asset}`,
         )}
       </dl>
-      <details className="mt-3 font-jet text-[13px]">
-        <summary className="cursor-pointer text-subtle">Details</summary>
+      <details className="group mt-3 font-jet text-[13px]">
+        <summary className="flex cursor-pointer list-none items-center justify-between text-subtle [&::-webkit-details-marker]:hidden">
+          Details
+          <CaretDown
+            size={14}
+            aria-hidden="true"
+            className="text-faint transition-transform group-open:rotate-180"
+          />
+        </summary>
         <dl className="mt-2 space-y-2">
           {summaryRow("Token", `${asset} · ${assetConfig.decimals} decimals`)}
           {summaryRow("Network", `${config.name} · ${config.chainId}`)}
@@ -1150,24 +1098,22 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         </p>
       )}
 
-      {!fromGateway && (
-        <Button
-          size="lg"
-          onClick={handleDeposit}
-          disabled={
-            isBusy || wrongNetwork || !amount || phase.kind === "credited"
-          }
-          className="mt-6 w-full"
-        >
-          {phase.kind === "signing"
-            ? "Confirm in your wallet…"
-            : phase.kind === "pending"
-              ? "Verifying deposit…"
-              : phase.kind === "credited"
-                ? "Credited"
-                : `Deposit ${asset}`}
-        </Button>
-      )}
+      <Button
+        size="lg"
+        onClick={handleDeposit}
+        disabled={
+          isBusy || wrongNetwork || !amount || phase.kind === "credited"
+        }
+        className="mt-6 w-full"
+      >
+        {phase.kind === "signing"
+          ? "Confirm in your wallet…"
+          : phase.kind === "pending"
+            ? "Verifying deposit…"
+            : phase.kind === "credited"
+              ? "Credited"
+              : `Deposit ${asset}`}
+      </Button>
     </Modal>
   );
 };

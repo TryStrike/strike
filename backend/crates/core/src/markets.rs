@@ -676,3 +676,287 @@ mod quote_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stock page: price history per range and company stats. Both are cached per
+// stock, so one slow upstream call never holds up another stock or range.
+// ---------------------------------------------------------------------------
+
+const CHART_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
+const NASDAQ_URL: &str = "https://api.nasdaq.com/api/quote";
+/// Nasdaq answered in 1.4s to 3.4s when probed, past the 3s `CALL_TIMEOUT`.
+const NASDAQ_TIMEOUT: Duration = Duration::from_secs(6);
+/// The refresher keeps this cache full, so no click ever waits on Nasdaq.
+const STATS_REFRESH: Duration = Duration::from_secs(3600);
+const STATS_TTL: Duration = Duration::from_secs(2 * 3600);
+
+type Slot<T> = Arc<Mutex<Option<(Instant, Arc<T>)>>>;
+type Slots<K, T> = Lazy<std::sync::Mutex<HashMap<K, Slot<T>>>>;
+
+static HISTORY: Slots<(&'static str, &'static str), History> = Lazy::new(Default::default);
+static STATS: Slots<&'static str, StockStats> = Lazy::new(Default::default);
+
+fn slot_for<K: std::hash::Hash + Eq, T>(slots: &Slots<K, T>, key: K) -> Slot<T> {
+    slots
+        .lock()
+        .expect("markets cache lock")
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
+async fn cached<K, T, F>(slots: &Slots<K, T>, key: K, ttl: Duration, fetch: F) -> ApiResult<Arc<T>>
+where
+    K: std::hash::Hash + Eq,
+    F: std::future::Future<Output = ApiResult<T>>,
+{
+    let slot = slot_for(slots, key);
+    let mut entry = slot.lock().await;
+    if let Some((at, value)) = entry.as_ref() {
+        if at.elapsed() < ttl {
+            return Ok(value.clone());
+        }
+    }
+    let value = Arc::new(fetch.await?);
+    *entry = Some((Instant::now(), value.clone()));
+    Ok(value)
+}
+
+fn known_ticker(symbol: &str) -> ApiResult<&'static str> {
+    let symbol = symbol.trim().to_uppercase();
+    TICKERS
+        .iter()
+        .find(|t| **t == symbol)
+        .copied()
+        .ok_or_else(|| ApiError::json(axum::http::StatusCode::NOT_FOUND, "Unknown stock"))
+}
+
+/// (range, Yahoo range, Yahoo interval, cache). Yahoo serves `max` as monthly
+/// bars even when asked for weekly.
+const RANGES: &[(&str, &str, &str, u64)] = &[
+    ("1D", "1d", "5m", 60),
+    ("1W", "5d", "30m", 300),
+    ("1M", "1mo", "1d", 900),
+    ("1Y", "1y", "1d", 900),
+    ("ALL", "max", "1mo", 3600),
+];
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Point {
+    pub t: i64,
+    pub c: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct History {
+    pub ticker: &'static str,
+    pub range: &'static str,
+    pub price: f64,
+    /// The close before the range starts, so 1D change is against yesterday.
+    pub base: f64,
+    pub change_pct: f64,
+    pub day_high: Option<f64>,
+    pub day_low: Option<f64>,
+    pub year_high: Option<f64>,
+    pub year_low: Option<f64>,
+    pub volume: Option<f64>,
+    pub points: Vec<Point>,
+}
+
+fn positive(v: Option<&Value>) -> Option<f64> {
+    v.and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n > 0.0)
+}
+
+fn parse_history(body: &Value, ticker: &'static str, range: &'static str) -> Option<History> {
+    let result = body.pointer("/chart/result/0")?;
+    let meta = result.get("meta")?;
+    let price = positive(meta.get("regularMarketPrice"))?;
+    let empty = Vec::new();
+    let times = result
+        .get("timestamp")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let closes = result
+        .pointer("/indicators/quote/0/close")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let points: Vec<Point> = times
+        .iter()
+        .zip(closes)
+        .filter_map(|(t, c)| {
+            Some(Point {
+                t: t.as_i64()?,
+                c: positive(Some(c))?,
+            })
+        })
+        .collect();
+    let base = positive(meta.get("chartPreviousClose"))
+        .or_else(|| points.first().map(|p| p.c))
+        .unwrap_or(price);
+    Some(History {
+        ticker,
+        range,
+        price,
+        base,
+        change_pct: (price / base - 1.0) * 100.0,
+        day_high: positive(meta.get("regularMarketDayHigh")),
+        day_low: positive(meta.get("regularMarketDayLow")),
+        year_high: positive(meta.get("fiftyTwoWeekHigh")),
+        year_low: positive(meta.get("fiftyTwoWeekLow")),
+        volume: positive(meta.get("regularMarketVolume")),
+        points,
+    })
+}
+
+/// `range` is one of `RANGES`. Failures are not cached, so the next call retries.
+pub async fn history(symbol: &str, range: &str) -> ApiResult<Arc<History>> {
+    let ticker = known_ticker(symbol)?;
+    let range = range.trim().to_uppercase();
+    let &(range, yahoo_range, interval, ttl) = RANGES
+        .iter()
+        .find(|r| r.0 == range)
+        .ok_or_else(|| ApiError::bad_request("range must be 1D, 1W, 1M, 1Y or ALL"))?;
+    cached(
+        &HISTORY,
+        (ticker, range),
+        Duration::from_secs(ttl),
+        async move {
+            let unavailable = || ApiError::unavailable(format!("No {ticker} chart right now"));
+            let res = HTTP
+                .get(format!("{CHART_URL}/{ticker}"))
+                .query(&[("range", yahoo_range), ("interval", interval)])
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map_err(|err| {
+                    tracing::warn!(
+                        "[markets] {ticker} {range} chart failed: {}",
+                        err.without_url()
+                    );
+                    unavailable()
+                })?;
+            let body: Value = res.json().await.map_err(|_| unavailable())?;
+            parse_history(&body, ticker, range).ok_or_else(unavailable)
+        },
+    )
+    .await
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StockStats {
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub market_cap: Option<f64>,
+    pub average_volume: Option<f64>,
+    pub dividend_yield: Option<String>,
+    pub ex_dividend_date: Option<String>,
+    pub expense_ratio: Option<String>,
+}
+
+fn parse_stats(body: &Value) -> Option<StockStats> {
+    let data = body.pointer("/data/summaryData")?.as_object()?;
+    let text = |key: &str| {
+        data.get(key)?
+            .get("value")?
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "N/A")
+            .map(str::to_string)
+    };
+    let number = |key: &str| text(key)?.replace(',', "").parse::<f64>().ok();
+    Some(StockStats {
+        sector: text("Sector"),
+        industry: text("Industry"),
+        market_cap: number("MarketCap"),
+        average_volume: number("AverageVolume").or_else(|| number("AvgDailyVol65Days")),
+        dividend_yield: text("Yield"),
+        ex_dividend_date: text("ExDividendDate"),
+        expense_ratio: text("ExpenseRatio"),
+    })
+}
+
+async fn fetch_stats(ticker: &'static str) -> ApiResult<StockStats> {
+    let unavailable = || ApiError::unavailable(format!("No {ticker} stats right now"));
+    let class = if ticker == "SPY" { "etf" } else { "stocks" };
+    let res = HTTP
+        .get(format!("{NASDAQ_URL}/{ticker}/summary"))
+        .query(&[("assetclass", class)])
+        .header("Accept", "application/json")
+        .header("Origin", "https://www.nasdaq.com")
+        .header("Referer", "https://www.nasdaq.com/")
+        .timeout(NASDAQ_TIMEOUT)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|err| {
+            tracing::warn!("[markets] {ticker} stats failed: {}", err.without_url());
+            unavailable()
+        })?;
+    let body: Value = res.json().await.map_err(|_| unavailable())?;
+    parse_stats(&body).ok_or_else(unavailable)
+}
+
+pub async fn stats(symbol: &str) -> ApiResult<Arc<StockStats>> {
+    let ticker = known_ticker(symbol)?;
+    cached(&STATS, ticker, STATS_TTL, fetch_stats(ticker)).await
+}
+
+/// One stock at a time, so Nasdaq sees a browser's worth of traffic. A failed
+/// refresh keeps the old value until `STATS_TTL`, then `stats` reports the error.
+pub async fn run_stats_refresher() {
+    loop {
+        for &ticker in TICKERS {
+            if let Ok(fresh) = fetch_stats(ticker).await {
+                *slot_for(&STATS, ticker).lock().await = Some((Instant::now(), Arc::new(fresh)));
+            }
+        }
+        tokio::time::sleep(STATS_REFRESH).await;
+    }
+}
+
+#[cfg(test)]
+mod stock_page_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn history_drops_bad_bars_and_measures_from_the_previous_close() {
+        let body = json!({"chart":{"result":[{
+            "meta":{"regularMarketPrice":110.0,"chartPreviousClose":100.0,"fiftyTwoWeekHigh":120.0},
+            "timestamp":[1,2,3,4],
+            "indicators":{"quote":[{"close":[105.0,null,-1.0,110.0]}]}}]}});
+        let h = parse_history(&body, "NVDA", "1D").unwrap();
+        assert_eq!(
+            h.points,
+            vec![Point { t: 1, c: 105.0 }, Point { t: 4, c: 110.0 }]
+        );
+        assert_eq!(h.base, 100.0);
+        assert_eq!(h.change_pct.round(), 10.0);
+        assert_eq!(h.year_high, Some(120.0));
+        assert_eq!(h.year_low, None);
+        assert!(parse_history(&json!({"chart":{"result":null}}), "NVDA", "1D").is_none());
+    }
+
+    #[test]
+    fn stats_read_nasdaq_values_and_treat_na_as_missing() {
+        let body = json!({"data":{"summaryData":{
+            "Sector":{"value":"Technology"},
+            "MarketCap":{"value":"4,511,279,000,000"},
+            "AvgDailyVol65Days":{"value":"42,332,371"},
+            "Yield":{"value":"N/A"}}}});
+        let s = parse_stats(&body).unwrap();
+        assert_eq!(s.sector.as_deref(), Some("Technology"));
+        assert_eq!(s.market_cap, Some(4_511_279_000_000.0));
+        assert_eq!(s.average_volume, Some(42_332_371.0));
+        assert_eq!(s.dividend_yield, None);
+    }
+
+    #[test]
+    fn unknown_stocks_are_rejected_before_any_upstream_call() {
+        assert!(known_ticker("../../etc").is_err());
+        assert_eq!(known_ticker(" nvda ").unwrap(), "NVDA");
+    }
+}

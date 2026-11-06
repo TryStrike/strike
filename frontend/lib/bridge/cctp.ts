@@ -3,7 +3,7 @@ import { createViemAdapterFromProvider } from "@circle-fin/adapter-viem-v2";
 import type { EIP1193Provider } from "viem";
 
 export type BridgeDirection = "in" | "out";
-/** Where `out` can send to: CCTP chains where Circle's Forwarder pays the destination mint. */
+/** The far side of a bridge: CCTP chains where Circle's Forwarder pays the destination mint. */
 export type OutChain = "Base_Sepolia" | "Arbitrum_Sepolia" | "Ethereum_Sepolia";
 
 export interface BridgeOutcome {
@@ -17,12 +17,12 @@ export async function bridgeUsdc(
   amount: string,
   direction: BridgeDirection,
   onStep: (name: string) => void,
-  dest: OutChain = "Base_Sepolia",
+  remote: OutChain = "Base_Sepolia",
 ): Promise<BridgeOutcome> {
   const [from, to] =
     direction === "in"
-      ? (["Base_Sepolia", "Arc_Testnet"] as const)
-      : (["Arc_Testnet", dest] as const);
+      ? ([remote, "Arc_Testnet"] as const)
+      : (["Arc_Testnet", remote] as const);
   const kit = new BridgeKit();
   kit.on("*", (event: { method?: string }) => {
     if (event?.method) onStep(event.method);
