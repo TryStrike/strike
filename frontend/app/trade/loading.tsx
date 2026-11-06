@@ -1,5 +1,9 @@
-import { RouteLoading } from '@/components/states/RouteFallbacks';
+import { ChartSkeleton } from '@/components/states/Skeleton';
 
 export default function TradeLoading() {
-  return <RouteLoading shape="chart" label="Loading the trade board" />;
+  return (
+    <div className="relative h-full min-h-[70vh] w-full bg-white">
+      <ChartSkeleton label="Loading the trade board" />
+    </div>
+  );
 }

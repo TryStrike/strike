@@ -19,6 +19,21 @@ export const isAsset = (value: string): value is AssetType =>
 const PRICES_ENDPOINT = '/api/prices/latest';
 
 const PRICE_CACHE_STORAGE_KEY = 'strike_last_price_cache_v1';
+const PRICE_CACHE_WRITE_MS = 5_000;
+
+const rememberedPrices: Record<string, number> = {};
+let rememberedAt = 0;
+
+/** Stream frames carry only what moved, so these merge. The landing page seeds from this. */
+export function rememberPrices(prices: Record<string, number>) {
+  Object.assign(rememberedPrices, prices);
+  const now = Date.now();
+  if (now - rememberedAt < PRICE_CACHE_WRITE_MS) return;
+  rememberedAt = now;
+  try {
+    window.localStorage.setItem(PRICE_CACHE_STORAGE_KEY, JSON.stringify(rememberedPrices));
+  } catch {}
+}
 
 async function fetchAllPrices(): Promise<Record<string, number>> {
   const res = await fetch(PRICES_ENDPOINT, { signal: AbortSignal.timeout(6_000) });
@@ -29,11 +44,7 @@ async function fetchAllPrices(): Promise<Record<string, number>> {
     const px = Number(prices[sym]);
     if (Number.isFinite(px) && px > 0) results[sym] = px;
   }
-  if (Object.keys(results).length > 0) {
-    try {
-      window.localStorage.setItem(PRICE_CACHE_STORAGE_KEY, JSON.stringify(results));
-    } catch {}
-  }
+  if (Object.keys(results).length > 0) rememberPrices(results);
   return results;
 }
 
