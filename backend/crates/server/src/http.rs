@@ -109,7 +109,8 @@ pub fn require_balance_session(headers: &HeaderMap) -> Result<(), ApiError> {
         return Ok(());
     }
 
-    if crypto::verify_balance_session(cookie(headers, BALANCE_SESSION_COOKIE).as_deref()) {
+    if crypto::balance_session_wallet(cookie(headers, BALANCE_SESSION_COOKIE).as_deref()).is_some()
+    {
         return Ok(());
     }
 
@@ -120,6 +121,24 @@ pub fn require_balance_session(headers: &HeaderMap) -> Result<(), ApiError> {
     }
 
     Err(ApiError::unauthorized("Unauthorized"))
+}
+
+/// `require_balance_session`, and a browser session may only act for the wallet
+/// that signed it in. Server callers with the Bearer secret may name any wallet.
+pub fn require_wallet_session(headers: &HeaderMap, wallet: &str) -> Result<(), ApiError> {
+    require_balance_session(headers)?;
+    let secret = config().balance_internal_secret.clone().unwrap_or_default();
+    if secret.is_empty() || bearer(headers).as_deref() == Some(secret.as_str()) {
+        return Ok(());
+    }
+    let signed_in =
+        crypto::balance_session_wallet(cookie(headers, BALANCE_SESSION_COOKIE).as_deref());
+    if signed_in.as_deref() == Some(strike_core::address::canonical(wallet).as_str()) {
+        return Ok(());
+    }
+    Err(ApiError::unauthorized(
+        "This session is signed in for a different wallet",
+    ))
 }
 
 /// `requireAdminAuth()`.

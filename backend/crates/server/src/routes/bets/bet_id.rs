@@ -21,7 +21,7 @@ use strike_core::bets::{
 };
 use strike_core::error::ApiError;
 
-use crate::http::require_balance_session;
+use crate::http::{require_balance_session, require_wallet_session};
 use crate::sql;
 
 use super::{column_type, Binds};
@@ -58,6 +58,9 @@ async fn handle(
         return error_json(400, "Invalid bet id");
     }
     let address = canonical_address(wallet);
+    if let Err(err) = require_wallet_session(&headers, &address) {
+        return err.into_response();
+    }
 
     match run(&bet_id, &address).await {
         Ok(body) => axum::Json(body).into_response(),

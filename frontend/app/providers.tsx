@@ -57,6 +57,9 @@ function WalletSync() {
         setNetwork('ARC');
         void refreshWalletBalance();
         void fetchBalance(connectedAddress);
+        void import('@/lib/balance/balanceClientHeaders')
+          .then(({ ensureBalanceSession }) => ensureBalanceSession())
+          .catch((err) => console.error('[session] wallet sign-in failed', err));
       }
       return;
     }
@@ -90,10 +93,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     useStore.getState().setPriceFeed(feed);
   }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    void import('@/lib/balance/balanceClientHeaders').then(({ ensureBalanceSession }) => ensureBalanceSession());
-  }, []);
 
   return (
     <WagmiProvider config={wagmiConfig}>
