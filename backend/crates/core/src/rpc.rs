@@ -633,6 +633,49 @@ fn update_balance_for_withdrawal(
     })
 }
 
+/// Takes a Blitz pass fee off `user`'s balance, with a `blitz_fee` audit row.
+pub(crate) fn debit_blitz_fee(
+    conn: &Connection,
+    user: &str,
+    amount: Decimal,
+    currency: &str,
+    transaction_hash: &str,
+) -> ApiResult<Value> {
+    let (user, currency) = (Some(user), Some(currency));
+    guarded(conn, |c| {
+        if is_wallet_globally_banned(c, user)? {
+            return Ok(refused(BANNED, json!(0)));
+        }
+        let Some((balance, status)) = balance_and_status(c, user, currency)? else {
+            return Ok(refused("User not found", json!(0)));
+        };
+        let old = from_fixed(balance, MONEY_SCALE);
+        if status != "active" {
+            return Ok(refused(&format!("Account is {status}."), decimal_json(old)));
+        }
+        if old < amount {
+            return Ok(refused("Insufficient balance", decimal_json(old)));
+        }
+        let new = money::sub(old, amount);
+        set_balance(c, user, currency, Some(new))?;
+        audit(
+            c,
+            AuditRow {
+                user,
+                currency,
+                operation: "blitz_fee",
+                amount: Some(amount),
+                before: old,
+                after: Some(new),
+                transaction_hash: Some(transaction_hash),
+                bet_id: None,
+            },
+        )?;
+        Ok(credited(new))
+    })
+    .map(|outcome| outcome.json)
+}
+
 pub(crate) fn debit_for_withdrawal(
     conn: &Connection,
     user: Option<&str>,

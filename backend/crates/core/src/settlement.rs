@@ -64,6 +64,8 @@ const CHART_MAX_MULTIPLIER: f64 = 10.0;
 const BAND_MAX_RETURN: f64 = 0.95;
 /// The grid's in-row 1.01 plus its largest time bonus.
 const IN_BAND_CEILING: f64 = 1.01 + CHART_TIME_BONUS;
+/// No band pays more than this, boosted or not.
+const BOOSTED_MAX_MULTIPLIER: f64 = 20.0;
 
 /// The classic game's fixed payout table (`getMultiplier` in GameBoard.tsx).
 pub fn binomo_multiplier(seconds: i64) -> Option<Decimal> {
@@ -145,9 +147,10 @@ fn band_odds(strike: f64, top: f64, bottom: f64, range: f64, window_ms: i64, lef
 
 /// The highest multiplier a band may be offered at, whatever the client sent.
 ///
-/// The lower of two caps. The chart's cell quote at its largest time bonus,
-/// measured against `range`, stops a near band being paid like a far one. The
-/// band's odds keep a player's expected return under [`BAND_MAX_RETURN`].
+/// The lower of three caps. The chart's cell quote at its largest time bonus,
+/// measured against `range` and times `boost`, stops a near band being paid like
+/// a far one. The band's odds keep a player's expected return under
+/// [`BAND_MAX_RETURN`], boosted or not. [`BOOSTED_MAX_MULTIPLIER`] bounds the rest.
 ///
 /// ponytail: a cap, not a quote. Chart cells above it are refused at bet time
 /// until the server owns the price.
@@ -157,6 +160,7 @@ pub fn band_multiplier_ceiling(
     range: f64,
     window_ms: i64,
     left_ms: i64,
+    boost: f64,
 ) -> f64 {
     let chart = if strike >= bottom && strike <= top {
         IN_BAND_CEILING
@@ -164,7 +168,19 @@ pub fn band_multiplier_ceiling(
         let distance = ((top + bottom) / 2.0 - strike).abs() / (range * CHART_DISTANCE_SPAN);
         (1.05 + distance.min(1.0).powf(1.3) * 3.95 + CHART_TIME_BONUS).min(CHART_MAX_MULTIPLIER)
     };
-    chart.min(BAND_MAX_RETURN / band_odds(strike, top, bottom, range, window_ms, left_ms))
+    (chart * boost)
+        .min(BAND_MAX_RETURN / band_odds(strike, top, bottom, range, window_ms, left_ms))
+        .min(BOOSTED_MAX_MULTIPLIER)
+}
+
+/// The recent high-low range and its window, as [`freeze_band`] reads them.
+pub fn band_range(ring: &TickBuffer, asset: &str, now_ms: i64) -> (f64, i64) {
+    let window = if prices::is_fast(asset) {
+        FAST_RANGE_WINDOW_MS
+    } else {
+        SLOW_RANGE_WINDOW_MS
+    };
+    (ring.range(asset, now_ms - window), window)
 }
 
 /// `(end_ms, top, bottom)` of a band round.
@@ -175,6 +191,7 @@ fn freeze_band(
     multiplier: f64,
     ring: &TickBuffer,
     now_ms: i64,
+    boost: f64,
 ) -> Result<(i64, f64, f64), Rejection> {
     let (Some(top), Some(bottom)) = (
         positive_number(body, "priceTop"),
@@ -199,12 +216,7 @@ fn freeze_band(
         return Err(refuse(400, "invalid_end_time", "Round ends too far ahead"));
     }
 
-    let window = if prices::is_fast(asset) {
-        FAST_RANGE_WINDOW_MS
-    } else {
-        SLOW_RANGE_WINDOW_MS
-    };
-    let range = ring.range(asset, now_ms - window);
+    let (range, window) = band_range(ring, asset, now_ms);
     // A flat tape is a closed market: a band around the price would be a sure win.
     if range <= 0.0 {
         return Err(refuse(
@@ -216,7 +228,8 @@ fn freeze_band(
     if top - bottom > max_band_width(ring, asset, now_ms) {
         return Err(refuse(400, "band_too_wide", "Price band is too wide"));
     }
-    let ceiling = band_multiplier_ceiling(strike, (top, bottom), range, window, end_ms - now_ms);
+    let ceiling =
+        band_multiplier_ceiling(strike, (top, bottom), range, window, end_ms - now_ms, boost);
     if multiplier > ceiling {
         return Err(refuse(
             400,
@@ -227,13 +240,25 @@ fn freeze_band(
     Ok((end_ms, top, bottom))
 }
 
-/// Validates a bet against the feed and fixes its terms. Runs before any money
-/// moves; every refusal here leaves the ledger untouched.
+/// [`freeze_bet_boosted`] with no Blitz boost.
 pub fn freeze_bet(
     body: &Value,
     stake: Decimal,
     ring: &TickBuffer,
     now_ms: i64,
+) -> Result<Frozen, Rejection> {
+    freeze_bet_boosted(body, stake, ring, now_ms, 1.0)
+}
+
+/// Validates a bet against the feed and fixes its terms. Runs before any money
+/// moves; every refusal here leaves the ledger untouched. `boost` scales the band
+/// ceiling only, and the caller sets it above 1 after checking a Blitz pass.
+pub fn freeze_bet_boosted(
+    body: &Value,
+    stake: Decimal,
+    ring: &TickBuffer,
+    now_ms: i64,
+    boost: f64,
 ) -> Result<Frozen, Rejection> {
     if stake > config().max_stake {
         return Err(refuse(
@@ -316,7 +341,8 @@ pub fn freeze_bet(
         (now_ms + seconds * 1000, None)
     } else {
         let offered = multiplier.to_f64().ok_or_else(unavailable)?;
-        let (end_ms, top, bottom) = freeze_band(body, &asset, tick.price, offered, ring, now_ms)?;
+        let (end_ms, top, bottom) =
+            freeze_band(body, &asset, tick.price, offered, ring, now_ms, boost)?;
         (end_ms, Some((top, bottom)))
     };
 
@@ -716,7 +742,7 @@ mod tests {
     fn a_band_never_returns_more_than_its_odds() {
         // Right beside the price, and wide enough to be a sure thing.
         let ceiling = |top, bottom| {
-            band_multiplier_ceiling(100.0, (top, bottom), 4.0, FAST_RANGE_WINDOW_MS, 4_000)
+            band_multiplier_ceiling(100.0, (top, bottom), 4.0, FAST_RANGE_WINDOW_MS, 4_000, 1.0)
         };
         assert!(ceiling(101.6, 100.1) < 2.4);
         assert!(ceiling(110.0, 90.0) < 1.0);
@@ -727,11 +753,118 @@ mod tests {
         // Grid row at the far edge of a 4-wide axis, a near one, and the row on the price.
         let range = 4.0;
         let ceiling = |top, bottom| {
-            band_multiplier_ceiling(100.0, (top, bottom), range, FAST_RANGE_WINDOW_MS, 10_000)
+            band_multiplier_ceiling(
+                100.0,
+                (top, bottom),
+                range,
+                FAST_RANGE_WINDOW_MS,
+                10_000,
+                1.0,
+            )
         };
         assert!(5.0 <= ceiling(104.4, 104.0));
         assert!(1.06 <= ceiling(100.8, 100.4));
         assert!(1.21 <= ceiling(100.2, 99.8));
+    }
+
+    #[test]
+    fn a_boosted_band_is_accepted_up_to_the_doubled_chart_cap() {
+        let ring = ring(&[100.0, 104.0, 100.0]);
+        let inside = band(2.5, 100.5, 99.5, NOW + 10_000);
+        let plain = freeze_bet_boosted(&inside, dec("1"), &ring, NOW, 1.0);
+        assert_eq!(code(plain.unwrap_err()).1, "multiplier_not_offered");
+        assert!(freeze_bet_boosted(&inside, dec("1"), &ring, NOW, 2.0).is_ok());
+        // The boost is a cap, not a quote: past the doubled cap is still refused.
+        let past = band(2.7, 100.5, 99.5, NOW + 10_000);
+        let refused = freeze_bet_boosted(&past, dec("1"), &ring, NOW, 2.0);
+        assert_eq!(code(refused.unwrap_err()).1, "multiplier_not_offered");
+    }
+
+    #[test]
+    fn the_odds_cap_still_binds_a_boosted_band() {
+        // Two seconds left makes the band likely, so the odds cap sits under 2x chart.
+        let ring = ring(&[100.0, 104.0, 100.0]);
+        let soon = |multiplier| band(multiplier, 100.5, 99.5, NOW + 2_000);
+        assert!(freeze_bet_boosted(&soon(1.6), dec("1"), &ring, NOW, 2.0).is_ok());
+        let over = freeze_bet_boosted(&soon(2.0), dec("1"), &ring, NOW, 2.0);
+        assert_eq!(code(over.unwrap_err()).1, "multiplier_not_offered");
+        let ceiling =
+            band_multiplier_ceiling(100.0, (100.5, 99.5), 4.0, FAST_RANGE_WINDOW_MS, 2_000, 2.0);
+        assert!(ceiling < 2.0 * IN_BAND_CEILING);
+    }
+
+    #[test]
+    fn a_boost_never_lifts_a_band_past_twenty() {
+        let ceiling = band_multiplier_ceiling(
+            100.0,
+            (110.0, 109.9),
+            40.0,
+            FAST_RANGE_WINDOW_MS,
+            800_000,
+            2.0,
+        );
+        assert!(ceiling <= BOOSTED_MAX_MULTIPLIER);
+    }
+
+    #[test]
+    fn a_classic_round_takes_only_the_table_whatever_the_boost() {
+        let ring = ring(&[100.0]);
+        assert!(freeze_bet_boosted(&classic(1.75, 5, 100.0), dec("1"), &ring, NOW, 2.0).is_ok());
+        let doubled = freeze_bet_boosted(&classic(3.5, 5, 100.0), dec("1"), &ring, NOW, 2.0);
+        assert_eq!(code(doubled.unwrap_err()).1, "multiplier_not_offered");
+    }
+
+    /// The same cases the frontend's chart cap is checked against.
+    fn fixture_cases() -> Vec<Value> {
+        let mut cases = Vec::new();
+        // (strike, top, bottom, range, window, left)
+        let shapes = [
+            (100.0, 100.5, 99.5, 4.0, 30_000, 10_000),
+            (100.0, 100.5, 99.5, 4.0, 30_000, 2_000),
+            (100.0, 101.6, 100.1, 4.0, 30_000, 4_000),
+            (100.0, 100.8, 100.4, 4.0, 30_000, 10_000),
+            (100.0, 104.4, 104.0, 4.0, 30_000, 10_000),
+            (100.0, 96.0, 95.6, 4.0, 30_000, 60_000),
+            (100.0, 110.0, 90.0, 4.0, 30_000, 4_000),
+            (100.0, 100.002, 99.998, 0.01, 30_000, 10_000),
+            (100.0, 100.05, 100.01, 0.01, 30_000, 120_000),
+            (250.0, 251.0, 249.0, 12.0, 120_000, 30_000),
+            (250.0, 262.0, 260.0, 12.0, 120_000, 300_000),
+            (250.0, 240.0, 238.0, 12.0, 120_000, 900_000),
+            (65_000.0, 65_040.0, 64_980.0, 250.0, 30_000, 20_000),
+            (65_000.0, 65_400.0, 65_300.0, 250.0, 30_000, 90_000),
+        ];
+        for (strike, top, bottom, range, window_ms, left_ms) in shapes {
+            for boost in [1.0, 2.0] {
+                let ceiling = band_multiplier_ceiling(
+                    strike,
+                    (top, bottom),
+                    range,
+                    window_ms,
+                    left_ms,
+                    boost,
+                );
+                cases.push(json!({
+                    "strike": strike, "top": top, "bottom": bottom, "range": range,
+                    "windowMs": window_ms, "leftMs": left_ms, "boost": boost, "ceiling": ceiling,
+                }));
+            }
+        }
+        cases
+    }
+
+    #[test]
+    fn the_ceiling_matches_the_frontend_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../frontend/lib/markets/bandCeiling.fixture.json");
+        let text = serde_json::to_string_pretty(&fixture_cases()).unwrap() + "\n";
+        // Both sides go through the parser, which may round the last digit of a float.
+        let cases: Value = serde_json::from_str(&text).unwrap();
+        if std::env::var("UPDATE_FIXTURES").is_ok_and(|v| v == "1") {
+            std::fs::write(&path, &text).unwrap();
+        }
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored, cases, "rerun with UPDATE_FIXTURES=1 to regenerate");
     }
 
     #[test]

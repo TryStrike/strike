@@ -4,6 +4,7 @@ pub mod agentpass;
 pub mod arkiv;
 pub mod bets;
 pub mod binance_ws;
+pub mod blitz;
 pub mod config;
 pub mod copilot;
 pub mod crypto;

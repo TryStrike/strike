@@ -5,8 +5,9 @@ use std::sync::Arc;
 use rusqlite::params;
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
+use strike_core::blitz;
 use strike_core::db::Db;
-use strike_core::error::ApiError;
+use strike_core::error::{ApiError, ApiResult};
 use strike_core::money::{to_fixed, MONEY_SCALE};
 use strike_core::withdrawals::{
     claim_and_debit, finalize, park, queue, stuck, Claim, QueueRequest, Queued,
@@ -1394,4 +1395,109 @@ async fn stuck_rows_are_reported_and_left_alone() {
 
     assert_eq!(request_count(&t.db, "accepted").await, 2);
     assert_eq!(balance(&t.db, USER).await, units(70));
+}
+
+// A Thursday-ish instant inside a Blitz window (phase 130 s of 180 s) and one outside it.
+const BLITZ_ON: i64 = 1_800_000_010_000 - 1_800_000_010_000 % 180_000 + 130_000;
+const BLITZ_OFF: i64 = BLITZ_ON - 130_000 + 10_000;
+
+async fn blitz_audit_rows(db: &Db) -> (i64, i64) {
+    db.read(|conn| {
+        Ok(conn.query_row(
+            "SELECT count(*), coalesce(sum(amount), 0) FROM balance_audit_log \
+             WHERE operation_type = 'blitz_fee'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_blitz_pass_debits_once_with_one_audit_row() {
+    let t = TempDb::new();
+    deposit(&t.db, USER, "5", "0xdep1").await;
+    let first = blitz::enter(&t.db, USER, USER, USDC, BLITZ_ON)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first["charged"], "1");
+    assert_eq!(first["windowStartsAt"], BLITZ_ON - 10_000);
+    assert_eq!(first["endsAt"], BLITZ_ON - 10_000 + 60_000);
+    let again = blitz::enter(&t.db, USER, USER, USDC, BLITZ_ON + 5_000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again["charged"], "0");
+    assert_eq!(
+        blitz_audit_rows(&t.db).await,
+        (1, to_fixed(Decimal::ONE, MONEY_SCALE).unwrap())
+    );
+    let balance =
+        t.db.read(|c| {
+            Ok(c.query_row(
+                "SELECT balance FROM user_balances WHERE user_address = ?1",
+                [USER],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(balance, to_fixed(Decimal::from(4), MONEY_SCALE).unwrap());
+    let status = blitz::pass_status(&t.db, USER, BLITZ_ON).await.unwrap();
+    assert_eq!(status["hasPass"], true);
+}
+
+#[tokio::test]
+async fn a_blitz_pass_needs_the_balance() {
+    let t = TempDb::new();
+    let refused = blitz::enter(&t.db, USER, USER, USDC, BLITZ_ON)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        (refused.0, refused.1["code"].as_str()),
+        (400, Some("insufficient_balance"))
+    );
+    assert_eq!(blitz_audit_rows(&t.db).await.0, 0);
+    let status = blitz::pass_status(&t.db, USER, BLITZ_ON).await.unwrap();
+    assert_eq!(status, json!({"hasPass": false, "windowStartsAt": null}));
+}
+
+#[tokio::test]
+async fn a_boost_needs_a_pass_for_the_window_that_is_active() {
+    let t = TempDb::new();
+    deposit(&t.db, USER, "5", "0xdep2").await;
+    let boxed = json!({"mode": "box", "blitz": true});
+    let classic = json!({"mode": "binomo", "blitz": true});
+    let plain = json!({"mode": "box"});
+    async fn boost(t: &TempDb, body: &Value, now: i64) -> ApiResult<Result<f64, (u16, Value)>> {
+        blitz::boost_for(&t.db, body, USER, now).await
+    }
+    let code =
+        |r: Result<f64, (u16, Value)>| r.unwrap_err().1["code"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        code(boost(&t, &boxed, BLITZ_ON).await.unwrap()),
+        "blitz_inactive"
+    );
+    assert_eq!(boost(&t, &classic, BLITZ_ON).await.unwrap().unwrap(), 1.0);
+
+    // A pass bought before the window opens is for that window, and only then.
+    blitz::enter(&t.db, USER, USER, USDC, BLITZ_OFF)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        code(boost(&t, &boxed, BLITZ_OFF).await.unwrap()),
+        "blitz_inactive"
+    );
+    assert_eq!(boost(&t, &boxed, BLITZ_ON).await.unwrap().unwrap(), 2.0);
+    assert_eq!(boost(&t, &plain, BLITZ_ON).await.unwrap().unwrap(), 1.0);
+    assert_eq!(boost(&t, &classic, BLITZ_ON).await.unwrap().unwrap(), 1.0);
+    assert_eq!(
+        code(boost(&t, &boxed, BLITZ_ON + 60_000).await.unwrap()),
+        "blitz_inactive"
+    );
 }

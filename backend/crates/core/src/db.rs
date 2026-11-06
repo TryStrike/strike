@@ -221,6 +221,60 @@ const MIGRATIONS: &[&str] = &[
        id    INTEGER PRIMARY KEY CHECK (id = 1),
        block INTEGER NOT NULL
      ) STRICT;",
+    // Blitz passes, and `blitz_fee` as an audit operation. SQLite cannot alter a
+    // CHECK, so the audit table is rebuilt, rows and indexes intact.
+    "CREATE TABLE blitz_passes (
+       wallet       TEXT NOT NULL,
+       window_start INTEGER NOT NULL,
+       currency     TEXT NOT NULL,
+       fee          INTEGER NOT NULL,
+       created_at   INTEGER NOT NULL,
+       PRIMARY KEY (wallet, window_start)
+     ) STRICT;
+     CREATE TABLE balance_audit_log_new (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       user_address     TEXT NOT NULL,
+       currency         TEXT NOT NULL DEFAULT 'BOT',
+       operation_type   TEXT NOT NULL,
+       amount           INTEGER NOT NULL,
+       balance_before   INTEGER,
+       balance_after    INTEGER,
+       transaction_hash TEXT,
+       bet_id           TEXT,
+       created_at       INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER)),
+       idempotency_key  TEXT,
+       settlement_token TEXT,
+       max_payout       INTEGER,
+       end_time         INTEGER,
+       consumed_at      INTEGER,
+       CONSTRAINT balance_audit_log_operation_type_check CHECK (operation_type IN (
+         'deposit', 'withdrawal', 'bet_placed', 'bet_won', 'bet_lost', 'bet_lock',
+         'payout_lock', 'payout', 'platform_fee', 'refund', 'reconciliation',
+         'admin_balance_wipe', 'blitz_fee'
+       ))
+     ) STRICT;
+     INSERT INTO balance_audit_log_new (id, user_address, currency, operation_type, amount, balance_before, balance_after, transaction_hash, bet_id, created_at, idempotency_key, settlement_token, max_payout, end_time, consumed_at) SELECT id, user_address, currency, operation_type, amount, balance_before, balance_after, transaction_hash, bet_id, created_at, idempotency_key, settlement_token, max_payout, end_time, consumed_at FROM balance_audit_log;
+     DROP TABLE balance_audit_log;
+     ALTER TABLE balance_audit_log_new RENAME TO balance_audit_log;
+     CREATE INDEX idx_al_user_address ON balance_audit_log(user_address);
+     CREATE INDEX idx_al_user_currency ON balance_audit_log(user_address, currency);
+     CREATE INDEX idx_al_created_at ON balance_audit_log(created_at DESC);
+     CREATE INDEX idx_al_operation ON balance_audit_log(operation_type, user_address);
+     CREATE UNIQUE INDEX idx_balance_audit_settlement_lock
+       ON balance_audit_log(bet_id, operation_type)
+       WHERE bet_id IS NOT NULL AND operation_type IN ('payout_lock', 'bet_won', 'bet_lost');
+     CREATE UNIQUE INDEX idx_balance_audit_idempotency
+       ON balance_audit_log(idempotency_key)
+       WHERE idempotency_key IS NOT NULL;
+     CREATE UNIQUE INDEX idx_balance_audit_tx_hash_unique
+       ON balance_audit_log(transaction_hash)
+       WHERE transaction_hash IS NOT NULL;
+     CREATE INDEX idx_balance_audit_bet_id
+       ON balance_audit_log(bet_id)
+       WHERE bet_id IS NOT NULL;
+     CREATE INDEX idx_balance_audit_open_bets
+       ON balance_audit_log(bet_id)
+       WHERE operation_type = 'bet_lock' AND consumed_at IS NULL;",
 ];
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 

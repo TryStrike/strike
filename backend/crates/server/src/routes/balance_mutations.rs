@@ -12,6 +12,7 @@ use rust_decimal::Decimal;
 use strike_core::address;
 use strike_core::agentpass::{self, Action};
 use strike_core::bets::{self, iso_ms, now_ms};
+use strike_core::blitz;
 use strike_core::config::config;
 use strike_core::crypto;
 use strike_core::db::{self, rpc_object};
@@ -81,7 +82,7 @@ fn bind_variants(binds: &mut Binds, variants: &[String]) -> String {
     items.join(", ")
 }
 
-async fn balance_rows(variants: &[String], currency: &str) -> Vec<Value> {
+pub(crate) async fn balance_rows(variants: &[String], currency: &str) -> Vec<Value> {
     let mut binds = Binds::new();
     let in_list = bind_variants(&mut binds, variants);
     let currency_bind = binds.push_static("text", Value::String(currency.to_string()));
@@ -179,6 +180,18 @@ pub(crate) async fn place_bet(body: &Value) -> ledger::BetOutcome {
     ledger::bet_outcome(&bet_run(body).await)
 }
 
+/// 1 unless the bet asks for Blitz, in which case it needs an active pass.
+async fn blitz_boost(body: &Value, wallet: &str, now: i64) -> Result<f64, ledger::Rejection> {
+    let unavailable = |err: ApiError| {
+        tracing::error!("[bet] blitz pass lookup failed: {err}");
+        (503, ledger::error_body("Service unavailable"))
+    };
+    let database = db::db().await.map_err(unavailable)?;
+    blitz::boost_for(database, body, wallet, now)
+        .await
+        .map_err(unavailable)?
+}
+
 async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
     if !config().is_settlement_signing_configured() {
         tracing::error!("[bet] BALANCE_SETTLEMENT_SECRET is not set — bets cannot be signed");
@@ -194,7 +207,9 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
 
     let stake = ledger::exact_amount(plan.amount)
         .ok_or_else(|| (400, ledger::error_body("Invalid bet amount")))?;
-    let frozen = settlement::freeze_bet(body, stake, ticks::buffer(), now_ms())?;
+    let now = now_ms();
+    let boost = blitz_boost(body, user_address, now).await?;
+    let frozen = settlement::freeze_bet_boosted(body, stake, ticks::buffer(), now, boost)?;
     let terms = serde_json::to_value(&frozen.terms).map_err(|err| {
         tracing::error!("[bet] round terms failed to serialize: {err}");
         ledger::route_crash()
