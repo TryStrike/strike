@@ -22,7 +22,7 @@ use crate::eth::{
 
 pub const DEFAULT_RPC: &str = "https://rpc.rabdi.db-chain.testnet.arkiv.network";
 pub const CHAIN_ID: u64 = 7_794_095;
-const SCHEMA: &str = "strike.bets";
+const SCHEMA: &str = "strike.rounds";
 const ARKIV: &str = "0x4400000000000000000000000000000000000044";
 const EXECUTE: [u8; 4] = [0x49, 0x65, 0x00, 0x44];
 const OP_CREATE: u8 = 1;

@@ -1,23 +1,103 @@
 'use client';
 
-import React from 'react';
-import { ChartLineUp, ShareNetwork } from '@phosphor-icons/react';
+import React, { useState } from 'react';
+import { ArrowUpRight, ChartLineUp, ShareNetwork } from '@phosphor-icons/react';
 import { shareWinUrl } from '@/components/game/WinBurst';
 import { formatMoney } from '@/components/ui/MoneyText';
 import { useStore } from '@/lib/store';
 import { Badge, Label, cx } from '@/components/ui/kit';
+import { entityUrl, isWin, settledAtMs, useArkivTape } from '@/lib/arkiv';
 
 export function isDemoBetId(id: string | null | undefined): boolean {
   return String(id ?? '').toLowerCase().startsWith('demo-');
 }
 
 export const MiniHistory: React.FC = () => {
-  const bets = useStore((state) => state.bets);
-  const recentBets = bets.slice(0, 10);
-
+  const [view, setView] = useState<'mine' | 'everyone'>('mine');
   return (
     <section data-tour="active-bets">
-      <Label>Recent rounds</Label>
+      <div className="flex items-center justify-between">
+        <Label>Recent rounds</Label>
+        <div className="flex gap-1 text-xs font-medium" role="tablist" aria-label="Whose rounds">
+          {(['mine', 'everyone'] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={view === v}
+              onClick={() => setView(v)}
+              className={cx('rounded-full px-2.5 py-1 transition-colors', view === v ? 'bg-surface text-ink' : 'text-faint hover:text-ink')}
+            >
+              {v === 'mine' ? 'Mine' : 'Everyone'}
+            </button>
+          ))}
+        </div>
+      </div>
+      {view === 'mine' ? <MyRounds /> : <EveryoneRounds />}
+    </section>
+  );
+};
+
+const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+/** Every player's settled rounds on the asset on screen, read from Arkiv, not from our server. */
+const EveryoneRounds: React.FC = () => {
+  const asset = useStore((state) => state.selectedAsset);
+  const me = useStore((state) => state.address)?.toLowerCase();
+  const { tape, error } = useArkivTape(asset);
+  const rounds = (tape?.rounds ?? []).filter((r) => r.asset === asset);
+  const won = rounds.filter(isWin).length;
+
+  if (error) return <p className="text-sm text-down">Could not read Arkiv: {error}</p>;
+  if (!tape) return <p className="font-jet text-xs text-faint">Reading Arkiv…</p>;
+  return (
+    <>
+      <p className="mb-1 font-jet text-[11px] text-faint">
+        {rounds.length} {asset} round{rounds.length === 1 ? '' : 's'} in 24h
+        {rounds.length > 0 && ` · ${Math.round((won / rounds.length) * 100)}% won`} · read from Arkiv
+      </p>
+      {rounds.length === 0 ? (
+        <p className="text-sm text-faint">No {asset} rounds settled in the last 24 hours.</p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {rounds.slice(0, 10).map((r) => {
+            const win = isWin(r);
+            return (
+              <li key={r.key} className="flex items-center justify-between py-2.5 text-sm">
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-ink">
+                    {r.direction} · {r.wallet === me ? 'you' : `${r.wallet?.slice(0, 6)}…${r.wallet?.slice(-4)}`}
+                  </div>
+                  <div className="font-jet text-xs text-faint">{time(settledAtMs(r))}</div>
+                </div>
+                <span className="flex items-center gap-2">
+                  <span className={cx('font-jet font-medium', win ? 'text-up' : 'text-down')}>
+                    {win ? formatMoney(r.payout ?? '0', 2, { sign: true }) : `−${formatMoney(r.stake ?? '0', 2)}`}
+                  </span>
+                  <a
+                    href={entityUrl(r.key)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="Verify this round on Arkiv"
+                    className="text-faint hover:text-ink"
+                  >
+                    <ArrowUpRight size={14} />
+                  </a>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
+  );
+};
+
+const MyRounds: React.FC = () => {
+  const bets = useStore((state) => state.bets);
+  const recentBets = bets.slice(0, 10);
+  return (
+    <>
       {recentBets.length > 0 ? (
         <ul className="divide-y divide-line">
           {recentBets.map((bet) => (
@@ -57,7 +137,7 @@ export const MiniHistory: React.FC = () => {
       ) : (
         <p className="text-sm text-faint">Your rounds will show up here.</p>
       )}
-    </section>
+    </>
   );
 };
 

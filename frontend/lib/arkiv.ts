@@ -4,7 +4,9 @@ import { useEffect, useState } from 'react';
 
 export const ARKIV_RPC = 'https://rpc.rabdi.db-chain.testnet.arkiv.network';
 export const ARKIV_EXPLORER = 'https://rabdi.explorer.arkiv.network';
-const SCHEMA = 'strike.bets';
+const SCHEMAS = `arkiv.schema = str('strike.rounds')`;
+const ASSET = /^[A-Z0-9]{2,10}$/;
+const DAY_MS = 86_400_000;
 const OPERATOR = process.env.NEXT_PUBLIC_ARKIV_OPERATOR?.trim().toLowerCase() ?? '';
 const BET_ID = /^[A-Za-z0-9_.:-]{1,120}$/;
 const WALLET = /^0x[0-9a-fA-F]{40}$/;
@@ -16,6 +18,11 @@ export interface ArkivEntity {
   outcome?: string;
   payout?: string;
   currency?: string;
+  asset?: string;
+  wallet?: string;
+  direction?: string;
+  stake?: string;
+  settledAt?: string;
 }
 
 export interface ArkivSeals {
@@ -67,7 +74,7 @@ export async function readSealedEntity(key: string, signal?: AbortSignal): Promi
 
 function historyQuery(wallet: string, betIds: string[]): string {
   const ids = betIds.map((id) => `betId = str('${id}')`).join(' OR ');
-  return `arkiv.schema = str('${SCHEMA}') AND $creator = addr(${OPERATOR}) AND wallet = addr(${wallet.toLowerCase()}) AND (${ids})`;
+  return `${SCHEMAS} AND $creator = addr(${OPERATOR}) AND wallet = addr(${wallet.toLowerCase()}) AND (${ids})`;
 }
 
 export function useArkivSeals(wallet: string, betIds: string[]): { seals: ArkivSeals | null; error: string | null } {
@@ -105,4 +112,60 @@ export function useArkivSeals(wallet: string, betIds: string[]): { seals: ArkivS
   }, [wallet, ids]);
 
   return { seals, error };
+}
+
+export interface ArkivTape {
+  /** Newest first. */
+  rounds: ArkivEntity[];
+  won: number;
+  query: string;
+}
+
+const TAPE_REFRESH_MS = 20_000;
+// The public node refuses limits above 100.
+const TAPE_LIMIT = 100;
+
+export const settledAtMs = (e: ArkivEntity) => Number(e.settledAt ?? 0);
+export const isWin = (e: ArkivEntity) => e.outcome === 'won' || e.outcome === 'win';
+
+/**
+ * Every player's rounds on `asset` in the last 24 hours, read straight from Arkiv:
+ * filtered by schema, our operator as `$creator`, the asset and a `settledAt` range.
+ * Arkiv has no ORDER BY, so the window bounds the scan and the sort happens here.
+ */
+export function useArkivTape(asset: string): { tape: ArkivTape | null; error: string | null } {
+  const [tape, setTape] = useState<ArkivTape | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const load = async () => {
+      if (!OPERATOR) throw new Error('NEXT_PUBLIC_ARKIV_OPERATOR is not set');
+      if (!ASSET.test(asset)) throw new Error(`asset cannot be queried on Arkiv: ${asset}`);
+      const since = Date.now() - DAY_MS;
+      const query = `${SCHEMAS} AND $creator = addr(${OPERATOR}) AND asset = str('${asset}') AND settledAt > u64(${since})`;
+      const result = await arkiv<{ data: RawEntity[] }>(
+        'arkiv_query',
+        [query, { select: { key: true, creator: true, attributes: true }, limit: `0x${TAPE_LIMIT.toString(16)}` }],
+        ctrl.signal,
+      );
+      const rounds = result.data.map(flatten).sort((a, b) => settledAtMs(b) - settledAtMs(a));
+      setTape({ rounds, won: rounds.filter(isWin).length, query });
+      setError(null);
+    };
+    const run = () =>
+      load().catch((err) => {
+        if (ctrl.signal.aborted) return;
+        console.error('[arkiv] tape query failed', asset, err);
+        setError(String(err.message ?? err));
+      });
+    void run();
+    const timer = setInterval(run, TAPE_REFRESH_MS);
+    return () => {
+      ctrl.abort();
+      clearInterval(timer);
+    };
+  }, [asset]);
+
+  return { tape, error };
 }
