@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RpContext } from '@worldcoin/idkit';
 import { useAccount, useSignMessage } from 'wagmi';
 import { getArcConfig } from '@/lib/arc/config';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
@@ -55,6 +56,20 @@ export interface WorldAttempt {
   kind?: 'start' | 'checkpoint';
 }
 
+/** The IDKit step-up challenge a 401 carries when the server runs World ID through IDKit. */
+export interface WorldChallenge {
+  attempt: string;
+  world: {
+    app_id: `app_${string}`;
+    action: string;
+    signal: string;
+    environment: 'production' | 'staging';
+    preset: 'selfie' | 'orb';
+    require_user_presence: boolean;
+    rp_context: RpContext;
+  };
+}
+
 const START_VALID_MS = 5 * 60_000;
 const KEEP = 100;
 
@@ -80,11 +95,17 @@ async function errorOf(res: Response): Promise<string> {
   return body?.error ?? `Request failed with ${res.status}`;
 }
 
-/** Follows a 401 step-up challenge to World. `false` when the reply was anything else. */
-function toWorld(res: Response, body: { verifyUrl?: string } | null): boolean {
-  if (res.status !== 401 || !body?.verifyUrl) return false;
-  window.location.assign(body.verifyUrl);
-  return true;
+/** Reads a World attempt reply. 404 means it belongs to another browser or never existed. */
+export async function attemptOf(res: Response): Promise<WorldAttempt> {
+  if (res.status === 404) {
+    return {
+      status: 'unknown',
+      reason: 'Open the World App link in the browser where you started, then sign again',
+      acr: null,
+    };
+  }
+  if (!res.ok) return { status: 'failed', reason: await errorOf(res), acr: null };
+  return res.json();
 }
 
 /** The trader's agent session, live from the decisions feed. */
@@ -96,7 +117,29 @@ export function useAgent() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedKey, setFeedKey] = useState(0);
+  const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
   const proofSession = useRef(false);
+
+  /** Takes a 401 step-up to World, by IDKit in place or by redirect. `false` when the reply was anything else. */
+  const toWorld = useCallback((res: Response, body: (Partial<WorldChallenge> & { verifyUrl?: string }) | null) => {
+    if (res.status !== 401) return false;
+    if (body?.attempt && body.world) {
+      setChallenge({ attempt: body.attempt, world: body.world });
+      return true;
+    }
+    if (!body?.verifyUrl) return false;
+    window.location.assign(body.verifyUrl);
+    return true;
+  }, []);
+
+  /** The IDKit check settled. An approved start set the agent cookie, so the feed reconnects to pick it up. */
+  const settle = useCallback((a: WorldAttempt) => {
+    setChallenge(null);
+    setBusy(false);
+    if (a.status !== 'approved') return;
+    if (a.kind === 'start') setDecisions([]);
+    setFeedKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     const source = new EventSource('/api/agent/decisions');
@@ -157,7 +200,7 @@ export function useAgent() {
         if (!leaving) setBusy(false);
       }
     },
-    [address, signMessageAsync]
+    [address, signMessageAsync, toWorld]
   );
 
   const stop = useCallback(async () => {
@@ -188,7 +231,7 @@ export function useAgent() {
     } finally {
       if (!leaving) setBusy(false);
     }
-  }, []);
+  }, [toWorld]);
 
   /** Approve or reject a proposal. The feed carries the result to every tab. */
   const answer = useCallback(async (id: string, action: 'approve' | 'reject') => {
@@ -202,7 +245,7 @@ export function useAgent() {
     setDecisions((all) => all.map((d) => (d.id === decision.id ? decision : d)));
   }, []);
 
-  return { session, decisions, error, busy, start, stop, answer, checkpoint };
+  return { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle };
 }
 
 /** Outcome of the World ID check the callback redirected back with as `?world=<attempt>`. Read once, never polled. */
@@ -220,17 +263,8 @@ export function useWorldAttempt() {
       return;
     }
     fetch(`/api/world/attempts/${encodeURIComponent(id)}`)
-      .then(async (res) => {
-        if (res.status === 404) {
-          return setAttempt({
-            status: 'unknown',
-            reason: 'Open the World App link in the browser where you started, then sign again',
-            acr: null,
-          });
-        }
-        if (!res.ok) return setAttempt({ status: 'failed', reason: await errorOf(res), acr: null });
-        setAttempt(await res.json());
-      })
+      .then(attemptOf)
+      .then(setAttempt)
       .catch((e) => setAttempt({ status: 'failed', reason: `Could not read the human check: ${e.message}`, acr: null }));
   }, []);
 

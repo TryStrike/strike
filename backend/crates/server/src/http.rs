@@ -66,12 +66,18 @@ pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// A JSON response that also sets a cookie.
 pub fn json_with_cookie(body: Value, cookie: Cookie) -> Response {
+    json_with_cookies(body, &[cookie])
+}
+
+pub fn json_with_cookies(body: Value, cookies: &[Cookie]) -> Response {
     let mut headers = HeaderMap::new();
-    headers.append(
-        HeaderName::from_static("set-cookie"),
-        HeaderValue::from_str(&cookie.render())
-            .unwrap_or_else(|_| HeaderValue::from_static("invalid")),
-    );
+    for cookie in cookies {
+        headers.append(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_str(&cookie.render())
+                .unwrap_or_else(|_| HeaderValue::from_static("invalid")),
+        );
+    }
     (headers, axum::Json(body)).into_response()
 }
 

@@ -16,6 +16,7 @@ import {
 } from '@/lib/agent/useAgent';
 
 const SettlementProof = dynamic(() => import('@/components/game/SettlementProof'), { ssr: false });
+const WorldCheck = dynamic(() => import('@/components/agent/WorldCheck'), { ssr: false });
 
 const MINUTES = [
   { value: 5, label: '5m' },
@@ -31,7 +32,7 @@ const WAITING_FOR_HUMAN = 'Waiting for a human';
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
-  const { session, decisions, error, busy, start, stop, answer, checkpoint } = useAgent();
+  const { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle } = useAgent();
   const [world, setWorld] = useWorldAttempt();
   const [limits, setLimits] = useState<Limits>({ mode: 'normal', budget: 20, maxPerTrade: 2, stopLoss: 5, minutes: 15 });
   const running = session?.status === 'running';
@@ -136,6 +137,17 @@ export function AgentPanel() {
           <Play size={18} weight="fill" />{' '}
           {!address ? 'Connect a wallet to start' : limits.mode === 'yolo' ? 'Sign and verify with World ID' : 'Sign and start'}
         </Button>
+      )}
+
+      {challenge && (
+        <WorldCheck
+          key={challenge.attempt}
+          challenge={challenge}
+          onDone={(a) => {
+            settle(a);
+            setWorld(a);
+          }}
+        />
       )}
 
       {world && <HumanCheck attempt={world} />}

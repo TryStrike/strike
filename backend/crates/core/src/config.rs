@@ -89,9 +89,10 @@ pub struct Config {
     pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
     pub agent_max_open_stake: rust_decimal::Decimal,
-    /// World ID step-up for YOLO starts. `None` until id, secret and redirect
-    /// are all set, and YOLO starts answer 503 until then.
+    /// World ID step-up for YOLO starts. `world_idkit` wins when both are set,
+    /// and YOLO starts answer 503 when neither is.
     pub world: Option<WorldClient>,
+    pub world_idkit: Option<IdkitApp>,
     /// Budgets up to this take a selfie check, up to `world_orb_max` an Orb,
     /// anything above an Orb plus a live face.
     pub world_selfie_max: rust_decimal::Decimal,
@@ -108,8 +109,9 @@ pub struct Config {
 impl Config {
     /// Reads the environment with the same defaults the TS service used.
     ///
-    /// Nothing here panics: a missing secret disables the feature it guards
-    /// (exactly like the `process.env` reads did) and a missing `SQLITE_PATH`
+    /// Only a malformed World ID signing key or environment panics. A missing
+    /// secret disables the feature it guards (exactly like the `process.env`
+    /// reads did) and a missing `SQLITE_PATH`
     /// fails at the first query instead, so pure functions stay testable
     /// without a fully populated environment.
     pub fn from_env() -> Self {
@@ -174,6 +176,7 @@ impl Config {
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
                 .unwrap_or(rust_decimal::Decimal::from(200)),
             world: WorldClient::from_env(),
+            world_idkit: IdkitApp::from_env(),
             world_selfie_max: parse_num("WORLD_SELFIE_MAX")
                 .unwrap_or(rust_decimal::Decimal::from(10)),
             world_orb_max: parse_num("WORLD_ORB_MAX").unwrap_or(rust_decimal::Decimal::from(50)),
@@ -208,6 +211,57 @@ impl WorldClient {
             client_id: str_var("WORLD_CLIENT_ID")?,
             client_secret: str_var("WORLD_CLIENT_SECRET")?,
             redirect_uri: str_var("WORLD_REDIRECT_URI")?,
+        })
+    }
+}
+
+/// An IDKit app on developer.world.org. The key signs each proof request.
+#[derive(Clone)]
+pub struct IdkitApp {
+    pub app_id: String,
+    pub rp_id: String,
+    pub signing_key: k256::ecdsa::SigningKey,
+    /// `production` or `staging` (the simulator).
+    pub environment: String,
+    pub verify_url: String,
+}
+
+impl std::fmt::Debug for IdkitApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdkitApp")
+            .field("app_id", &self.app_id)
+            .field("rp_id", &self.rp_id)
+            .field("environment", &self.environment)
+            .field("verify_url", &self.verify_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IdkitApp {
+    fn from_env() -> Option<Self> {
+        let (app_id, rp_id, key) = (
+            str_var("NEXT_PUBLIC_WORLD_APP_ID")?,
+            str_var("WORLD_RP_ID")?,
+            str_var("WORLD_RP_SIGNING_KEY")?,
+        );
+        let signing_key = hex::decode(key.strip_prefix("0x").unwrap_or(&key))
+            .ok()
+            .and_then(|bytes| k256::ecdsa::SigningKey::from_slice(&bytes).ok())
+            .expect("WORLD_RP_SIGNING_KEY must be a 32 byte hex secp256k1 key");
+        let environment = match str_var("WORLD_ENVIRONMENT").as_deref() {
+            None | Some("production") => "production",
+            Some("staging") => "staging",
+            Some(other) => panic!("WORLD_ENVIRONMENT is {other}, it must be production or staging"),
+        };
+        Some(Self {
+            app_id,
+            rp_id,
+            signing_key,
+            environment: environment.to_string(),
+            verify_url: str_var("WORLD_VERIFY_URL")
+                .unwrap_or_else(|| "https://developer.world.org".to_string())
+                .trim_end_matches('/')
+                .to_string(),
         })
     }
 }

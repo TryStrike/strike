@@ -40,20 +40,20 @@ During the event: `TODO` list the commits after Nov 5, 21:00 IST with their rang
 
 **What.** A YOLO agent spends USDC with no tap per trade. It starts only after a live human approves in World App. One human, one YOLO agent. Bans follow the human across wallets. Normal mode, where every trade waits for a tap, needs no World.
 
-**How.** Plain OIDC against World IdP (authorization code, PKCE S256, `max_age=0` step-up), all in Rust:
+**How.** IDKit 4.0 on developer.world.org, checked and verified in Rust. World IdP OIDC stays as the fallback when no IDKit app is set. Local setup and test cases: [`docs/world.md`](docs/world.md).
 
-- `POST /api/agent/start` in YOLO mode saves a pending attempt and answers `401` with `WWW-Authenticate` and the World authorize URL.
-- The nonce is `sha256(attempt id + signed start message)`, so an approval is for those exact terms only.
-- `GET /api/world/callback` swaps the code with the client secret and verifier, checks RS256 against World's JWKS, `iss`, `aud`, `exp`, `nonce`, `auth_time` and `acr`.
+- `POST /api/agent/start` in YOLO mode saves a pending attempt and answers `401` with `WWW-Authenticate` and `world`: app id, action `strike-yolo`, signal, preset and an `rp_context` the server signs with `WORLD_RP_SIGNING_KEY`.
+- The signal is `sha256(attempt id + signed start message)`, so a proof is for those exact terms only. The action is fixed, so the nullifier is one stable id per human.
+- The widget's result goes to `POST /api/world/attempts/{id}/proof`. Rust checks the browser cookie, environment, action, signed nonce, signal hash and proof class, then forwards it to `/api/v4/verify/{rp_id}`.
 - One write checks the attempt is still pending, the same human owns the wallet, no linked wallet is banned and the human runs no other YOLO, then creates the session.
 - The required proof grows with the budget: selfie up to `WORLD_SELFIE_MAX` (10), Orb up to `WORLD_ORB_MAX` (50), Orb plus a live face above.
 - Cancel, expiry, another browser, another human, a banned human, a second YOLO or too low an assurance leave no session and no bet. `GET /api/world/attempts/{id}` drives the chip on `/agent`.
-- Human checkpoint: once a YOLO agent loses half its stop-loss it pauses with "Waiting for a human" and places nothing. `POST /api/agent/checkpoint` returns the same `401` step-up, pinned to the linked human's `sub`. Approval resumes it in one write. Cancel, another human, a ban or 2 minutes with no answer stops it.
+- Human checkpoint: once a YOLO agent loses half its stop-loss it pauses with "Waiting for a human" and places nothing. `POST /api/agent/checkpoint` returns the same `401` step-up and only the linked human's nullifier passes. Approval resumes it in one write. Cancel, another human, a ban or 2 minutes with no answer stops it.
 - After approval the agent loop never calls World. It only reads checkpoint results from the DB.
 
 **Where.** `backend/crates/core/src/world.rs`, `backend/crates/server/src/routes/world.rs`, `backend/crates/server/src/routes/agent.rs`, `frontend/lib/agent/useAgent.ts`, `frontend/components/agent/AgentPanel.tsx`. Tables `world_attempts` and `world_links` in `backend/crates/core/src/db.rs`.
 
-**Run.** Register a client at https://auth.world.org/portal with the exact HTTPS callback, then set `WORLD_ISSUER`, `WORLD_CLIENT_ID`, `WORLD_CLIENT_SECRET` and `WORLD_REDIRECT_URI` in the root `.env.local` (see `.env.example`). Without them YOLO start answers `503`. Open `/agent`, pick YOLO, sign. Unit tests: `cargo test --manifest-path backend/Cargo.toml -p strike-core --lib world::`.
+**Run.** Create an app at https://developer.world.org, then set `NEXT_PUBLIC_WORLD_APP_ID`, `WORLD_RP_ID` and `WORLD_RP_SIGNING_KEY` in the root `.env.local` (see `.env.example`). `WORLD_ENVIRONMENT=staging` takes proofs from the simulator at https://simulator.worldcoin.org. Without an IDKit app or an OIDC client YOLO start answers `503`. Open `/agent`, pick YOLO, sign. Unit tests: `cargo test --manifest-path backend/Cargo.toml -p strike-core --lib world::`.
 
 Debrief: [`docs/world-debrief.md`](docs/world-debrief.md).
 
