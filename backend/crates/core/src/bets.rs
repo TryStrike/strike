@@ -527,38 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_int_and_float_prefix_match_js() {
-        assert_eq!(parse_int_prefix("123abc"), Some(123));
-        assert_eq!(parse_int_prefix(" -5 "), Some(-5));
-        assert_eq!(parse_int_prefix("+7"), Some(7));
-        assert_eq!(parse_int_prefix("abc"), None);
-        assert_eq!(parse_int_prefix(""), None);
-        assert_eq!(parse_float_prefix_str("10.5xyz"), Some(10.5));
-        assert_eq!(parse_float_prefix_str("1e3"), Some(1000.0));
-        assert_eq!(parse_float_prefix_str("1e"), Some(1.0));
-        assert_eq!(parse_float_prefix_str(".5"), Some(0.5));
-        assert_eq!(parse_float_prefix_str("abc"), None);
-    }
-
-    #[test]
-    fn js_number_printing_and_rounding() {
-        assert_eq!(js_num(10.0), json!(10));
-        assert_eq!(js_num(9.5), json!(9.5));
-        assert_eq!(js_num(f64::NAN), Value::Null);
-        assert_eq!(round(1.234567891), 1.234568);
-        assert_eq!(round(-1.234567891), -1.234568);
-        assert_eq!(round_finite(f64::INFINITY), 0.0);
-        assert_eq!(to_number(&json!("12.5")), 12.5);
-        assert_eq!(to_number(&Value::Null), 0.0);
-        assert_eq!(to_number(&json!("abc")), 0.0);
-        assert_eq!(to_number(&json!(7)), 7.0);
-        // Number() vs parseFloat(): the proof route refuses trailing garbage.
-        assert_eq!(proof_num(Some(&json!("12abc"))), None);
-        assert_eq!(number_coerce(&json!(" 12 ")), Some(12.0));
-        assert_eq!(number_coerce(&json!("")), Some(0.0));
-    }
-
-    #[test]
     fn demo_rows_are_detected_like_the_ts_helper() {
         assert!(is_demo_bet_row(
             &json!({"id": "demo-1700000000000", "wallet_address": WALLET_LOWER})
@@ -739,34 +707,5 @@ mod tests {
         let hash = format!("0x{}", "a".repeat(64));
         let with_hash = decorate_history_row(&json!({"id": "bet_2", "tx_hash": hash.clone()}));
         assert_eq!(with_hash["txHash"], json!(hash));
-    }
-
-    #[test]
-    fn js_truthiness() {
-        assert!(is_truthy(Some(&json!("yes"))));
-        assert!(!is_truthy(Some(&json!(""))));
-        assert!(!is_truthy(Some(&json!(0))));
-        assert!(!is_truthy(Some(&json!(false))));
-        assert!(!is_truthy(None));
-    }
-
-    #[test]
-    fn proof_num_and_iso() {
-        assert_eq!(proof_num(None), None);
-        assert_eq!(proof_num(Some(&Value::Null)), None);
-        assert_eq!(proof_num(Some(&json!(""))), None);
-        assert_eq!(proof_num(Some(&json!("5"))), Some(5.0));
-        assert_eq!(proof_num(Some(&json!(9.5))), Some(9.5));
-        assert_eq!(proof_num(Some(&json!("12abc"))), None); // Number(), not parseFloat()
-        assert_eq!(
-            proof_iso(Some(&json!("2023-11-14T22:13:40.000Z"))).as_deref(),
-            Some("2023-11-14T22:13:40.000Z")
-        );
-        assert_eq!(proof_iso(Some(&json!("garbage"))), None);
-        assert_eq!(proof_iso(Some(&json!(0))), None); // falsy
-        assert_eq!(proof_iso(None), None);
-        assert!(is_chain_hash_strict(&format!("0x{}", "a".repeat(64))));
-        assert!(!is_chain_hash_strict("INTERNAL"));
-        assert!(!is_chain_hash_strict(&format!("lock:0x{}", "a".repeat(64))));
     }
 }

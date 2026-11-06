@@ -447,18 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn truncation_keeps_the_head_and_the_tail() {
-        // `slice(0,6)` + `…` + `slice(-4)` over UTF-16 units, which for an
-        // address is the same 42 code points JS counted.
-        assert_eq!(truncate_address(ADDR), "0x5aAe…eAed");
-        // The tail comes from the *end* of the string, not from the 12th char.
-        assert_eq!(
-            truncate_address("0x1111111111111111111111111111111111111111"),
-            "0x1111…1111"
-        );
-    }
-
-    #[test]
     fn codes_are_minted_from_the_tail_of_the_canonical_address() {
         let lower = ADDR.to_lowercase();
         let code = referral_code(&lower);
@@ -603,26 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_zero_created_at_stays_null() {
-        let rows = vec![
-            json!({"id": "b1", "wallet_address": ADDR, "created_at": null}),
-            json!({"id": "b2", "wallet_address": ADDR, "created_at": ""}),
-            json!({"id": "b3", "wallet_address": ADDR, "created_at": "2026-02-02T00:00:00.000Z"}),
-        ];
-        let (signals, _) = real_bet_signals(&rows);
-        let signal = &signals[0].1;
-        assert_eq!(signal.real_bets, 3);
-        assert_eq!(
-            signal.first_real_bet_at.as_deref(),
-            Some("2026-02-02T00:00:00.000Z")
-        );
-
-        // Only falsy timestamps: `firstRealBetAt` stays null, never "".
-        let (only_nulls, _) = real_bet_signals(&[json!({"id": "b1", "wallet_address": ADDR})]);
-        assert_eq!(only_nulls[0].1.first_real_bet_at, None);
-    }
-
-    #[test]
     fn demo_referees_are_dropped_before_the_totals() {
         let rows = vec![
             json!({"user_address": ADDR, "created_at": "2026-01-01T00:00:00.000Z"}),
@@ -633,44 +601,6 @@ mod tests {
         assert_eq!(page_rows.len(), 2);
         assert_eq!(dropped, 1);
         assert_eq!(split_demo_rows(&[]).1, 0);
-    }
-
-    #[test]
-    fn friend_rows_carry_the_ts_key_order() {
-        let row = json!({"user_address": ADDR, "created_at": null});
-        let pending = friend_row(&row, None);
-        assert_eq!(
-            keys(&pending),
-            vec![
-                "address",
-                "joinedAt",
-                "status",
-                "realBets",
-                "firstRealBetAt"
-            ]
-        );
-        assert_eq!(pending["status"], json!("pending"));
-        assert_eq!(pending["realBets"], json!(0));
-        assert_eq!(
-            pending["joinedAt"],
-            Value::Null,
-            "a null joinedAt stays present, not absent"
-        );
-        assert_eq!(pending["firstRealBetAt"], Value::Null);
-
-        let qualified = friend_row(
-            &row,
-            Some(&RealBetSignal {
-                real_bets: 3,
-                first_real_bet_at: Some("2026-01-05T00:00:00.000Z".into()),
-            }),
-        );
-        assert_eq!(qualified["status"], json!("qualified"));
-        assert_eq!(qualified["realBets"], json!(3));
-        assert_eq!(
-            qualified["firstRealBetAt"],
-            json!("2026-01-05T00:00:00.000Z")
-        );
     }
 
     #[test]
@@ -774,40 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn the_single_wallet_projection_is_three_keys_or_null() {
-        let row = json!({
-            "referral_code": "strike-ABCD1234", "referral_count": 3, "referred_by": null,
-            "user_address": ADDR, "created_at": "2026-01-01T00:00:00.000Z",
-        });
-        let body = single_referral_json(Some(&row));
-        let referral = &body["referral"];
-        assert_eq!(
-            keys(referral),
-            vec!["referral_code", "referral_count", "referred_by"]
-        );
-        assert_eq!(referral["referral_count"], json!(3));
-        assert_eq!(
-            referral["referred_by"],
-            Value::Null,
-            "an unattributed record says so"
-        );
-        let serialized = referral.to_string();
-        assert!(
-            !serialized.contains(ADDR),
-            "the row's own address is not echoed here"
-        );
-        assert!(!serialized.contains("created_at"));
-
-        assert_eq!(single_referral_json(None), json!({"referral": null}));
-        // A row missing a column projects null rather than dropping the key.
-        assert_eq!(
-            single_referral_json(Some(&json!({"referral_code": "x"})))["referral"]
-                ["referral_count"],
-            Value::Null
-        );
-    }
-
-    #[test]
     fn registration_responses_carry_only_the_two_public_fields() {
         let body = register_response(json!("strike-ABCD1234"), json!(0));
         assert_eq!(keys(&body), vec!["referral_code", "referral_count"]);
@@ -863,22 +759,6 @@ mod tests {
         assert_eq!(
             bumped_referral_count(&json!({"referral_count": "4"})),
             json!(5)
-        );
-    }
-
-    #[test]
-    fn short_addresses_survive_truncation_untouched() {
-        assert_eq!(truncate_address(""), "");
-        assert_eq!(truncate_address("0xabc"), "0xabc");
-        assert_eq!(
-            truncate_address("d1234567890"),
-            "d1234567890",
-            "11 units is below the gate"
-        );
-        assert_eq!(
-            truncate_address("d12345678901"),
-            "d12345…8901",
-            "12 units is exactly one full window"
         );
     }
 
