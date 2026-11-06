@@ -153,7 +153,7 @@ button:disabled,
   border-radius: 3px;
 }
 
-:where(a[href], button, input, select, textarea, summary, [role="button"],
+:where(a[href], button, select, summary, input[type="checkbox"], [role="button"],
   [role="switch"], [role="tab"], [role="checkbox"], [role="radio"],
   [tabindex]:not([tabindex="-1"])):focus-visible {
   outline: 2px solid var(--up);

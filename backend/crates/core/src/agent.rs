@@ -260,15 +260,10 @@ pub fn stop_loss_headroom(session: &Session, open: Decimal) -> Decimal {
     session.stop_loss - realized_loss - open
 }
 
-/// The smallest of mode size, budget left and stop-loss headroom, floored to
+/// The smallest of the per trade cap, budget left and stop-loss headroom, floored to
 /// USDC's 6 decimals. `Err` carries the reason the session has to stop.
 /// Headroom counts open stakes, so a loss in flight can't overshoot it.
 pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> {
-    let mode_size = if session.mode == "yolo" {
-        session.max_per_trade
-    } else {
-        Decimal::ONE
-    };
     let left = session.budget - session.spent;
     if left <= Decimal::ZERO {
         return Err(BUDGET_SPENT);
@@ -277,7 +272,8 @@ pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> 
     if headroom <= Decimal::ZERO {
         return Err(STOP_LOSS_REACHED);
     }
-    let stake = mode_size
+    let stake = session
+        .max_per_trade
         .min(left)
         .min(headroom)
         .round_dp_with_strategy(USDC_DECIMALS, RoundingStrategy::ToZero);
@@ -1064,6 +1060,28 @@ mod tests {
         assert!(needs_human(&session("yolo", -5)));
         assert!(!needs_human(&session("yolo", 3)));
         assert!(!needs_human(&session("normal", -9)));
+    }
+
+    #[test]
+    fn both_modes_stake_the_per_trade_cap() {
+        let session = |mode: &str| Session {
+            id: "s".into(),
+            wallet: "w".into(),
+            asset: "BTC".into(),
+            mode: mode.into(),
+            budget: Decimal::ONE,
+            max_per_trade: Decimal::new(2, 1),
+            stop_loss: Decimal::new(8, 1),
+            starts_at_ms: 0,
+            ends_at_ms: 1,
+            status: "running".into(),
+            stopped_reason: None,
+            spent: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+        };
+        for mode in ["normal", "yolo"] {
+            assert_eq!(stake(&session(mode), Decimal::ZERO), Ok(Decimal::new(2, 1)));
+        }
     }
 
     #[test]

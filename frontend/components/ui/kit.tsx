@@ -90,7 +90,7 @@ export function Segmented<T extends string | number>({
 export function Field({ unit, className, ...props }: InputHTMLAttributes<HTMLInputElement> & { unit?: ReactNode }) {
   return (
     <div className={cx('flex h-12 items-center rounded-full px-5 bg-white ring-1 ring-ink/[0.08] focus-within:ring-2 focus-within:ring-ink/40', className)}>
-      <input {...props} className="min-w-0 flex-1 bg-transparent font-jet text-base outline-none focus-visible:!outline-none placeholder:text-faint" />
+      <input {...props} className="min-w-0 flex-1 bg-transparent font-jet text-base outline-none placeholder:text-faint" />
       {unit && <span className="ml-2 font-jet text-xs font-medium text-faint">{unit}</span>}
     </div>
   );

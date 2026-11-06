@@ -69,7 +69,7 @@ export default function Bridge({ direction, onArrived }: { direction: BridgeDire
           value={amount}
           onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ''))}
           disabled={state.kind === 'running'}
-          className="h-10 w-24 rounded-xl bg-white px-3 font-jet text-sm ring-1 ring-line outline-none"
+          className="h-10 w-24 rounded-xl bg-white px-3 font-jet text-sm ring-1 ring-line outline-none focus:ring-ink"
         />
         <button
           type="button"

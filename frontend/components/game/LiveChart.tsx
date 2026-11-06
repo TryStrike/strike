@@ -37,8 +37,8 @@ import {
 const BET_LOCK_MS = 2_500;
 const RESULT_VISIBLE_MS = 3_000;
 const ROWS = 10;
-const LINE_VIEW_SPAN = 3;
-const LINE_MIN_RANGE = 0.001;
+const LINE_VIEW_SPAN = 1.5;
+const LINE_MIN_RANGE = 0.00015;
 const BOX_VIEW_SPAN = 1.7;
 const BOX_MIN_RANGE = 0.0003;
 const OVERLAY = "bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight";
@@ -1096,8 +1096,8 @@ export const LiveChart = React.memo(function LiveChart({
   const pixelsPerSecond = isBox
     ? Math.max(2, targetColWidthPx / (gridInterval / 1000))
     : isMobile
-      ? 20
-      : 30;
+      ? 12
+      : 15;
   const tickRange = 20 * 10 ** -currentAssetConfig.decimals;
 
   useEffect(() => {
