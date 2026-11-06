@@ -5,6 +5,10 @@
 //! quotes every tradable asset whether or not anyone is connected. Only those
 //! upstream responses are recorded: no request body or query reaches [`TickBuffer::record`].
 //!
+//! A ring keeps the first quote of each [`TICK_BUCKET_MS`] bucket, and a stored
+//! tick never changes, so a round's end price can't depend on when settlement
+//! ran. The newest quote sits beside the ring, for strikes and the price stream.
+//!
 //! Memory is bounded: one ring per asset the price tables know, each holding
 //! `ring_capacity()` ticks of 32 bytes.
 //!
@@ -62,9 +66,13 @@ pub struct Tick {
     pub source: &'static str,
 }
 
+/// The ring's resolution. A settled price is this much older than the end at worst.
+pub const TICK_BUCKET_MS: i64 = 250;
+
 #[derive(Default)]
 struct Ring {
     ticks: VecDeque<Tick>,
+    latest: Option<Tick>,
     /// Newest `at_ms` known to be on disk.
     flushed_ms: i64,
 }
@@ -82,7 +90,7 @@ impl TickBuffer {
         }
     }
 
-    /// Keeps one tick per second per asset, the newest quote of that second.
+    /// Keeps the first quote of each bucket. A quote older than the newest is dropped.
     pub fn record(&self, asset: &str, price: f64, at_ms: i64, source: &'static str) {
         let Ok(mut rings) = self.rings.lock() else {
             return;
@@ -93,25 +101,31 @@ impl TickBuffer {
         let Some(ring) = rings.get_mut(asset) else {
             return;
         };
+        if ring.latest.is_some_and(|latest| at_ms < latest.at_ms) {
+            return;
+        }
         let tick = Tick {
             at_ms,
             price,
             source,
         };
-        match ring.ticks.back_mut() {
-            Some(last) if at_ms.div_euclid(1000) == last.at_ms.div_euclid(1000) => *last = tick,
-            Some(last) if at_ms < last.at_ms => {}
-            _ => {
-                if ring.ticks.len() == self.capacity {
-                    ring.ticks.pop_front();
-                }
-                ring.ticks.push_back(tick);
-            }
+        ring.latest = Some(tick);
+        let bucket = at_ms.div_euclid(TICK_BUCKET_MS);
+        if ring
+            .ticks
+            .back()
+            .is_some_and(|last| last.at_ms.div_euclid(TICK_BUCKET_MS) == bucket)
+        {
+            return;
         }
+        if ring.ticks.len() == self.capacity {
+            ring.ticks.pop_front();
+        }
+        ring.ticks.push_back(tick);
     }
 
     pub fn latest(&self, asset: &str) -> Option<Tick> {
-        self.rings.lock().ok()?.get(asset)?.ticks.back().copied()
+        self.rings.lock().ok()?.get(asset)?.latest
     }
 
     /// The newest tick at or before `at_ms`. Rings are ordered, oldest first.
@@ -208,7 +222,8 @@ fn poisoned() -> ApiError {
 /// Enough to hold a full flush interval, so a healthy flusher drops nothing.
 fn ring_capacity() -> usize {
     let cfg = config();
-    cfg.tick_ring_secs.max(cfg.tick_flush_secs as usize + 60)
+    let seconds = cfg.tick_ring_secs.max(cfg.tick_flush_secs as usize + 60);
+    seconds * (1_000 / TICK_BUCKET_MS) as usize
 }
 
 static BUFFER: Lazy<TickBuffer> = Lazy::new(|| TickBuffer::new(ring_capacity()));
@@ -361,16 +376,29 @@ mod tests {
     }
 
     #[test]
-    fn one_tick_per_second_the_newest_quote_of_it() {
+    fn a_later_quote_never_changes_the_price_a_round_ends_on() {
+        let buffer = TickBuffer::new(60);
+        let end_ms = 12_500;
+        buffer.record("BTC", 100.0, 11_200, SOURCE);
+        buffer.record("BTC", 105.0, 12_100, SOURCE);
+        let before = buffer.at_or_before("BTC", end_ms);
+        buffer.record("BTC", 90.0, 12_800, SOURCE);
+        assert_eq!(buffer.at_or_before("BTC", end_ms), before);
+        assert_eq!(before.unwrap().price, 105.0);
+    }
+
+    #[test]
+    fn a_bucket_keeps_its_first_quote_and_latest_keeps_the_newest() {
         let buffer = TickBuffer::new(60);
         buffer.record("BTC", 1.0, 5_000, SOURCE);
-        buffer.record("BTC", 2.0, 5_250, SOURCE);
-        buffer.record("BTC", 3.0, 5_750, SOURCE);
+        buffer.record("BTC", 2.0, 5_100, SOURCE);
+        buffer.record("BTC", 3.0, 5_200, SOURCE);
         assert_eq!(buffer.len("BTC"), 1);
+        assert_eq!(buffer.at_or_before("BTC", 5_249).unwrap().price, 1.0);
         assert_eq!(
             buffer.latest("BTC"),
             Some(Tick {
-                at_ms: 5_750,
+                at_ms: 5_200,
                 price: 3.0,
                 source: SOURCE
             })
@@ -378,6 +406,7 @@ mod tests {
         // A quote that arrives late does not rewind the feed.
         buffer.record("BTC", 9.0, 3_000, SOURCE);
         assert_eq!(buffer.latest("BTC").unwrap().price, 3.0);
+        assert_eq!(buffer.len("BTC"), 1);
         assert_eq!(buffer.latest("ETH"), None);
     }
 
