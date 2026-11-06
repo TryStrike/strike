@@ -4,12 +4,10 @@ After=network-online.target strike-backend.service
 Wants=network-online.target
 
 [Service]
-# Same user as the backend: Litestream needs the file, its -wal and its -shm.
 User=strike
 Group=strike
 WorkingDirectory=/var/lib/strike
 EnvironmentFile=-/etc/strike/litestream.env
-# With no replica configured this logs a warning and exits 0.
 ExecStart=/opt/strike/bin/strike-data replicate
 Restart=on-failure
 RestartSec=5
