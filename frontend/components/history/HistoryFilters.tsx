@@ -4,7 +4,7 @@
 import React, { useCallback, useMemo } from 'react';
 import { DownloadSimple, X } from '@phosphor-icons/react';
 import type { BetHistoryFilters } from '@/lib/store/historySlice';
-import { Button, Field, Label, Segmented, cx, glassSelected } from '@/components/ui/kit';
+import { Button, Field, Label, Segmented, cx } from '@/components/ui/kit';
 import {
   activeFilterChips,
   type HistoryView,
@@ -14,7 +14,6 @@ import { dayEndIso, dayStartIso, formatDateTime, toDateInputValue } from './hist
 
 interface HistoryFiltersProps {
   view: HistoryView;
-  assets: string[];
   onPatch: (patch: HistoryViewPatch) => void;
   onClear: () => void;
   onExport: () => void;
@@ -25,7 +24,6 @@ interface HistoryFiltersProps {
 
 export const HistoryFilters: React.FC<HistoryFiltersProps> = ({
   view,
-  assets,
   onPatch,
   onClear,
   onExport,
@@ -66,28 +64,7 @@ export const HistoryFilters: React.FC<HistoryFiltersProps> = ({
       className="space-y-5 rounded-3xl bg-white/70 p-5 ring-1 ring-ink/[0.06] backdrop-blur-xl"
     >
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0">
-          <Label>Asset</Label>
-          <div className="flex flex-wrap gap-1.5">
-            <AssetChip
-              label="All"
-              selected={!filters.asset || filters.asset === 'ALL'}
-              disabled={disabled}
-              onClick={() => setFilters({ asset: null })}
-            />
-            {assets.map((asset) => (
-              <AssetChip
-                key={asset}
-                label={asset}
-                selected={filters.asset === asset}
-                disabled={disabled}
-                onClick={() => setFilters({ asset: filters.asset === asset ? null : asset })}
-              />
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2">
           <Button
             variant="secondary"
             size="sm"
@@ -190,11 +167,6 @@ export const HistoryFilters: React.FC<HistoryFiltersProps> = ({
             ]}
           />
         </div>
-        <p className="max-w-md font-jet text-[11px] leading-relaxed text-faint">
-          Play-money rows are badged and never counted in the real totals. Hiding them applies to
-          the loaded page — the server has no demo filter yet, so the matching-rounds count still
-          includes practice rounds.
-        </p>
       </div>
 
       {chips.length > 0 && (
@@ -235,26 +207,5 @@ export const HistoryFilters: React.FC<HistoryFiltersProps> = ({
   );
 };
 
-const AssetChip: React.FC<{
-  label: string;
-  selected: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-}> = ({ label, selected, disabled, onClick }) => (
-  <button
-    type="button"
-    aria-pressed={selected}
-    disabled={disabled}
-    onClick={onClick}
-    className={cx(
-      'h-8 rounded-full px-3 font-jet text-[12px] font-medium uppercase tracking-[0.08em] transition-all disabled:opacity-40',
-      selected
-        ? glassSelected
-        : 'bg-ink/[0.04] text-subtle hover:bg-ink/[0.07] hover:text-ink'
-    )}
-  >
-    {label}
-  </button>
-);
 
 export default HistoryFilters;

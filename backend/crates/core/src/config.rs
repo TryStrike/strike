@@ -75,6 +75,10 @@ pub struct Config {
     pub arc_explorer: String,
     pub arc_usdc: String,
     pub treasury_address: String,
+    /// `ARKIV_PRIVATE_KEY`. Unset leaves settled bets unsealed.
+    pub arkiv_secret_key: Option<String>,
+    /// `ARKIV_RPC_URL`, with `ARKIV_ACCESS_KEY` appended as the path when set.
+    pub arkiv_rpc: String,
     pub treasury_secret_key: Option<String>,
     pub banned_wallet_addresses: Vec<String>,
     pub withdrawal_frequency_exempt: Vec<String>,
@@ -148,6 +152,15 @@ impl Config {
             arc_usdc: str_var("NEXT_PUBLIC_ARC_USDC_ADDRESS")
                 .unwrap_or_else(|| ARC_DEFAULT_USDC.to_string()),
             treasury_address: str_var("NEXT_PUBLIC_TREASURY_ADDRESS").unwrap_or_default(),
+            arkiv_secret_key: str_var("ARKIV_PRIVATE_KEY"),
+            arkiv_rpc: {
+                let base = str_var("ARKIV_RPC_URL")
+                    .unwrap_or_else(|| crate::arkiv::DEFAULT_RPC.to_string());
+                match str_var("ARKIV_ACCESS_KEY") {
+                    Some(key) => format!("{}/{key}", base.trim_end_matches('/')),
+                    None => base,
+                }
+            },
             treasury_secret_key: str_var("ARC_TREASURY_SECRET_KEY"),
             banned_wallet_addresses: banned,
             withdrawal_frequency_exempt: exempt,

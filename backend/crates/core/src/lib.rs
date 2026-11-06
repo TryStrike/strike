@@ -7,6 +7,7 @@
 
 pub mod address;
 pub mod agent;
+pub mod arkiv;
 pub mod bets;
 pub mod config;
 pub mod copilot;

@@ -16,7 +16,6 @@ interface HistoryPagerProps {
   loading: boolean;
   onPageChange: (offset: number) => void;
   onLimitChange: (limit: number) => void;
-  note?: string | null;
 }
 
 export const HistoryPager: React.FC<HistoryPagerProps> = ({
@@ -28,7 +27,6 @@ export const HistoryPager: React.FC<HistoryPagerProps> = ({
   loading,
   onPageChange,
   onLimitChange,
-  note,
 }) => {
   const page = Math.floor(offset / limit) + 1;
   const totalPages = total !== null && total > 0 ? Math.ceil(total / limit) : null;
@@ -66,9 +64,6 @@ export const HistoryPager: React.FC<HistoryPagerProps> = ({
             ))}
           </select>
         </label>
-        {note && (
-          <span className="font-jet text-[11px] leading-relaxed text-faint">{note}</span>
-        )}
       </div>
 
       <div className="flex items-center gap-2">

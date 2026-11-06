@@ -91,6 +91,15 @@ const MIGRATIONS: &[&str] = &[
        expires_at INTEGER
      ) STRICT;
      CREATE INDEX agent_decisions_by_session ON agent_decisions(session_id, created_at);",
+    // 4: each settled round is sealed on Arkiv; a settled round with no seal row is the outbox.
+    "CREATE TABLE IF NOT EXISTS arkiv_seals ( \
+       bet_id    TEXT PRIMARY KEY REFERENCES bet_rounds(bet_id), \
+       tx        TEXT NOT NULL, \
+       sent_at   INTEGER NOT NULL, \
+       key       TEXT, \
+       block     INTEGER \
+     ) STRICT; \
+     CREATE INDEX IF NOT EXISTS arkiv_seals_by_tx ON arkiv_seals (tx);",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

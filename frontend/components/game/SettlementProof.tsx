@@ -5,6 +5,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUpRight, Copy, ShieldCheck, X } from '@phosphor-icons/react';
 import { explorerTxUrl } from '@/lib/arc/config';
 import { useStore } from '@/lib/store';
+import dynamic from 'next/dynamic';
+
+const ArkivSeal = dynamic(() => import('@/components/arkiv/ArkivSeal'), { ssr: false });
 
 export interface SettlementTick {
   timestamp: number;
@@ -841,6 +844,8 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
                   ))}
                 </ul>
               )}
+
+              {!demo ? <ArkivSeal betId={bet.betId} ledgerPayout={proof.payout} /> : null}
 
               <div className="mt-3 flex items-center justify-between gap-2 rounded-3xl bg-ink/[0.03] px-4 py-3">
                 <div className="min-w-0">

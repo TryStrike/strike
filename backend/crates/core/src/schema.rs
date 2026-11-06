@@ -148,6 +148,11 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_decisions", "result", "text"),
     ("agent_decisions", "pnl", MONEY),
     ("agent_decisions", "expires_at", TS),
+    ("arkiv_seals", "bet_id", "text"),
+    ("arkiv_seals", "tx", "text"),
+    ("arkiv_seals", "sent_at", TS),
+    ("arkiv_seals", "key", "text"),
+    ("arkiv_seals", "block", "bigint"),
 ];
 
 /// How an INTEGER cell in a result set becomes JSON.

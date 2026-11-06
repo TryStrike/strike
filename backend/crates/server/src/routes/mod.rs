@@ -8,6 +8,7 @@ pub mod admin_reads_b;
 pub mod admin_writes;
 pub mod agent;
 pub mod arc;
+pub mod arkiv;
 pub mod balance;
 pub mod balance_mutations;
 pub mod bets;
@@ -35,6 +36,7 @@ pub fn router() -> Router {
         .merge(admin_writes::routes())
         .merge(agent::routes())
         .merge(arc::routes())
+        .merge(arkiv::routes())
         .merge(balance::routes())
         .merge(balance_mutations::routes())
         .merge(bets::routes())

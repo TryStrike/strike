@@ -22,7 +22,6 @@ import {
   HistoryTable,
 } from '@/components/history';
 import {
-  buildAssetOptions,
   buildHistoryCsv,
   buildHistoryExportFilename,
   formatAmount,
@@ -58,6 +57,8 @@ import {
   type BetHistoryPage,
   type BetHistoryRow,
 } from '@/lib/store/historySlice';
+import { useArkivSeals } from '@/lib/arkiv';
+import { ArkivSummary } from '@/components/arkiv/ArkivSummary';
 
 interface LoadedPage {
   wallet: string;
@@ -192,8 +193,14 @@ function HistoryPageInner() {
   const { real: realRows, demo: demoRows } = useMemo(() => splitDemoRows(rows), [rows]);
   const displayRows = urlView.hideDemo ? realRows : rows;
 
+  const sealable = useMemo(
+    () => displayRows.filter((row) => !isDemoRow(row)).map((row) => ({ id: String(row.id), payout: row.payout })),
+    [displayRows]
+  );
+  const sealIds = useMemo(() => sealable.map((row) => row.id), [sealable]);
+  const { seals, error: sealsError } = useArkivSeals(address ?? '', sealIds);
+
   const summary = useMemo(() => summarizeRealRows(rows), [rows]);
-  const assetOptions = useMemo(() => buildAssetOptions(rows), [rows]);
 
   const [exporting, setExporting] = useState(false);
   const [exportedRows, setExportedRows] = useState<number | null>(null);
@@ -285,9 +292,7 @@ function HistoryPageInner() {
               Every round you settled
             </h1>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
-              Stake, multiplier, strike vs end price, result and payout — straight from the house
-              ledger. Read-only; nothing here moves your balance. Filters and paging live in the URL,
-              so this exact view is shareable.
+              Straight from the ledger. Nothing here moves your balance.
             </p>
           </div>
 
@@ -333,7 +338,6 @@ function HistoryPageInner() {
         <div className="space-y-5">
           <HistoryFilters
             view={draft}
-            assets={assetOptions}
             onPatch={patchView}
             onClear={clearFilters}
             onExport={handleExport}
@@ -375,7 +379,7 @@ function HistoryPageInner() {
               )
             ) : (
               <>
-                <HistoryTable rows={displayRows} loading={false} wallet={address} />
+                <HistoryTable rows={displayRows} loading={false} wallet={address} seals={seals} />
                 <div className="mt-4">
                   <HistoryPager
                     offset={urlView.offset}
@@ -386,22 +390,15 @@ function HistoryPageInner() {
                     loading={false}
                     onPageChange={(next) => patchView({ offset: next })}
                     onLimitChange={(next) => patchView({ limit: next })}
-                    note={
-                      urlView.hideDemo && demoRows.length > 0
-                        ? 'Hiding practice rounds is client-side (the route has no demo filter yet), so the server total still counts them.'
-                        : null
-                    }
                   />
+                </div>
+                <div className="mt-3">
+                  <ArkivSummary seals={seals} error={sealsError} rows={sealable} />
                 </div>
               </>
             )}
           </section>
 
-          <p className="text-center font-jet text-[11px] leading-relaxed text-faint">
-            History is served by <span className="text-muted">GET /api/bets/history</span> for{' '}
-            <span className="text-muted">{address.toLowerCase()}</span> — the ledger table is not readable
-            from the browser any other way, and every page is capped at 200 rounds.
-          </p>
         </div>
       </main>
     </div>

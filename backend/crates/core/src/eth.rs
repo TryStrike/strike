@@ -1027,7 +1027,7 @@ fn raw_tx_hash(raw: &str) -> String {
     format!("0x{}", hex::encode(keccak256(&bytes)))
 }
 
-fn address_from_signing_key(signer: &SigningKey) -> String {
+pub fn address_from_signing_key(signer: &SigningKey) -> String {
     verifying_key_to_address(signer.verifying_key())
 }
 

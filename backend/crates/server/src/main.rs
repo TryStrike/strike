@@ -43,6 +43,12 @@ async fn main() -> anyhow::Result<()> {
     );
     supervise("price sampler", strike_core::prices::run_sampler());
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    match strike_core::arkiv::init()? {
+        Some(arkiv) => supervise("arkiv sealer", strike_core::arkiv::run_sealer(arkiv)),
+        None => {
+            tracing::warn!("ARKIV_PRIVATE_KEY is unset: settled rounds are not sealed on Arkiv")
+        }
+    }
 
     let bind = config().bind_addr.clone();
     let listener = tokio::net::TcpListener::bind(&bind).await?;
