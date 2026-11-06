@@ -26,13 +26,6 @@ export interface OverlayPalette extends Colors {
   border: string;
 }
 
-export interface PendingBand {
-  startTime: number;
-  endTime: number;
-  priceTop: number;
-  priceBottom: number;
-}
-
 const RSI_PERIOD = 14;
 const RSI_PANEL_HEIGHT = 100;
 const RSI_PANEL_BOTTOM = 20;
@@ -188,17 +181,14 @@ function drawBand(
   height: number,
   fill: string,
   stroke: string,
-  dash: number[] = [],
 ) {
   ctx.fillStyle = fill;
   ctx.strokeStyle = stroke;
   ctx.lineWidth = 1;
-  ctx.setLineDash(dash);
   ctx.beginPath();
   ctx.roundRect(x, y, width, height, 6);
   ctx.fill();
   ctx.stroke();
-  ctx.setLineDash([]);
 }
 
 function drawBoxBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, intervalMs: number, palette: OverlayPalette, symbol: string, fontFamily: string) {
@@ -216,23 +206,6 @@ function drawBoxBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, in
   ctx.fillText(`${(bet.amount * bet.multiplier).toFixed(2)} ${symbol}`, x + width / 2, y + height / 2 - 6);
   ctx.font = `9px ${fontFamily}`;
   ctx.fillText(`${bet.multiplier}x`, x + width / 2, y + height / 2 + 9);
-}
-
-function drawDrawBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, price: number, palette: OverlayPalette, fontFamily: string) {
-  if (bet.startTime === undefined || bet.endTime === undefined || bet.priceTop === undefined || bet.priceBottom === undefined) return;
-  const left = Math.max(s.tipX, s.x(bet.startTime));
-  const width = s.x(bet.endTime) - left;
-  const y = s.y(bet.priceTop);
-  const height = s.y(bet.priceBottom) - y;
-  if (width <= 0 || height <= 0) return;
-
-  const inside = price <= bet.priceTop && price >= bet.priceBottom;
-  drawBand(ctx, left, y, width, height, inside ? palette.upSoft : palette.background, inside ? palette.up : palette.faint);
-  ctx.fillStyle = inside ? palette.up : palette.muted;
-  ctx.font = `10px ${fontFamily}`;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`x${Number(bet.multiplier).toFixed(2)}`, left + 6, y + 16);
 }
 
 function drawClassicBet(ctx: CanvasRenderingContext2D, s: Scales, bet: ActiveBet, price: number, palette: OverlayPalette, symbol: string, fontFamily: string) {
@@ -284,19 +257,12 @@ export function drawBets(
   ctx: CanvasRenderingContext2D,
   s: Scales,
   bets: readonly ActiveBet[],
-  view: { mode: string; asset: string; price: number; intervalMs: number; symbol: string; fontFamily: string; pending: PendingBand | null },
+  view: { mode: string; asset: string; price: number; intervalMs: number; symbol: string; fontFamily: string },
   palette: OverlayPalette,
 ) {
   for (const bet of bets) {
     if (bet.mode !== view.mode || bet.asset !== view.asset) continue;
     if (bet.mode === 'box') drawBoxBet(ctx, s, bet, view.intervalMs, palette, view.symbol, view.fontFamily);
-    else if (bet.mode === 'draw') drawDrawBet(ctx, s, bet, view.price, palette, view.fontFamily);
     else drawClassicBet(ctx, s, bet, view.price, palette, view.symbol, view.fontFamily);
-  }
-
-  if (view.pending) {
-    const x = s.x(view.pending.startTime);
-    const y = s.y(view.pending.priceTop);
-    drawBand(ctx, x, y, s.x(view.pending.endTime) - x, s.y(view.pending.priceBottom) - y, palette.upSoft, palette.up, [4, 4]);
   }
 }

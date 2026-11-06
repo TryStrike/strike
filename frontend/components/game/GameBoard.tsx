@@ -159,16 +159,6 @@ export const GameBoard: React.FC = () => {
 
 
   useEffect(() => {
-    if (gameMode === 'binomo') {
-      setTimeframeSeconds(selectedDuration);
-      return;
-    }
-
-    if (gameMode === 'draw') {
-      setTimeframeSeconds(5);
-      return;
-    }
-
     setTimeframeSeconds(selectedDuration);
   }, [selectedDuration, setTimeframeSeconds, gameMode]);
 
@@ -386,7 +376,6 @@ export const GameBoard: React.FC = () => {
             options={[
               { value: 'binomo', label: 'Classic', tour: 'classic-mode' },
               { value: 'box', label: 'Box', tour: 'box-mode' },
-              { value: 'draw', label: 'Draw', tour: 'draw-mode' },
             ]}
           />
 
@@ -431,11 +420,10 @@ export const GameBoard: React.FC = () => {
           </div>
 
           <div>
-            <Label>{gameMode === 'draw' ? 'Expiry · fixed at 5s in Draw' : 'Expiry'}</Label>
+            <Label>Expiry</Label>
             <Segmented
               value={selectedDuration}
               onChange={setSelectedDuration}
-              disabled={gameMode === 'draw'}
               options={[5, 10, 15, 30, 60].map((d) => ({
                 value: d,
                 label: d < 60 ? `${d}s` : '1m',

@@ -1,6 +1,5 @@
 import type { CellState, Point } from './types';
 
-const RANGE_SHARE = 0.8;
 const STEP_CHANGE = 2;
 const STEP_JUMP = 4;
 
@@ -17,8 +16,8 @@ function snapDown(value: number): number {
   return (normalized >= 5 ? 5 : normalized >= 2 ? 2 : 1) * magnitude;
 }
 
-export function stepFor(range: number, minRange: number, rows: number, maxStep: number): number {
-  const step = snapStep(Math.max(range, minRange) / (rows * RANGE_SHARE));
+export function stepFor(range: number, minRange: number, viewSpan: number, rows: number, maxStep: number): number {
+  const step = snapStep((Math.max(range, minRange) * viewSpan) / rows);
   return maxStep > 0 && step > maxStep ? snapDown(maxStep) : step;
 }
 

@@ -14,6 +14,7 @@ import { TapGridChart } from 'tapgrid/react';
   pxPerSecond={16}
   tipRatio={0.5}
   rows={10}
+  viewSpan={2}
   decimals={2}
   lockMs={2_000}
   minRange={25}
@@ -36,6 +37,7 @@ Without React, call `createTapGrid(canvas, options)` and feed it with `setData(p
 - Row height is fixed in pixels, so a cell never resizes under a finger.
 - In `grid` mode the price step only changes at a column boundary after about a 2x move in range, or at once after 4x. In `line` mode there are no cells to protect, so it changes at 2x straight away.
 - The view holds still while the price stays in the middle 40% of the height, then pans.
+- `viewSpan` sets the zoom: the chart shows that many times the visible price range.
 - `maxStep` caps the price step, for a backend that limits band width. 0 means no cap.
 - `lockMs` shows closing cells as locked, and they ignore taps.
 - `underlay` and `overlay` hand you the canvas context and scales for strikes, bands and indicators.

@@ -55,6 +55,8 @@ export interface TapGridOptions {
   rows: number;
   decimals: number;
   lockMs: number;
+  /** How many times the visible price range the chart height shows. Higher is calmer. */
+  viewSpan: number;
   minRange: number;
   maxStep: number;
   colors: Colors;

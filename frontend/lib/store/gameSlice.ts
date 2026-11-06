@@ -7,7 +7,7 @@ import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 import { useToastStore } from "@/lib/hooks/useToast";
 import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
 
-export type GameMode = 'binomo' | 'box' | 'draw';
+export type GameMode = 'binomo' | 'box';
 
 export interface ActiveBet {
   id: string;
@@ -200,13 +200,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
       endTime: bet.endTime ?? null,
       strikePrice: bet.strikePrice ?? null,
       target: {
-        id: bet.mode === 'binomo' ? 'classic' : bet.mode === 'draw' ? 'draw' : 'box',
-        label:
-          bet.mode === 'binomo'
-            ? `${bet.direction} ${bet.multiplier}x`
-            : bet.mode === 'draw'
-              ? `Draw ${bet.multiplier}x`
-              : `Box ${bet.multiplier}x`,
+        id: bet.mode === 'binomo' ? 'classic' : 'box',
+        label: bet.mode === 'binomo' ? `${bet.direction} ${bet.multiplier}x` : `Box ${bet.multiplier}x`,
         multiplier: bet.multiplier,
         priceChange: 0,
         direction: bet.direction,
@@ -237,7 +232,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
   return {
   gameMode: 'binomo',
-  selectedAsset: 'BNB',
+  selectedAsset: 'BTC',
   currentPrice: 0,
   lastTickAt: 0,
   priceFeed: { mode: 'poll', connected: false },
@@ -312,8 +307,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
     const { gameMode, activeBets } = get();
 
     if (
-      (gameMode === 'box' || gameMode === 'draw') &&
-      activeBets.some((bet: ActiveBet) => bet.mode === 'box' || bet.mode === 'draw')
+      gameMode === 'box' &&
+      activeBets.some((bet: ActiveBet) => bet.mode === 'box')
     ) {
       return;
     }

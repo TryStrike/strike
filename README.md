@@ -140,10 +140,6 @@ Pick UP or DOWN, a multiplier tile, and an expiry. Win if the live price at `end
 
 The live chart shows a grid of price-band tiles. Win if the price line tip is inside the selected band when it reaches the tile’s start time. Tighter bands pay higher multipliers.
 
-### Draw
-
-Draw a rectangle on the chart. Win if price stays inside that band for the full window. Smaller, farther, shorter boxes pay more.
-
 ### Blitz
 
 Pay a one-time entry fee to the fee collector during the active window. All multipliers are boosted **2×** while Blitz is live (1 min on, 2 min cooldown).

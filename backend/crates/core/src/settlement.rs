@@ -227,7 +227,7 @@ pub fn freeze_bet(
         ));
     }
     let mode = body.get("mode").and_then(Value::as_str).unwrap_or_default();
-    if !matches!(mode, "binomo" | "box" | "draw") {
+    if !matches!(mode, "binomo" | "box") {
         return Err(refuse(400, "invalid_mode", "Unknown game mode"));
     }
     let target = body.get("targetCell");

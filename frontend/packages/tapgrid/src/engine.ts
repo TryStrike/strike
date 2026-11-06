@@ -88,13 +88,13 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
   };
 
   const updateView = (now: number, dt: number) => {
-    const { seriesKey: key, intervalMs, pxPerSecond, tipRatio, minRange, maxStep, rows, reducedMotion } = options;
+    const { seriesKey: key, intervalMs, pxPerSecond, tipRatio, minRange, viewSpan, maxStep, rows, reducedMotion } = options;
     const since = now - ((width * tipRatio) / pxPerSecond) * 1000;
     const column = Math.floor(now / intervalMs);
 
     if (key !== seriesKey) {
       seriesKey = key;
-      step = stepFor(visibleRange(points, since, price), minRange, rows, maxStep);
+      step = stepFor(visibleRange(points, since, price), minRange, viewSpan, rows, maxStep);
       center = price;
       tip = price;
       lastColumn = column;
@@ -105,7 +105,7 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
 
     if (now - lastStepCheck >= STEP_CHECK_MS) {
       lastStepCheck = now;
-      targetStep = stepFor(visibleRange(points, since, price), minRange, rows, maxStep);
+      targetStep = stepFor(visibleRange(points, since, price), minRange, viewSpan, rows, maxStep);
     }
     if (targetStep > 0) {
       const change = stepChange(step, targetStep);
@@ -250,13 +250,19 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 4]);
     ctx.beginPath();
-    ctx.moveTo(0, tipY);
+    ctx.moveTo(s.tipX, tipY);
     ctx.lineTo(pillX, tipY);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
 
     ctx.fillStyle = colors.line;
+    ctx.globalAlpha = 0.18;
+    ctx.beginPath();
+    ctx.arc(s.tipX, tipY, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
     ctx.strokeStyle = colors.background;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -265,7 +271,11 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.roundRect(pillX, tipY - PILL_HEIGHT / 2, PILL_WIDTH, PILL_HEIGHT, PILL_HEIGHT / 2);
+    ctx.roundRect(pillX, tipY - PILL_HEIGHT / 2, PILL_WIDTH, PILL_HEIGHT, 6);
+    ctx.moveTo(pillX + 1, tipY - 5);
+    ctx.lineTo(pillX - 6, tipY);
+    ctx.lineTo(pillX + 1, tipY + 5);
+    ctx.closePath();
     ctx.fill();
     ctx.fillStyle = colors.tipText;
     ctx.font = `11px ${fontFamily}`;
