@@ -9,7 +9,6 @@ use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 
 const SECRET: &str = "http-test-secret";
-const PASSWORD: &str = "http-test-password";
 const WALLET: &str = "0x1111111111111111111111111111111111111111";
 
 struct Server {
@@ -49,7 +48,6 @@ async fn start_with(env: &[(&str, &str)]) -> Server {
         .env("SQLITE_PATH", dir.join("ledger.sqlite"))
         .env("BIND_ADDR", format!("127.0.0.1:{port}"))
         .env("BALANCE_INTERNAL_SECRET", SECRET)
-        .env("DASHBOARD_PASSWORD", PASSWORD)
         // The sampler starts with the server: nothing here may reach the market.
         .env("BINANCE_ENDPOINT", "http://127.0.0.1:9/ticker")
         .env("YAHOO_SPARK_ENDPOINT", "http://127.0.0.1:9/spark")
@@ -80,30 +78,6 @@ async fn start_with(env: &[(&str, &str)]) -> Server {
 }
 
 impl Server {
-    async fn admin_cookie(&self) -> String {
-        let res = self
-            .http
-            .post(format!("{}/api/admin/auth", self.url))
-            .json(&json!({ "password": PASSWORD }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let cookie = res.headers()["set-cookie"].to_str().unwrap();
-        cookie.split(';').next().unwrap().to_string()
-    }
-
-    async fn get_admin(&self, path: &str, cookie: &str) -> (StatusCode, Value) {
-        let res = self
-            .http
-            .get(format!("{}{path}", self.url))
-            .header("cookie", cookie)
-            .send()
-            .await
-            .unwrap();
-        (res.status(), res.json().await.unwrap())
-    }
-
     async fn post_bearer(&self, path: &str, body: Value) -> (StatusCode, Value) {
         let res = self
             .http
@@ -173,86 +147,6 @@ async fn every_accepted_ping_carries_the_timing_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_player_ledger_honours_its_parameters() {
-    let s = start().await;
-    let cookie = s.admin_cookie().await;
-    for n in 1..=3 {
-        let address = format!("0xa{n:039x}");
-        // A real bet's history row is only ever written by settlement.
-        rusqlite::Connection::open(s.dir.join("ledger.sqlite"))
-            .unwrap()
-            .execute(
-                "INSERT INTO bet_history (id, wallet_address, amount) VALUES (?1, ?2, ?3)",
-                rusqlite::params![format!("b{n}"), address, i64::from(n) * 10_000_000_000],
-            )
-            .unwrap();
-    }
-
-    let (status, all) = s.get_admin("/api/admin/player-ledger", &cookie).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        (&all["total"], &all["limit"], &all["offset"]),
-        (&json!(3), &json!(50), &json!(0))
-    );
-    assert_eq!(all["players"][0]["_has_explicit_fee"], false);
-
-    let (_, page) = s
-        .get_admin("/api/admin/player-ledger?limit=1&offset=1", &cookie)
-        .await;
-    assert_eq!(page["players"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        (&page["total"], &page["limit"], &page["offset"]),
-        (&json!(3), &json!(1), &json!(1))
-    );
-    assert_eq!(page["players"][0], all["players"][1]);
-
-    let (_, searched) = s
-        .get_admin("/api/admin/player-ledger?q=0000002", &cookie)
-        .await;
-    assert_eq!(searched["total"], 1);
-
-    let (status, _) = s
-        .get_admin("/api/admin/player-ledger?limit=abc", &cookie)
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lockout_follows_the_forwarded_client_not_the_header_text() {
-    let s = start().await;
-    let login = |forwarded: &'static str, password: &'static str| {
-        let request = s
-            .http
-            .post(format!("{}/api/admin/auth", s.url))
-            .header("x-forwarded-for", forwarded)
-            .json(&json!({ "password": password }))
-            .send();
-        async move { request.await.unwrap().status() }
-    };
-
-    for _ in 0..4 {
-        assert_eq!(
-            login("6.6.6.6, 203.0.113.1", "wrong").await,
-            StatusCode::UNAUTHORIZED
-        );
-    }
-    assert_eq!(
-        login("7.7.7.7, 203.0.113.1", "wrong").await,
-        StatusCode::TOO_MANY_REQUESTS,
-        "changing the spoofable left side does not reset the count"
-    );
-    assert_eq!(
-        login("203.0.113.1", PASSWORD).await,
-        StatusCode::TOO_MANY_REQUESTS
-    );
-    assert_eq!(
-        login("203.0.113.2", PASSWORD).await,
-        StatusCode::OK,
-        "another client is not locked out"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_response_carries_the_security_headers() {
     let s = start().await;
     for path in ["/api/health", "/api/no-such-route"] {
@@ -314,23 +208,4 @@ async fn cors_answers_the_configured_origin_only() {
     assert!(preflight.status().is_success());
     let vary = preflight.headers()["vary"].to_str().unwrap();
     assert!(vary.to_lowercase().contains("origin"), "{vary}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ops_health_is_admin_only_and_reports_the_writer() {
-    let s = start().await;
-    let denied = s
-        .http
-        .get(format!("{}/api/admin/ops-health", s.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-
-    let cookie = s.admin_cookie().await;
-    let (status, health) = s.get_admin("/api/admin/ops-health", &cookie).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(health["stuckWithdrawals"]["count"], 0);
-    assert_eq!(health["stuckWithdrawals"]["timeoutSeconds"], 600);
-    assert!(health["writer"]["averageBatch"].is_number());
 }

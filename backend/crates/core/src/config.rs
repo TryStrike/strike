@@ -9,6 +9,7 @@ pub const ARC_DEFAULT_CHAIN_ID: u64 = 5042002;
 pub const ARC_DEFAULT_RPC: &str = "https://rpc.testnet.arc.io";
 pub const ARC_DEFAULT_EXPLORER: &str = "https://explorer.testnet.arc.io";
 pub const ARC_DEFAULT_USDC: &str = "0x3600000000000000000000000000000000000000";
+pub const ARC_DEFAULT_EURC: &str = "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a";
 /// USDC on Arc is 6 decimals; the native gas balance is the same unit at 18.
 pub const USDC_DECIMALS: u32 = 6;
 
@@ -17,7 +18,7 @@ pub const ARC_NETWORK_NAME: &str = "Arc";
 
 /// `ARC_ASSETS` — what this deployment can credit. Adding an asset means adding
 /// its decimals and its token address too, so the list is deliberately short.
-pub const ARC_ASSETS: [&str; 1] = ["USDC"];
+pub const ARC_ASSETS: [&str; 2] = ["USDC", "EURC"];
 
 /// `assetFrom(value)`: upper-cased and matched against the supported list, so
 /// `usdc`, `USDC` and `" usdc "` all mean the same asset and anything else is
@@ -25,6 +26,17 @@ pub const ARC_ASSETS: [&str; 1] = ["USDC"];
 pub fn arc_asset(value: Option<&str>) -> Option<&'static str> {
     let raw = value.unwrap_or("").trim().to_uppercase();
     ARC_ASSETS.into_iter().find(|asset| *asset == raw)
+}
+
+/// The Arc token contract for a ledger currency, if this deployment settles it.
+/// Both are Circle tokens with 6 decimals.
+pub fn token_address(currency: &str) -> Option<String> {
+    let cfg = config();
+    match arc_asset(Some(currency))? {
+        "USDC" => Some(cfg.arc_usdc.clone()),
+        "EURC" => Some(cfg.arc_eurc.clone()),
+        _ => None,
+    }
 }
 
 fn str_var(key: &str) -> Option<String> {
@@ -69,12 +81,11 @@ pub struct Config {
     pub settle_tick_tolerance_ms: i64,
     pub balance_internal_secret: Option<String>,
     pub balance_settlement_secret: Option<String>,
-    pub dashboard_password: Option<String>,
-    pub admin_session_hours: f64,
     pub arc_chain_id: u64,
     pub arc_rpc: String,
     pub arc_explorer: String,
     pub arc_usdc: String,
+    pub arc_eurc: String,
     pub treasury_address: String,
     /// `ARKIV_PRIVATE_KEY`. Unset leaves settled bets unsealed.
     pub arkiv_secret_key: Option<String>,
@@ -154,12 +165,6 @@ impl Config {
             settle_tick_tolerance_ms: parse_num("SETTLE_TICK_TOLERANCE_MS").unwrap_or(5_000),
             balance_internal_secret: str_var("BALANCE_INTERNAL_SECRET"),
             balance_settlement_secret: str_var("BALANCE_SETTLEMENT_SECRET"),
-            dashboard_password: str_var("DASHBOARD_PASSWORD"),
-            // TS: ADMIN_SESSION_HOURS ?? 8, falling back to 8 when unparseable
-            // or non-positive.
-            admin_session_hours: parse_num("ADMIN_SESSION_HOURS")
-                .map(|h: f64| if h > 0.0 { h } else { 8.0 })
-                .unwrap_or(8.0),
             arc_chain_id: parse_num("NEXT_PUBLIC_ARC_CHAIN_ID").unwrap_or(ARC_DEFAULT_CHAIN_ID),
             arc_rpc: str_var("NEXT_PUBLIC_ARC_RPC_ENDPOINT")
                 .unwrap_or_else(|| ARC_DEFAULT_RPC.to_string()),
@@ -167,6 +172,8 @@ impl Config {
                 .unwrap_or_else(|| ARC_DEFAULT_EXPLORER.to_string()),
             arc_usdc: str_var("NEXT_PUBLIC_ARC_USDC_ADDRESS")
                 .unwrap_or_else(|| ARC_DEFAULT_USDC.to_string()),
+            arc_eurc: str_var("NEXT_PUBLIC_ARC_EURC_ADDRESS")
+                .unwrap_or_else(|| ARC_DEFAULT_EURC.to_string()),
             treasury_address: str_var("NEXT_PUBLIC_TREASURY_ADDRESS").unwrap_or_default(),
             arkiv_secret_key: str_var("ARKIV_PRIVATE_KEY"),
             arkiv_rpc: {

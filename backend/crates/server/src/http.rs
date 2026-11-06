@@ -13,7 +13,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use strike_core::config::config;
-use strike_core::crypto::{self, ADMIN_COOKIE_NAME, BALANCE_SESSION_COOKIE};
+use strike_core::crypto::{self, BALANCE_SESSION_COOKIE};
 use strike_core::error::ApiError;
 
 /// The header the browser may send with the raw internal secret, which the TS
@@ -147,19 +147,6 @@ pub fn require_wallet_session(headers: &HeaderMap, wallet: &str) -> Result<(), A
     ))
 }
 
-/// `requireAdminAuth()`.
-pub fn require_admin(headers: &HeaderMap) -> Result<(), ApiError> {
-    if config().dashboard_password.is_none() {
-        return Err(ApiError::unavailable(
-            "Admin auth not configured on server. Set DASHBOARD_PASSWORD.",
-        ));
-    }
-    if crypto::verify_admin_token(cookie(headers, ADMIN_COOKIE_NAME).as_deref()) {
-        return Ok(());
-    }
-    Err(ApiError::unauthorized("Unauthorized"))
-}
-
 pub fn bearer(headers: &HeaderMap) -> Option<String> {
     let raw = header_str(headers, "authorization")?;
     let (_, token) = raw.split_once(char::is_whitespace)?;
@@ -271,23 +258,6 @@ pub fn too_many(message: &str, retry_after_seconds: i64) -> Response {
         axum::Json(ok_false_error(message)),
     )
         .into_response()
-}
-
-/// Pulls a string field, mirroring `typeof x === 'string'` checks.
-pub fn body_str<'a>(body: &'a Value, key: &str) -> Option<&'a str> {
-    body.get(key).and_then(Value::as_str).map(str::trim)
-}
-
-/// JS truthiness — the check `if (!code)` performed before any coercion.
-pub fn json_truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(Value::Bool(true)) => true,
-        Some(Value::Number(n)) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(false),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Object(map)) => !map.is_empty(),
-    }
 }
 
 #[cfg(test)]

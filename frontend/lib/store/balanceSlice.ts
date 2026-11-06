@@ -1,5 +1,6 @@
 
 import { StateCreator } from "zustand";
+import type { Store } from "./index";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 
 export interface BalanceState {
@@ -15,11 +16,11 @@ export interface BalanceState {
     address: string,
     amount: number,
     security?: { signature?: string; signedAt?: number }
-  ) => Promise<any>;
+  ) => Promise<Record<string, unknown>>;
   clearError: () => void;
 }
 
-export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
+export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (set, get) => ({
   houseBalance: 0,
   userTier: 'free',
   isLoading: false,
@@ -27,7 +28,7 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
 
   fetchBalance: async (address: string) => {
     const currency = resolveHouseLedgerCurrency({
-      selectedCurrency: (get() as any).selectedCurrency,
+      selectedCurrency: get().selectedCurrency,
     });
 
     if (!address) return;
@@ -79,7 +80,7 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
     security?: { signature?: string; signedAt?: number }
   ) => {
     const currency = resolveHouseLedgerCurrency({
-      selectedCurrency: (get() as any).selectedCurrency,
+      selectedCurrency: get().selectedCurrency,
     });
 
     try {
@@ -94,7 +95,7 @@ export const createBalanceSlice: StateCreator<BalanceState> = (set, get) => ({
           userAddress: address,
           amount,
           currency: currency,
-          userTier: (get() as any).userTier || 'free',
+          userTier: get().userTier || 'free',
           signature: security?.signature,
           signedAt: security?.signedAt,
         }),

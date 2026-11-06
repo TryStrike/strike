@@ -1,37 +1,57 @@
-
-import { ethers } from 'ethers';
 import {
-  getArcConfig,
-  getAssetConfig,
-  type ArcAsset,
-} from './config';
+  createPublicClient,
+  createWalletClient,
+  custom,
+  defineChain,
+  erc20Abi,
+  formatUnits,
+  http,
+  type Chain,
+  type EIP1193Provider,
+  type PublicClient,
+} from 'viem';
+import { getArcConfig, getAssetConfig, type ArcAsset } from './config';
 
-const ERC20_ABI = [
-  'function balanceOf(address owner) view returns (uint256)',
-];
+let chain: Chain | null = null;
+let client: PublicClient | null = null;
 
-let provider: ethers.JsonRpcProvider | null = null;
-
-function getArcProvider(): ethers.JsonRpcProvider {
-  if (!provider) {
+function arcChain(): Chain {
+  if (!chain) {
     const config = getArcConfig();
-    provider = new ethers.JsonRpcProvider(config.rpcEndpoint, {
-      chainId: config.chainId,
+    chain = defineChain({
+      id: config.chainId,
       name: config.name,
+      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
+      rpcUrls: { default: { http: [config.rpcEndpoint] } },
     });
   }
-  return provider;
+  return chain;
+}
+
+export function arcPublicClient(): PublicClient {
+  client ??= createPublicClient({ chain: arcChain(), transport: http(getArcConfig().rpcEndpoint) });
+  return client;
+}
+
+export function arcWalletClient(provider: EIP1193Provider, account: `0x${string}`) {
+  return createWalletClient({ account, chain: arcChain(), transport: custom(provider) });
+}
+
+export async function readAssetBalance(address: string, asset: ArcAsset): Promise<number> {
+  const cfg = getAssetConfig(asset);
+  const raw = await arcPublicClient().readContract({
+    address: cfg.address,
+    abi: erc20Abi,
+    functionName: 'balanceOf',
+    args: [address as `0x${string}`],
+  });
+  return Number(formatUnits(raw, cfg.decimals));
 }
 
 export async function getAssetBalance(address: string, asset: ArcAsset): Promise<number> {
   if (!address) return 0;
-  const cfg = getAssetConfig(asset);
-  const rpc = getArcProvider();
-
   try {
-    const token = new ethers.Contract(cfg.address, ERC20_ABI, rpc);
-    const balance = await token.balanceOf(address);
-    return parseFloat(ethers.formatUnits(balance, cfg.decimals));
+    return await readAssetBalance(address, asset);
   } catch (error) {
     console.error(`Failed to get ${asset} balance:`, error);
     return 0;

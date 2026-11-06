@@ -25,7 +25,6 @@ export interface ArkivSeals {
 
 export const entityUrl = (key: string) => `${ARKIV_EXPLORER}/entity/${key}`;
 
-/** Arkiv stores payouts at 18 decimals, the ledger at 10. */
 export function matchesLedger(entity: ArkivEntity, ledgerPayout: number | string | null | undefined): boolean {
   const a = Number(entity.payout);
   const b = Number(ledgerPayout);
@@ -44,7 +43,6 @@ function flatten(raw: RawEntity): ArkivEntity {
   return row as unknown as ArkivEntity;
 }
 
-/** Straight to Arkiv's public RPC, so our server cannot change what comes back. */
 async function arkiv<T>(method: string, params: unknown[], signal?: AbortSignal): Promise<T> {
   const res = await fetch(ARKIV_RPC, {
     method: 'POST',
@@ -58,7 +56,6 @@ async function arkiv<T>(method: string, params: unknown[], signal?: AbortSignal)
   return body.result as T;
 }
 
-/** Only entities our operator created count: anyone can write our schema tag. */
 export async function readSealedEntity(key: string, signal?: AbortSignal): Promise<ArkivEntity | null> {
   if (!OPERATOR) throw new Error('NEXT_PUBLIC_ARKIV_OPERATOR is not set');
   const raw = await arkiv<RawEntity | null>('arkiv_getEntity', [key], signal);
@@ -73,7 +70,6 @@ function historyQuery(wallet: string, betIds: string[]): string {
   return `arkiv.schema = str('${SCHEMA}') AND $creator = addr(${OPERATOR}) AND wallet = addr(${wallet.toLowerCase()}) AND (${ids})`;
 }
 
-/** One Arkiv read, from the browser, for exactly the bets on screen. */
 export function useArkivSeals(wallet: string, betIds: string[]): { seals: ArkivSeals | null; error: string | null } {
   const [seals, setSeals] = useState<ArkivSeals | null>(null);
   const [error, setError] = useState<string | null>(null);

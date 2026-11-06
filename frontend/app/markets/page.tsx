@@ -56,7 +56,6 @@ const compact = (n: number | null) =>
   n == null ? '–' : Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 const quoted = (a: Asset) => a.venues.filter((v) => v.price != null);
 const bestVenue = (a: Asset) => a.venues.find((v) => v.issuer === a.best) ?? null;
-/** Percent saved buying at the cheapest wrapper instead of the dearest. */
 function spread(a: Asset) {
   const prices = quoted(a).map((v) => v.price as number);
   return prices.length > 1 ? (Math.max(...prices) / Math.min(...prices) - 1) * 100 : 0;

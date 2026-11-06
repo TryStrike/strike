@@ -58,7 +58,6 @@ export function panCenter(center: number, price: number, span: number, deadZone:
   return center;
 }
 
-/** Fritsch-Carlson monotone cubic through points, so the line never overshoots a price. */
 export function traceMonotone(
   ctx: CanvasRenderingContext2D,
   xs: ArrayLike<number>,

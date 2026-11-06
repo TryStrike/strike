@@ -879,13 +879,13 @@ pub fn deposit_currency(body: &Value, amount: f64) -> Result<String, Rejection> 
         Some(v) => js_to_string(v),
     };
     let normalized = raw.to_uppercase();
-    if normalized != "USDC" {
-        return Err((
+    match crate::config::arc_asset(Some(&normalized)) {
+        Some(asset) => Ok(asset.to_string()),
+        None => Err((
             400,
             error_body(&format!("Unsupported deposit currency: {normalized}")),
-        ));
+        )),
     }
-    Ok(normalized)
 }
 
 /// `verification.retryable` branch: 502 with progress keys *only* when the
@@ -1041,10 +1041,10 @@ pub fn win_after_ban(req: &WinRequest<'_>) -> Result<String, Rejection> {
         v if bets::is_truthy(Some(v)) => return Err(route_crash()),
         _ => "USDC".to_string(),
     };
-    if currency != "USDC" {
-        return Err((400, error_body("Unsupported currency")));
+    match crate::config::arc_asset(Some(&currency)) {
+        Some(asset) => Ok(asset.to_string()),
+        None => Err((400, error_body("Unsupported currency"))),
     }
-    Ok(currency)
 }
 
 /// The settlement-token binding: bet, wallet and currency. Caller verifies the

@@ -11,7 +11,6 @@ interface StoredCredential {
   publicKey: `0x${string}`;
 }
 
-/** The smart account lives at one address on every chain; only these two are wired. */
 const CHAINS = { 5042002: 'arcTestnet', 84532: 'baseSepolia' } as const;
 type ChainId = keyof typeof CHAINS;
 
@@ -36,7 +35,6 @@ function stored(): StoredCredential | null {
   }
 }
 
-/** Circle smart account on `id`, gas sponsored by Circle's paymaster. */
 async function build(owner: StoredCredential, id: ChainId): Promise<Provider> {
   const [{ toCircleSmartAccount, toModularTransport, EIP1193Provider, getUserOperationGasPrice }, { createPublicClient }, aa, chains] =
     await Promise.all([
@@ -56,7 +54,6 @@ async function build(owner: StoredCredential, id: ChainId): Promise<Provider> {
     transport,
     paymaster: true,
     userOperation: {
-      // Arc's bundler wants at least 1 gwei priority fee; viem's own estimate there is 0.
       estimateFeesPerGas: async () => {
         const { medium } = await getUserOperationGasPrice(client);
         return { maxFeePerGas: BigInt(medium.maxFeePerGas), maxPriorityFeePerGas: BigInt(medium.maxPriorityFeePerGas) };
@@ -73,7 +70,6 @@ function current(): Promise<Provider> {
   return providers.get(chainId)!;
 }
 
-/** Runs the Touch ID or Face ID prompt, then keeps the public credential so reloads reconnect silently. */
 export async function passkeySignIn(mode: 'register' | 'login'): Promise<void> {
   const { toPasskeyTransport, toWebAuthnCredential, WebAuthnMode } = await import('@circle-fin/modular-wallets-core');
   const { key, url } = circleEnv();

@@ -1,6 +1,5 @@
 let inflight: Promise<void> | null = null;
 
-/** Signs the connected wallet in once. A cookie already bound to it is reused, so reloads never prompt. */
 export function ensureBalanceSession(): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
   inflight ??= mint().finally(() => {

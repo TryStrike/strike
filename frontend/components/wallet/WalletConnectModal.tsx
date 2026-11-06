@@ -168,15 +168,10 @@ export const WalletConnectModal: React.FC = () => {
     const toast = useToast();
     const [busy, setBusy] = useState<string | null>(null);
 
-    // The extension's own EIP-6963 announcement wins: it has the right icon and
-    // the right provider when several wallets are installed.
     const metaMask = connectors.find((c) => c.id === 'io.metamask') ?? connectors.find((c) => c.id === 'metaMask');
     const coinbase =
         connectors.find((c) => c.id === 'com.coinbase.wallet') ?? connectors.find((c) => c.id === 'coinbaseWalletSDK');
 
-    // Wallet SDKs do not always settle when their popup is closed, so nothing
-    // here waits on them: any click supersedes a hanging attempt, and a late
-    // result from a superseded attempt is dropped.
     const attempt = useRef(0);
     const run = async (key: string, failure: string, connect: () => Promise<unknown>) => {
         const id = ++attempt.current;
@@ -217,9 +212,6 @@ export const WalletConnectModal: React.FC = () => {
             await connectAsync({ connector, chainId: arcTargetChainId() });
         });
 
-    // ConnectKit runs its own picker and never reports a close, so this flow
-    // must not enter `connecting`: a dismissed picker would leave every option
-    // disabled. Success still lands through wagmi's account sync.
     const handleArcConnect = () => {
         attempt.current++;
         setBusy(null);

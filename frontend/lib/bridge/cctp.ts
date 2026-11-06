@@ -2,26 +2,29 @@ import { BridgeKit } from '@circle-fin/bridge-kit';
 import { createViemAdapterFromProvider } from '@circle-fin/adapter-viem-v2';
 import type { EIP1193Provider } from 'viem';
 
+export type BridgeDirection = 'in' | 'out';
+
 export interface BridgeOutcome {
   burnTx: string | null;
   mintTx: string | null;
 }
 
-/** Burns USDC on Base Sepolia and has Circle's Forwarder mint it to `recipient` on Arc, so no Arc gas is needed. */
-export async function bridgeUsdcToArc(
+export async function bridgeUsdc(
   provider: EIP1193Provider,
   recipient: string,
   amount: string,
+  direction: BridgeDirection,
   onStep: (name: string) => void,
 ): Promise<BridgeOutcome> {
+  const [from, to] = direction === 'in' ? (['Base_Sepolia', 'Arc_Testnet'] as const) : (['Arc_Testnet', 'Base_Sepolia'] as const);
   const kit = new BridgeKit();
   kit.on('*', (event: { method?: string }) => {
     if (event?.method) onStep(event.method);
   });
   const adapter = await createViemAdapterFromProvider({ provider });
   const result = await kit.bridge({
-    from: { adapter, chain: 'Base_Sepolia' },
-    to: { recipientAddress: recipient, chain: 'Arc_Testnet', useForwarder: true },
+    from: { adapter, chain: from },
+    to: { recipientAddress: recipient, chain: to, useForwarder: true },
     amount,
   });
   if (result.state !== 'success') {

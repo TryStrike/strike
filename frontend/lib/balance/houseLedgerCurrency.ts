@@ -1,5 +1,5 @@
 
-const PLAYABLE = ['USDC'] as const;
+const PLAYABLE = ['USDC', 'EURC'] as const;
 type Playable = (typeof PLAYABLE)[number];
 
 export function resolveHouseLedgerCurrency(params: {

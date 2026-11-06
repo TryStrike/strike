@@ -72,9 +72,9 @@ pub fn request(messages: &[Value], context: Context) -> Value {
 pub const PAGES: [&str; 6] = [
     "/",
     "/trade",
+    "/markets",
     "/history",
     "/agent",
-    "/referrals",
     "/withdrawals",
 ];
 const TICKET_SECONDS: [i64; 5] = [5, 10, 15, 30, 60];

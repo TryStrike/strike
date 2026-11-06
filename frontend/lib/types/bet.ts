@@ -11,4 +11,7 @@ export interface BetRecord {
   actualChange: number;
   won: boolean;
   payout: string;
+  asset?: string;
+  endTime?: number | null;
+  strikePrice?: number | null;
 }

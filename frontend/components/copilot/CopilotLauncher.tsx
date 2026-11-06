@@ -10,7 +10,6 @@ const CopilotDrawer = dynamic(() => import('./CopilotDrawer'), { ssr: false });
 const TableOverlay = dynamic(() => import('./TableOverlay'), { ssr: false });
 const ChartOverlay = dynamic(() => import('./ChartOverlay'), { ssr: false });
 
-/** The only part of the copilot on first paint. The drawer loads on first tap. */
 export function CopilotLauncher() {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);

@@ -1,5 +1,6 @@
 
 import { StateCreator } from "zustand";
+import type { Store } from "./index";
 import { BetRecord } from "@/lib/types/bet";
 
 export interface BetHistoryRow {
@@ -165,7 +166,7 @@ export async function fetchAllFilteredBetHistory(
   return collected.slice(0, HISTORY_EXPORT_CAP);
 }
 
-export const createHistorySlice: StateCreator<HistoryState> = (set, get) => ({
+export const createHistorySlice: StateCreator<Store, [], [], HistoryState> = (set, get) => ({
   bets: [],
   isLoading: false,
   error: null,

@@ -552,19 +552,17 @@ pub struct DepositOk {
     pub transaction_hash: String,
 }
 
-/// Verifies a USDC transfer actually reached the house treasury.
+/// Verifies a `token` transfer (USDC or EURC) actually reached the house treasury.
 pub async fn verify_deposit(
     tx_hash: &str,
     user_address: &str,
     amount: &str,
     decimals: u32,
+    token: &str,
 ) -> Result<DepositOk, (DepositFailure, String)> {
     let cfg = config();
     let recipient = cfg.treasury_address.trim().to_string();
-    if cfg.arc_rpc.trim().is_empty()
-        || !is_address_shape(&recipient)
-        || !is_address_shape(&cfg.arc_usdc)
-    {
+    if cfg.arc_rpc.trim().is_empty() || !is_address_shape(&recipient) || !is_address_shape(token) {
         return Err((
             DepositFailure::ConfigMissing,
             DepositFailure::ConfigMissing.message(),
@@ -633,7 +631,7 @@ pub async fn verify_deposit(
         ));
     }
 
-    let token = to_checksum(&cfg.arc_usdc);
+    let token = to_checksum(token);
     let topic = hex::encode(transfer_topic());
     let mut incoming: Vec<(String, u128)> = Vec::new();
     if let Some(logs) = receipt.get("logs").and_then(Value::as_array) {
@@ -804,7 +802,8 @@ pub struct Treasury {
     signer: SigningKey,
     address: String,
     contract: String,
-    usdc: String,
+    /// The token `pay` sends: USDC unless [`Treasury::for_token`] swapped it.
+    token: String,
     queue: Arc<tokio::sync::Mutex<SendQueue>>,
 }
 
@@ -840,16 +839,22 @@ impl Treasury {
     }
 
     /// A treasury with its own send queue.
-    pub fn new(rpc: Rpc, signer: SigningKey, contract: String, usdc: String) -> Self {
+    pub fn new(rpc: Rpc, signer: SigningKey, contract: String, token: String) -> Self {
         let address = address_from_signing_key(&signer);
         Self {
             rpc,
             signer,
             address,
             contract,
-            usdc,
+            token,
             queue: Default::default(),
         }
+    }
+
+    /// Pays `token` instead (EURC). Same key, contract and send queue.
+    pub fn for_token(mut self, token: String) -> Self {
+        self.token = token;
+        self
     }
 
     pub fn signer_address(&self) -> &str {
@@ -876,7 +881,7 @@ impl Treasury {
         Ok(())
     }
 
-    /// `balanceOf(treasury)` on the USDC token, in base units.
+    /// `balanceOf(treasury)` on the token this handle pays, in base units.
     pub async fn treasury_token_balance(&self) -> ApiResult<u128> {
         let addr_hex = self
             .contract
@@ -887,7 +892,7 @@ impl Treasury {
         data.extend_from_slice(&[0u8; 12]);
         data.extend_from_slice(&hex::decode(addr_hex).unwrap_or_default());
         self.rpc
-            .call_uint256(&self.usdc, &format!("0x{}", hex::encode(data)))
+            .call_uint256(&self.token, &format!("0x{}", hex::encode(data)))
             .await
     }
 
@@ -998,7 +1003,7 @@ impl Treasury {
         }
         // One transaction however many recipients, on one nonce.
         let (nonce, raw) = self
-            .sign_call(queue, &payout_call_data(&self.usdc, transfers))
+            .sign_call(queue, &payout_call_data(&self.token, transfers))
             .await?;
         let amount = transfers.iter().map(|t| t.amount).sum();
         Ok((nonce, vec![(raw, amount)]))

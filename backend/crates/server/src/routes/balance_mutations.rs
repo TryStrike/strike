@@ -489,11 +489,13 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
     {
         return Err((400, ledger::error_body("Invalid transaction hash")));
     }
+    let token = strike_core::config::token_address(&currency).unwrap_or_default();
     let verification = match eth::verify_deposit(
         &tx_hash,
         user_address,
         &ledger::deposit_required_amount_string(head.amount),
         ledger::USDC_DECIMALS,
+        &token,
     )
     .await
     {
@@ -751,13 +753,33 @@ async fn withdraw(headers: HeaderMap, raw: Bytes) -> Response {
         Ok(body) => body,
         Err(response) => return response,
     };
-    match withdraw_run(&body).await {
-        Ok(body) => Json(body).into_response(),
-        Err(rejection) => reject(rejection),
+    let (id, mut queued) = match withdraw_run(&body).await {
+        Ok(Withdrawal::Replay(body)) => return Json(body).into_response(),
+        Ok(Withdrawal::Queued { id, body }) => (id, body),
+        Err(rejection) => return reject(rejection),
+    };
+    // Auto-pay policy: the request is inside the caps, so it pays now.
+    let paid = super::payout::pay(id).await;
+    if !paid.status().is_success() {
+        super::payout::cancel_if_pending(id).await;
+        return paid;
     }
+    let receipt: Value = match axum::body::to_bytes(paid.into_body(), 64 * 1024).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    queued["status"] = Value::from("paid");
+    queued["newBalance"] = receipt.get("newBalance").cloned().unwrap_or(Value::Null);
+    queued["txHash"] = receipt.get("txHash").cloned().unwrap_or(Value::Null);
+    Json(queued).into_response()
 }
 
-async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
+enum Withdrawal {
+    Replay(Value),
+    Queued { id: i64, body: Value },
+}
+
+async fn withdraw_run(body: &Value) -> Result<Withdrawal, ledger::Rejection> {
     let head = ledger::withdraw_head(body)?;
     let user_address_value = head.user_address;
     let user_address = user_address_value.as_str().unwrap_or_default();
@@ -865,24 +887,28 @@ async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
                     .map(ledger::js_to_string)
                     .unwrap_or_default()
             );
-            Ok(ledger::withdraw_replay_body(&existing, &balance))
+            Ok(Withdrawal::Replay(ledger::withdraw_replay_body(
+                &existing, &balance,
+            )))
         }
-        // The ledger has only queued the payout — the money moves when an admin
-        // accept route re-verifies the intent and pays. Never report more than that.
+        // Only queued here; `withdraw` pays it and reports `paid` once the hash is recorded.
         withdrawals::Queued::Created {
             id,
             fee_amount,
             net_amount,
             frequency_review,
             withdrawal_count,
-        } => Ok(ledger::withdraw_success_body(
-            id,
-            &balance,
-            fee_amount,
-            net_amount,
-            &iso_ms(now_ms()),
-            frequency_review,
-            withdrawal_count,
-        )),
+        } => Ok(Withdrawal::Queued {
+            id: id.as_i64().ok_or_else(ledger::route_crash)?,
+            body: ledger::withdraw_success_body(
+                id,
+                &balance,
+                fee_amount,
+                net_amount,
+                &iso_ms(now_ms()),
+                frequency_review,
+                withdrawal_count,
+            ),
+        }),
     }
 }

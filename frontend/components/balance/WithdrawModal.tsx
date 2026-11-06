@@ -1,14 +1,18 @@
 'use client';
 
 import React, { useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { Modal } from '@/components/ui/Modal';
 import { Button, Segmented } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
+import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount } from 'wagmi';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 import { ARC_ASSETS, type ArcAsset } from '@/lib/arc/config';
 import { calculateFeeAmount, getFeePercentLabel } from '@/lib/fees/platformFee';
+
+const Bridge = dynamic(() => import('./Bridge'), { ssr: false });
 
 export interface WithdrawRequestDetails {
   status?: string;
@@ -50,7 +54,8 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
   const { data: walletClient } = useWalletClient();
   const { connector } = useAccount();
 
-  const asset: ArcAsset = 'USDC';
+  const selectedCurrency = useStore((state) => state.selectedCurrency);
+  const asset: ArcAsset = resolveHouseLedgerCurrency({ selectedCurrency });
 
   const feeLabel = getFeePercentLabel(userTier);
 
@@ -101,10 +106,9 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
     }
 
     if (connector) {
-      const provider = (await connector.getProvider()) as any;
-      const { ethers } = await import('ethers');
-      const signer = await new ethers.BrowserProvider(provider).getSigner();
-      return signer.signMessage(message);
+      const { arcWalletClient } = await import('@/lib/arc/client');
+      const provider = (await connector.getProvider()) as import('viem').EIP1193Provider;
+      return arcWalletClient(provider, address as `0x${string}`).signMessage({ message });
     }
 
     throw new Error(
@@ -148,7 +152,6 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
         details.txHash && /^0x[0-9a-fA-F]{64}$/.test(String(details.txHash))
           ? String(details.txHash)
           : 'PENDING';
-      const frequencyReview = details.frequencyReview;
       const rawRequestId = details.requestId;
       const requestId =
         typeof rawRequestId === 'number' && Number.isFinite(rawRequestId) ? rawRequestId : undefined;
@@ -159,11 +162,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
           `Withdrawal of ${withdrawAmount.toFixed(4)} ${asset} paid out on Arc. Balance updated.`
         );
       } else {
-        toast.success(
-          frequencyReview
-            ? 'Your withdrawal request has been submitted for manual review due to high withdrawal frequency. An admin will process it shortly.'
-            : 'Withdrawal request submitted. Awaiting manual approval. Track it under Withdrawals.'
-        );
+        toast.success('Withdrawal recorded. Its payout status is under Withdrawals.');
       }
       onSuccess?.(withdrawAmount, paid ? txHash : 'PENDING', requestId, {
         status,
@@ -174,8 +173,8 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       });
       setAmount('');
       onClose();
-    } catch (err: any) {
-      const errorMessage = err?.message || 'Failed to withdraw funds';
+    } catch (err: unknown) {
+      const errorMessage = (err instanceof Error && err.message) || 'Failed to withdraw funds';
       console.error('Withdrawal error:', err);
       setError(errorMessage);
       toast.error(errorMessage);
@@ -198,7 +197,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       showCloseButton={!isLoading}
     >
       <p className="-mt-4 mb-6 text-[15px] text-muted">
-        Withdrawals are reviewed before payout to your wallet.
+        Paid automatically to your wallet on Arc. Up to 50 {asset} per request and 200 per day.
       </p>
 
       {ARC_ASSETS.length > 1 && (
@@ -270,6 +269,12 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       >
         {isLoading ? 'Withdrawing…' : `Withdraw ${asset}`}
       </Button>
+
+      {asset === 'USDC' && (
+        <div className="mt-6">
+          <Bridge direction="out" onArrived={() => void useStore.getState().refreshWalletBalance()} />
+        </div>
+      )}
     </Modal>
   );
 };

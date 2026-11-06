@@ -424,7 +424,9 @@ export function DitherField({
   const [fallback, setFallback] = useState(false)
   const [contextKey, setContextKey] = useState(0)
   const live = useRef({ color, intensity, speed, fps, interactive })
-  live.current = { color, intensity, speed, fps, interactive }
+  useEffect(() => {
+    live.current = { color, intensity, speed, fps, interactive }
+  })
   const repaint = useRef(() => {})
   const time = useRef(10)
   const shown = useRef(false)
@@ -467,6 +469,7 @@ export function DitherField({
       : null
     if (!gl || !renderer) {
       gl?.getExtension("WEBGL_lose_context")?.loseContext()
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the fallback follows WebGL context creation, an external system
       setFallback(true)
       return
     }

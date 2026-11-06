@@ -10,7 +10,6 @@ import { ConnectKitProvider } from 'connectkit';
 import { config as wagmiConfig, arc } from '@/lib/arc/wagmi';
 
 import { WalletConnectModal } from '@/components/wallet/WalletConnectModal';
-import { ReferralSync } from './ReferralSync';
 import { useSessionTracker } from '@/lib/hooks/useSessionTracker';
 import { useThemeSync } from '@/lib/useTheme';
 import { usePriceStream } from '@/lib/hooks/usePriceStream';
@@ -101,7 +100,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <QueryClientProvider client={queryClient}>
         <ConnectKitProvider mode="light" customTheme={{ "--ck-font-family": "var(--font-inter-tight), system-ui, sans-serif", "--ck-accent-color": "#2151F5", "--ck-border-radius": "20px" }}>
           <WalletSync />
-          <ReferralSync />
           {children}
           <WalletConnectModal />
           <ToastProvider />

@@ -36,9 +36,6 @@ export function usePriceStream(
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    setMode('poll');
-    setConnected(false);
-
     if (typeof window === 'undefined') return;
 
     let disposed = false;
@@ -142,6 +139,8 @@ export function usePriceStream(
       reconnectTimer = clearTimer(reconnectTimer);
       closeEventSource();
       stopPollFallback();
+      setMode('poll');
+      setConnected(false);
     };
   }, [streamPath, firstTickTimeoutMs, maxReconnectBackoffMs]);
 

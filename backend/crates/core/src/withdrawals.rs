@@ -31,7 +31,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
 
-use crate::config::config;
+use crate::config::{config, USDC_DECIMALS};
 use crate::db::{db, now_us, query_rows, typed_param, Db};
 use crate::error::ApiResult;
 use crate::ledger::{self, Rejection};
@@ -117,6 +117,49 @@ fn existing_intent(conn: &Connection, request: &QueueRequest) -> ApiResult<Optio
     Ok(rows.into_iter().next())
 }
 
+/// Auto-pay policy: withdrawals pay with no human review, so these caps are the
+/// only brake. Over either one the request is refused up front, never queued.
+pub const MAX_PER_REQUEST_USDC: i128 = 50;
+pub const MAX_PER_DAY_USDC: i128 = 200;
+const DAY_US: i64 = 86_400_000_000;
+
+/// The two auto-pay caps against `amount` and what this wallet already moved,
+/// or is moving, in the last 24 hours (anything not rejected).
+fn auto_pay_caps(amount: &Value, today: &[Value]) -> Result<(), Rejection> {
+    let unit = 10i128.pow(USDC_DECIMALS);
+    let null = Value::Null;
+    let (Some(amount), Some(spent)) = (
+        ledger::amount_to_base_units(amount, USDC_DECIMALS),
+        ledger::sum_amounts_to_base_units(
+            today.iter().map(|r| r.get("amount").unwrap_or(&null)),
+            USDC_DECIMALS,
+        ),
+    ) else {
+        return Err((
+            503,
+            ledger::error_body("Service temporarily unavailable. Please try again."),
+        ));
+    };
+    if amount > MAX_PER_REQUEST_USDC * unit {
+        return Err((
+            400,
+            ledger::error_body(&format!(
+                "Withdrawals are capped at {MAX_PER_REQUEST_USDC} USDC per request."
+            )),
+        ));
+    }
+    if spent + amount > MAX_PER_DAY_USDC * unit {
+        let left = (MAX_PER_DAY_USDC * unit - spent).max(0) as f64 / unit as f64;
+        return Err((
+            429,
+            ledger::error_body(&format!(
+                "Withdrawals are capped at {MAX_PER_DAY_USDC} USDC per day. You can withdraw {left} more in the next 24 hours."
+            )),
+        ));
+    }
+    Ok(())
+}
+
 fn queue_in_transaction(
     conn: &Connection,
     request: &QueueRequest,
@@ -157,6 +200,26 @@ fn queue_in_transaction(
         &pending,
         &request.currency,
     ) {
+        return Ok(Err(rejection));
+    }
+
+    let today = query_rows(
+        conn,
+        &format!(
+            "SELECT amount FROM withdrawal_requests \
+             WHERE currency = ?1 AND status != 'rejected' AND requested_at > ?2 AND user_address IN ({})",
+            placeholders(3, n)
+        ),
+        {
+            let mut params = vec![
+                Param::Text(request.currency.clone()),
+                Param::Integer(now_us() - DAY_US),
+            ];
+            params.extend(request.variants.iter().map(|v| Param::Text(v.clone())));
+            params
+        },
+    )?;
+    if let Err(rejection) = auto_pay_caps(&request.amount, &today) {
         return Ok(Err(rejection));
     }
 
@@ -387,5 +450,41 @@ pub async fn watch_stuck() {
             ),
             Err(err) => tracing::error!("[withdrawal] stuck-row check failed: {err}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_pay_caps_per_request_and_per_day() {
+        let spent = |amounts: &[&str]| -> Vec<Value> {
+            amounts.iter().map(|a| json!({ "amount": a })).collect()
+        };
+        assert!(
+            auto_pay_caps(&json!(50), &[]).is_ok(),
+            "the cap itself is allowed"
+        );
+        assert_eq!(auto_pay_caps(&json!(50.000001), &[]).unwrap_err().0, 400);
+        assert!(
+            auto_pay_caps(&json!(40), &spent(&["50", "50", "60"])).is_ok(),
+            "200 exactly"
+        );
+        let over = auto_pay_caps(&json!(1), &spent(&["50", "50", "50", "50"])).unwrap_err();
+        assert_eq!(over.0, 429);
+        assert!(
+            over.1["error"]
+                .as_str()
+                .unwrap()
+                .contains("withdraw 0 more"),
+            "{}",
+            over.1
+        );
+        assert_eq!(
+            auto_pay_caps(&json!("abc"), &[]).unwrap_err().0,
+            503,
+            "unparseable fails closed"
+        );
     }
 }

@@ -195,15 +195,6 @@ BEGIN
   SELECT RAISE(ABORT, 'a round is permanent');
 END;
 
-CREATE TABLE IF NOT EXISTS user_referrals (
-  user_address   TEXT PRIMARY KEY,
-  referral_code  TEXT UNIQUE NOT NULL,
-  referred_by    TEXT,
-  referral_count INTEGER NOT NULL DEFAULT 0,
-  created_at     INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
-) STRICT;
-CREATE INDEX IF NOT EXISTS idx_ur_referral_count ON user_referrals(referral_count DESC);
-
 CREATE TABLE IF NOT EXISTS banned_wallets (
   wallet_address TEXT PRIMARY KEY,
   reason         TEXT,

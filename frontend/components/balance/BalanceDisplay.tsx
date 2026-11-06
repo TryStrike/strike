@@ -12,6 +12,9 @@ import { ARC_ASSETS } from '@/lib/arc/config';
 import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import { calculateFeeAmount } from '@/lib/fees/platformFee';
 
+
+const nowMs = () => Date.now();
+
 export const BalanceDisplay: React.FC = () => {
   const houseBalance = useStore(state => state.houseBalance);
   const network = useStore(state => state.network);
@@ -77,7 +80,7 @@ export const BalanceDisplay: React.FC = () => {
       chain: network || 'ARC',
       currency: currentSymbol,
       txHash: proof?.txHash ?? txHash,
-      createdAt: Number.isFinite(creditedAtMs) ? creditedAtMs : Date.now(),
+      createdAt: Number.isFinite(creditedAtMs) ? creditedAtMs : nowMs(),
       status: 'confirmed',
     });
     setIsReceiptOpen(true);
@@ -100,7 +103,7 @@ export const BalanceDisplay: React.FC = () => {
       chain: network || 'ARC',
       currency: currentSymbol,
       txHash,
-      createdAt: Number.isFinite(requestedAtMs) ? requestedAtMs : Date.now(),
+      createdAt: Number.isFinite(requestedAtMs) ? requestedAtMs : nowMs(),
       status: txHash === 'PENDING' ? 'pending' : 'confirmed',
       requestId,
     });

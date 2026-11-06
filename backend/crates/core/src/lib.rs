@@ -16,10 +16,9 @@ pub mod crypto;
 pub mod db;
 pub mod eth;
 pub mod jev;
-pub mod ledger; // TEMP-REGISTRATION ledger
+pub mod ledger;
 pub mod markets;
 pub mod money;
-pub mod platform_stats;
 pub mod prices;
 pub mod proofs;
 pub mod read_auth;
@@ -35,8 +34,5 @@ pub mod world;
 pub use config::config;
 pub use error::{ApiError, ApiResult};
 
-pub mod admin_reads_a;
-pub mod admin_reads_extra_b; // TEMP-REGISTRATION admin_reads_extra_b
-pub mod admin_writes; // TEMP-REGISTRATION admin_writes
 pub mod error;
-pub mod referral; // TEMP-REGISTRATION referral
+pub mod payout_rules;

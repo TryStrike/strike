@@ -1,5 +1,6 @@
 
 import { StateCreator } from "zustand";
+import type { Store } from "./index";
 import {
   ConnectPhase,
   ConnectEvent,
@@ -47,7 +48,7 @@ export interface WalletState {
   setSelectedCurrency: (currency: string | null) => void;
 }
 
-export const createWalletSlice: StateCreator<WalletState> = (set, get) => ({
+export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set, get) => ({
   address: null,
   walletBalance: 0,
   isConnected: false,
@@ -120,7 +121,7 @@ export const createWalletSlice: StateCreator<WalletState> = (set, get) => ({
       connectPhase: 'disconnected',
       connectingSince: null,
       lastError: null
-    } as any);
+    });
   },
 
   refreshWalletBalance: async () => {

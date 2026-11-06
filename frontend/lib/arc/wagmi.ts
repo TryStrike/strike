@@ -45,7 +45,6 @@ export const config = createConfig(
     connectors: [
       passkeyConnector,
       injected({ target: 'metaMask' }),
-      // eoaOnly: Coinbase's smart wallet does not serve Arc, the extension and app do.
       coinbaseWallet({ appName: app.name, appLogoUrl: app.icons[0], preference: { options: 'eoaOnly' } }),
       injected(),
       ...(walletConnectProjectId ? [walletConnect({ projectId: walletConnectProjectId, metadata: app, showQrModal: false })] : []),

@@ -1,5 +1,5 @@
 //! The ledger functions: `place_bet_locked`, the four balance functions,
-//! `increment_referral_count`, the ban checks and [`settle_round`].
+//! the ban checks and [`settle_round`].
 //!
 //! Every call is one savepoint in a write batch on the writer connection, so
 //! `SELECT ... FOR UPDATE` has no equivalent here: the write lock is already held
@@ -86,7 +86,6 @@ const FUNCTIONS: &[(&str, &[&str])] = &[
             "p_transaction_hash",
         ],
     ),
-    ("increment_referral_count", &["referrer_address"]),
     ("normalize_ban_address", &["p"]),
     ("is_wallet_globally_banned", &["p_address"]),
 ];
@@ -253,15 +252,6 @@ pub fn dispatch(conn: &mut Connection, function: &str, args: &Args) -> ApiResult
                 .map(|o| o.json)
             })
         }
-        "increment_referral_count" => in_transaction(conn, |c| {
-            c.prepare_cached(
-                "UPDATE user_referrals SET referral_count = referral_count + 1 \
-                 WHERE user_address = ?1",
-            )?
-            .execute(params![args.text("referrer_address")])?;
-            // RETURNS VOID.
-            Ok(Value::Null)
-        }),
         "normalize_ban_address" => Ok(args
             .text("p")
             .map(|p| Value::String(normalize_ban_address(&p)))

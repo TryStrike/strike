@@ -13,8 +13,6 @@ export default function Trade() {
   const setIsTourOpen = useStore((state) => state.setIsTourOpen);
   const setSelectedAsset = useStore((state) => state.setSelectedAsset);
 
-  // `/trade?asset=NVDA` (the Markets Predict link) opens on that asset, then
-  // drops the param so a later reload keeps whatever the player picked.
   useEffect(() => {
     const asset = new URLSearchParams(window.location.search).get('asset')?.toUpperCase();
     if (!asset) return;

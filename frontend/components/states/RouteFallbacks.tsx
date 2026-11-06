@@ -1,7 +1,7 @@
 'use client';
 
-
 import React from 'react';
+import { useRouter } from 'next/navigation';
 import { House } from '@phosphor-icons/react';
 import { StateScreen } from './StateScreen';
 import { SkeletonCard, SkeletonChartBlock, SkeletonStatTile, SkeletonTable } from './Skeleton';
@@ -74,29 +74,37 @@ export interface RouteErrorProps {
   hint?: string;
 }
 
-export const RouteError: React.FC<RouteErrorProps> = ({ error, reset, hint }) => (
-  <FallbackShell>
-    <StateScreen
-      variant="error"
-      title="This view couldn’t load"
-      hint={hint ?? 'Your funds and open rounds are unaffected. Try again — if it keeps failing, check the activity page.'}
-      error={error}
-      onRetry={reset}
-      secondaryAction={{ label: 'Back to home', onClick: () => { window.location.href = '/'; } }}
-    />
-  </FallbackShell>
-);
+export const RouteError: React.FC<RouteErrorProps> = ({ error, reset, hint }) => {
+  const router = useRouter();
+  return (
+    <FallbackShell>
+      <StateScreen
+        variant="error"
+        title="This view couldn’t load"
+        hint={
+          hint ?? 'Your funds and open rounds are unaffected. Try again — if it keeps failing, check the activity page.'
+        }
+        error={error}
+        onRetry={reset}
+        secondaryAction={{ label: 'Back to home', onClick: () => router.push('/') }}
+      />
+    </FallbackShell>
+  );
+};
 
-export const RouteNotFound: React.FC = () => (
-  <FallbackShell>
-    <StateScreen
-      variant="empty"
-      icon={<House size={30} weight="duotone" className="text-faint" />}
-      title="Page not found"
-      hint="That route doesn’t exist on Strike. The trade board and your wallet are still one click away."
-      secondaryAction={{ label: 'Go home', onClick: () => { window.location.href = '/'; } }}
-    />
-  </FallbackShell>
-);
+export const RouteNotFound: React.FC = () => {
+  const router = useRouter();
+  return (
+    <FallbackShell>
+      <StateScreen
+        variant="empty"
+        icon={<House size={30} weight="duotone" className="text-faint" />}
+        title="Page not found"
+        hint="That route doesn’t exist on Strike. The trade board and your wallet are still one click away."
+        secondaryAction={{ label: 'Go home', onClick: () => router.push('/') }}
+      />
+    </FallbackShell>
+  );
+};
 
 export default RouteLoading;

@@ -135,6 +135,8 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX bet_rounds_by_end ON bet_rounds(end_time);",
     // 7: a World ID check also resumes a YOLO agent paused for its human.
     "ALTER TABLE world_attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'start' CHECK (kind IN ('start', 'checkpoint'));",
+    // 8: referrals were dropped with the admin dashboard.
+    "DROP TABLE IF EXISTS user_referrals;",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

@@ -12,12 +12,11 @@ use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use strike_core::address::keccak256;
-use strike_core::admin_writes::withdrawal_intent_message;
+use strike_core::payout_rules::withdrawal_intent_message;
 use k256::ecdsa::SigningKey;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 
-const PASSWORD: &str = "shutdown-test-password";
 const SECRET: &str = "shutdown-test-secret";
 const TREASURY: &str = "0x00000000000000000000000000000000000000c0";
 const USDC: &str = "0x3600000000000000000000000000000000000000";
@@ -154,7 +153,6 @@ async fn start() -> Server {
         .env("SQLITE_PATH", dir.join("ledger.sqlite"))
         .env("BIND_ADDR", format!("127.0.0.1:{port}"))
         .env("BALANCE_INTERNAL_SECRET", SECRET)
-        .env("DASHBOARD_PASSWORD", PASSWORD)
         .env("BINANCE_ENDPOINT", "http://127.0.0.1:9/ticker")
         .env("YAHOO_SPARK_ENDPOINT", "http://127.0.0.1:9/spark")
         .env("NEXT_PUBLIC_ARC_RPC_ENDPOINT", rpc_url)
@@ -191,75 +189,51 @@ impl Server {
         rusqlite::Connection::open(self.dir.join("ledger.sqlite")).unwrap()
     }
 
-    /// A funded player with one signed request in the queue.
-    fn queue_withdrawal(&self) -> i64 {
+    /// Funds the player, signs a 50 USDC withdrawal and hangs up on it, as a
+    /// proxy timing out does. Auto-pay keeps paying; returns the request id.
+    async fn withdraw_then_hang_up(&self) -> i64 {
         let address = address_of(&self.player);
+        self.db()
+            .execute(
+                "INSERT INTO user_balances (user_address, currency, balance) VALUES (?1, 'USDC', ?2)",
+                rusqlite::params![address, 100 * UNIT],
+            )
+            .unwrap();
         let signed_at = chrono::Utc::now().timestamp_millis();
         let message = withdrawal_intent_message(&address, 50.0, "USDC", signed_at as f64);
-        let db = self.db();
-        db.execute(
-            "INSERT INTO user_balances (user_address, currency, balance) VALUES (?1, 'USDC', ?2)",
-            rusqlite::params![address, 100 * UNIT],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO withdrawal_requests \
-             (user_address, currency, amount, fee_amount, net_amount, signature, signed_at) \
-             VALUES (?1, 'USDC', ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                address,
-                50 * UNIT,
-                5 * UNIT,
-                45 * UNIT,
-                sign(&self.player, &message),
-                signed_at
-            ],
-        )
-        .unwrap();
-        db.last_insert_rowid()
-    }
-
-    async fn admin_cookie(&self) -> String {
-        let res = self
-            .http
-            .post(format!("{}/api/admin/auth", self.url))
-            .json(&json!({ "password": PASSWORD }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let cookie = res.headers()["set-cookie"].to_str().unwrap();
-        cookie.split(';').next().unwrap().to_string()
-    }
-
-    /// Fires an accept and hangs up on it, as a proxy timing out does.
-    async fn accept_then_hang_up(&self, id: i64, cookie: &str) {
         let hung_up = self
             .http
-            .post(format!(
-                "{}/api/admin/withdrawal-requests/{id}/accept",
-                self.url
-            ))
-            .header("cookie", cookie)
+            .post(format!("{}/api/balance/withdraw", self.url))
+            .bearer_auth(SECRET)
+            .json(&json!({
+                "userAddress": address, "amount": 50, "currency": "USDC",
+                "signature": sign(&self.player, &message), "signedAt": signed_at,
+            }))
             .timeout(Duration::from_millis(500))
             .send()
             .await;
         assert!(hung_up.unwrap_err().is_timeout());
+        let mut id = None;
+        eventually("the request is queued", || {
+            id = self
+                .db()
+                .query_row("SELECT max(id) FROM withdrawal_requests", [], |r| r.get(0))
+                .unwrap();
+            id.is_some()
+        })
+        .await;
+        id.unwrap()
     }
 
-    async fn unresolved(&self, cookie: &str) -> Value {
-        let res = self
-            .http
-            .get(format!(
-                "{}/api/admin/withdrawal-requests/pending",
-                self.url
-            ))
-            .header("cookie", cookie)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        res.json::<Value>().await.unwrap()["unresolved"].clone()
+    fn notes(&self, id: i64) -> String {
+        self.db()
+            .query_row(
+                "SELECT notes FROM withdrawal_requests WHERE id = ?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+            .unwrap_or_default()
     }
 
     fn row(&self, id: i64) -> (String, Option<String>) {
@@ -321,22 +295,15 @@ async fn sigterm_closes_price_streams_and_exits_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hung_up_accept_finishes_detached_and_the_admin_sees_each_state() {
+async fn a_hung_up_withdrawal_pays_detached_and_records_each_state() {
     let s = start().await;
-    let cookie = s.admin_cookie().await;
-    let id = s.queue_withdrawal();
-
-    s.accept_then_hang_up(id, &cookie).await;
+    let id = s.withdraw_then_hang_up().await;
     eventually("the debit commits", || s.row(id).0 == "accepted").await;
     assert_eq!(s.row(id).1, None, "the transfer has not confirmed");
-    let listed = s.unresolved(&cookie).await;
-    assert_eq!(listed[0]["id"], id, "{listed}");
-    assert_eq!(listed[0]["status"], "accepted");
 
     s.node.pending.store(false, Ordering::SeqCst);
     eventually("the hash is recorded", || s.row(id).1.is_some()).await;
     assert_eq!(s.row(id).0, "accepted");
-    assert_eq!(s.unresolved(&cookie).await, json!([]));
 
     let (balance, audit): (i64, String) = s
         .db()
@@ -353,11 +320,9 @@ async fn a_hung_up_accept_finishes_detached_and_the_admin_sees_each_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hung_up_accept_whose_transfer_reverts_is_parked_and_stays_visible() {
+async fn a_hung_up_withdrawal_whose_transfer_reverts_is_parked() {
     let s = start().await;
-    let cookie = s.admin_cookie().await;
-    let id = s.queue_withdrawal();
-    s.accept_then_hang_up(id, &cookie).await;
+    let id = s.withdraw_then_hang_up().await;
     eventually("the debit commits", || s.row(id).0 == "accepted").await;
 
     s.node.reverts.store(true, Ordering::SeqCst);
@@ -366,18 +331,14 @@ async fn a_hung_up_accept_whose_transfer_reverts_is_parked_and_stays_visible() {
         s.row(id).0 == "paid_needs_reconciliation"
     })
     .await;
-    let listed = s.unresolved(&cookie).await;
-    assert_eq!(listed[0]["id"], id, "{listed}");
-    let notes = listed[0]["notes"].as_str().unwrap();
+    let notes = s.notes(id);
     assert!(notes.contains("reverted"), "{notes}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigterm_waits_for_a_payout_nobody_is_listening_to() {
     let mut s = start().await;
-    let cookie = s.admin_cookie().await;
-    let id = s.queue_withdrawal();
-    s.accept_then_hang_up(id, &cookie).await;
+    let id = s.withdraw_then_hang_up().await;
     eventually("the debit commits", || s.row(id).0 == "accepted").await;
 
     s.terminate();

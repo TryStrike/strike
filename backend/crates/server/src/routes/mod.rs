@@ -1,10 +1,6 @@
 //! Route families. Each module owns one area of `/api/...` and exposes
 //! `routes()`; `router()` merges them so the Next proxy is a 1:1 rewrite.
 
-pub mod admin;
-pub mod admin_reads_a;
-pub mod admin_reads_b;
-pub mod admin_writes;
 pub mod agent;
 pub mod arc;
 pub mod arkiv;
@@ -13,10 +9,10 @@ pub mod balance_mutations;
 pub mod bets;
 pub mod copilot;
 pub mod markets;
+pub mod payout;
 pub mod precheck;
 pub mod prices;
 pub mod proofs;
-pub mod referral;
 pub mod session;
 pub mod stream;
 pub mod withdrawals;
@@ -32,10 +28,6 @@ use strike_core::error::ApiResult;
 pub fn router() -> Router {
     Router::new()
         .route("/api/health", get(health))
-        .merge(admin::routes())
-        .merge(admin_reads_a::routes())
-        .merge(admin_reads_b::routes())
-        .merge(admin_writes::routes())
         .merge(agent::routes())
         .merge(arc::routes())
         .merge(arkiv::routes())
@@ -47,7 +39,6 @@ pub fn router() -> Router {
         .merge(precheck::routes())
         .merge(prices::routes())
         .merge(proofs::routes())
-        .merge(referral::routes())
         .merge(session::routes())
         .merge(stream::routes())
         .merge(withdrawals::routes())

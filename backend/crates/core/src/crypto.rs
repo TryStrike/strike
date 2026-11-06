@@ -3,7 +3,6 @@
 //! Three formats, all `base64url(payload).base64url(sig)` or a JSON envelope:
 //!   balance session  {v,exp,n}            HMAC-SHA256 over the payload string
 //!   settlement token {betId,...,iat,exp}  HMAC-SHA256 over the payload string
-//!   admin session    {iat,sig}            sig = hex HMAC-SHA256("admin:<iat>")
 //!
 //! Payload key order follows the struct field order.
 
@@ -26,7 +25,6 @@ pub const MAX_CLOCK_SKEW_MS: i64 = 60 * 1000;
 pub const MAX_ACCEPT_INTENT_AGE_MS: i64 = 10 * 60 * 1000;
 
 pub const BALANCE_SESSION_COOKIE: &str = "strike_balance_gate";
-pub const ADMIN_COOKIE_NAME: &str = "strike_admin_session";
 
 #[derive(Serialize, Deserialize)]
 struct SessionPayload {
@@ -47,18 +45,6 @@ pub struct SettlementPayload {
     pub exp: i64,
 }
 
-#[derive(Serialize)]
-struct AdminPayload<'a> {
-    iat: i64,
-    sig: &'a str,
-}
-
-#[derive(Deserialize)]
-struct AdminPayloadOwned {
-    iat: i64,
-    sig: String,
-}
-
 fn now_seconds() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -72,13 +58,6 @@ fn hmac_b64url(secret: &str, input: &str) -> String {
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(input.as_bytes());
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
-}
-
-fn hmac_hex(secret: &str, input: &str) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(input.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Constant-time string compare, mirroring the TS `timingSafeEqual` on the
@@ -301,65 +280,6 @@ pub fn verify_agent_token(token: Option<&str>) -> Option<AgentClaims> {
 }
 
 // ---------------------------------------------------------------------------
-// Admin session token
-// ---------------------------------------------------------------------------
-
-/// `issueAdminToken()`: base64url JSON envelope of `{iat, sig}`.
-pub fn issue_admin_token() -> Result<String, String> {
-    issue_admin_token_with(config().dashboard_password.as_deref())
-}
-
-pub fn issue_admin_token_with(key: Option<&str>) -> Result<String, String> {
-    let key = key
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| "DASHBOARD_PASSWORD env var not set".to_string())?;
-    let iat = now_seconds();
-    let sig = hmac_hex(key, &format!("admin:{iat}"));
-    let body = serde_json::to_vec(&AdminPayload { iat, sig: &sig }).map_err(|e| e.to_string())?;
-    Ok(URL_SAFE_NO_PAD.encode(body))
-}
-
-/// `verifyAdminToken()`: expiry window first, then constant-time HMAC compare.
-pub fn verify_admin_token(token: Option<&str>) -> bool {
-    let cfg = config();
-    verify_admin_token_with(
-        cfg.dashboard_password.as_deref(),
-        (cfg.admin_session_hours * 3600.0) as i64,
-        token,
-    )
-}
-
-pub fn verify_admin_token_with(key: Option<&str>, ttl_seconds: i64, token: Option<&str>) -> bool {
-    let Some(key) = key.filter(|k| !k.is_empty()) else {
-        return false;
-    };
-    let Some(value) = token.map(str::trim).filter(|v| !v.is_empty()) else {
-        return false;
-    };
-
-    let Ok(bytes) = URL_SAFE_NO_PAD.decode(value) else {
-        return false;
-    };
-    let Ok(AdminPayloadOwned { iat, sig }) = serde_json::from_slice::<AdminPayloadOwned>(&bytes)
-    else {
-        return false;
-    };
-
-    let age = now_seconds() - iat;
-    if age < 0 || age > ttl_seconds {
-        return false;
-    }
-    constant_eq(&hmac_hex(key, &format!("admin:{iat}")), &sig)
-}
-
-/// `verifyAdminToken()`'s password comparison: both the candidate and the
-/// stored secret are hashed under the stored secret as the HMAC key, so the
-/// comparison time reveals nothing about the stored password's length.
-pub fn dashboard_password_matches(stored: &str, candidate: &str) -> bool {
-    constant_eq(&hmac_hex(stored, candidate), &hmac_hex(stored, stored))
-}
-
-// ---------------------------------------------------------------------------
 // Withdrawal intent freshness
 // ---------------------------------------------------------------------------
 
@@ -395,7 +315,6 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "unit-test-secret";
-    const ADMIN_TTL: i64 = 8 * 3600;
 
     #[test]
     fn session_payload_round_trips() {
@@ -471,43 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn admin_token_round_trip_and_expiry_shape() {
-        let token = issue_admin_token_with(Some(SECRET)).unwrap();
-        assert!(verify_admin_token_with(
-            Some(SECRET),
-            ADMIN_TTL,
-            Some(&token)
-        ));
-        assert!(!verify_admin_token_with(
-            Some("other"),
-            ADMIN_TTL,
-            Some(&token)
-        ));
-        assert!(!verify_admin_token_with(
-            Some(SECRET),
-            ADMIN_TTL,
-            Some("not-base64!!")
-        ));
-        // The window is inclusive: a token issued this second passes at TTL 0
-        // and fails one second before it.
-        assert!(verify_admin_token_with(Some(SECRET), 0, Some(&token)));
-        assert!(!verify_admin_token_with(Some(SECRET), -1, Some(&token)));
-    }
-
-    #[test]
-    fn dashboard_password_comparison() {
-        assert!(dashboard_password_matches("hunter2", "hunter2"));
-        assert!(!dashboard_password_matches("hunter2", "hunter3"));
-        assert!(!dashboard_password_matches("hunter2", ""));
-        // A different-length candidate still compares in the same shape: both
-        // sides are fixed-length digests, never the passwords themselves.
-        assert!(!dashboard_password_matches(
-            "a-very-long-dashboard-passphrase",
-            "short"
-        ));
-    }
-
-    #[test]
     fn intent_windows_match_ts_bounds() {
         // A fixed clock: with `now_millis()` recomputed inside the function, the
         // exact-boundary asserts below would fail once every few runs.
@@ -536,7 +418,5 @@ mod tests {
         assert!(balance_session_wallet_with(Some(""), Some("a.b")).is_none());
         assert!(verify_settlement_token_with(Some(""), Some("a.b")).is_none());
         assert!(create_settlement_token_with(None, "b", "0xA", "USDC", 1.0, 300).is_err());
-        assert!(!verify_admin_token_with(Some(""), ADMIN_TTL, Some("YWJj")));
-        assert!(issue_admin_token_with(None).is_err());
     }
 }

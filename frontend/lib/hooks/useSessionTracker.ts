@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { backoffDelayMs, computeExpiryMs, nextRefreshMs } from '@/lib/wallet/sessionTiming';
 
 
@@ -60,14 +60,15 @@ export function useSessionTracker(
 ): SessionTrackerState {
   const random = options.random ?? Math.random;
 
-  const tabIdRef = useRef<string | null>(null);
-  if (!tabIdRef.current) tabIdRef.current = makeTabId(Math.random);
+  const [tabId] = useState(() => makeTabId(Math.random));
+  const tabIdRef = useRef<string>(tabId);
 
   const networkRef = useRef<string | null>(network);
-  networkRef.current = network;
-
   const addressRef = useRef<string | null>(walletAddress);
-  addressRef.current = walletAddress;
+  useLayoutEffect(() => {
+    networkRef.current = network;
+    addressRef.current = walletAddress;
+  });
 
   const roleRef = useRef<Role>('none');
   const sessionIdRef = useRef<string | null>(null);
@@ -150,7 +151,7 @@ export function useSessionTracker(
     }
     post({
       type: 'session',
-      tabId: tabIdRef.current!,
+      tabId: tabIdRef.current,
       address,
       ts: Date.now(),
       session_id: sessionIdRef.current ?? undefined,
@@ -232,14 +233,16 @@ export function useSessionTracker(
     timerRef.current = setTimeout(() => { void runPingRef.current(); }, nextDelay);
   }, [publish, clearTimers, random, sendSessionSnapshot]);
 
-  runPingRef.current = () => { void runPing(); };
+  useLayoutEffect(() => {
+    runPingRef.current = () => { void runPing(); };
+  });
 
   const becomeLeader = useCallback(() => {
     if (roleRef.current === 'leader') return;
     roleRef.current = 'leader';
     clearTimers();
     const address = addressRef.current;
-    if (address) post({ type: 'claim', tabId: tabIdRef.current!, address, ts: Date.now() });
+    if (address) post({ type: 'claim', tabId: tabIdRef.current, address, ts: Date.now() });
     publish({ isLeader: true });
     void runPing();
   }, [clearTimers, post, publish, runPing]);
@@ -257,12 +260,13 @@ export function useSessionTracker(
     }, delay);
   }, [random, becomeLeader]);
 
+  const followerTickRef = useRef<() => void>(() => {});
   const followerTick = useCallback(() => {
     if (roleRef.current !== 'follower' || !aliveRef.current) return;
     const since = Date.now() - lastHeardFromLeaderRef.current;
     if (since > refreshAfterMsRef.current + LEADER_GRACE_MS) {
       attemptTakeover('stale');
-      followerTimerRef.current = setTimeout(followerTick, FOLLOWER_CHECK_MS);
+      followerTimerRef.current = setTimeout(() => followerTickRef.current(), FOLLOWER_CHECK_MS);
       return;
     }
     const now = Date.now();
@@ -273,11 +277,14 @@ export function useSessionTracker(
       else publish({ status: 'active' });
     } else {
       const address = addressRef.current;
-      if (address) post({ type: 'claim', tabId: tabIdRef.current!, address, ts: Date.now() });
+      if (address) post({ type: 'claim', tabId: tabIdRef.current, address, ts: Date.now() });
       attemptTakeover('stale');
     }
-    followerTimerRef.current = setTimeout(followerTick, FOLLOWER_CHECK_MS);
+    followerTimerRef.current = setTimeout(() => followerTickRef.current(), FOLLOWER_CHECK_MS);
   }, [attemptTakeover, publish, post]);
+  useLayoutEffect(() => {
+    followerTickRef.current = followerTick;
+  });
 
   const becomeFollower = useCallback((msg: CoordMessage) => {
     roleRef.current = 'follower';
@@ -325,7 +332,7 @@ export function useSessionTracker(
     aliveRef.current = true;
     const channel = createChannel();
     channelRef.current = channel;
-    const tabId = tabIdRef.current!;
+    const tabId = tabIdRef.current;
 
     if (!channel) {
       becomeLeader();

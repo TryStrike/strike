@@ -5,7 +5,6 @@ import { PaperPlaneRight, X } from '@phosphor-icons/react';
 import { Button, Field, cx } from '@/components/ui/kit';
 import { useCopilot } from '@/lib/copilot/useCopilot';
 
-/** Stays mounted once opened, so the conversation survives closing it. */
 export default function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { messages, busy, error, send } = useCopilot();
   const [draft, setDraft] = useState('');

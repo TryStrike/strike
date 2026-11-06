@@ -6,7 +6,6 @@ import { useShallow } from 'zustand/react/shallow';
 import { LiveChart } from './LiveChart';
 import { BalanceDisplay } from '@/components/balance';
 import { getArcConfig, getAssetConfig } from '@/lib/arc/config';
-import { ethers } from 'ethers';
 import { useToast } from '@/lib/hooks/useToast';
 import { useAccount } from 'wagmi';
 import { ArrowDown, ArrowUp, Check, X } from '@phosphor-icons/react';
@@ -96,26 +95,27 @@ export const GameBoard: React.FC = () => {
         throw new Error('Arc fee collector wallet not configured');
       }
 
-      const { ethers } = await import('ethers');
-      const injected = (await connector?.getProvider()) as ethers.Eip1193Provider | undefined;
-      if (!injected) {
+      const [{ erc20Abi, parseUnits }, { arcPublicClient, arcWalletClient }] = await Promise.all([
+        import('viem'),
+        import('@/lib/arc/client'),
+      ]);
+      const injected = (await connector?.getProvider()) as import('viem').EIP1193Provider | undefined;
+      if (!injected || !address) {
         throw new Error('Active wallet not found in session. Please reconnect.');
       }
-      const browserProvider = new ethers.BrowserProvider(injected);
-      const chain = await browserProvider.getNetwork();
-      if (Number(chain.chainId) !== arcConfig.chainId) {
+      const wallet = arcWalletClient(injected, address as `0x${string}`);
+      if ((await wallet.getChainId()) !== arcConfig.chainId) {
         throw new Error(`Switch your wallet to ${arcConfig.name} and try again`);
       }
-      const signer = await browserProvider.getSigner();
-      const feeValue = ethers.parseUnits(String(blitzEntryFee), assetConfig.decimals);
 
       toast.info(`Confirming ${blitzEntryFee} ${currencySymbol} Blitz Entry...`);
-      const feeTx = await new ethers.Contract(
-        assetConfig.address,
-        ['function transfer(address to, uint256 amount) returns (bool)'],
-        signer
-      ).transfer(feeWallet, feeValue);
-      await feeTx.wait();
+      const hash = await wallet.writeContract({
+        address: assetConfig.address,
+        abi: erc20Abi,
+        functionName: 'transfer',
+        args: [feeWallet as `0x${string}`, parseUnits(String(blitzEntryFee), assetConfig.decimals)],
+      });
+      await arcPublicClient().waitForTransactionReceipt({ hash });
       toast.success("Payment successful! Blitz Mode enabled.");
       enableBlitzAccess();
       refreshWalletBalance();
@@ -224,22 +224,17 @@ export const GameBoard: React.FC = () => {
     return () => clearInterval(id);
   }, []);
 
-  const [srMessage, setSrMessage] = useState('');
-  useEffect(() => {
-    if (!lastResult) return;
+
+  const srMessage = useMemo(() => {
+    if (error && isBalanceError) return `Insufficient balance. ${error}`;
+    if (!lastResult) return '';
     const cur = lastResult.currency || 'USDC';
-    const outcome = lastResult.won
+    return lastResult.won
       ? lastResult.payout === lastResult.amount
         ? `Round draw. Stake ${lastResult.amount.toFixed(2)} ${cur} refunded.`
         : `Round won. Payout ${lastResult.payout.toFixed(2)} ${cur}.`
       : `Round lost. Stake ${lastResult.amount.toFixed(2)} ${cur} forfeited.`;
-    setSrMessage(outcome);
-  }, [lastResult]);
-  useEffect(() => {
-    if (error && isBalanceError) {
-      setSrMessage(`Insufficient balance. ${error}`);
-    }
-  }, [error, isBalanceError]);
+  }, [lastResult, error, isBalanceError]);
 
   const betRef = React.useRef(handleBet);
   useEffect(() => {

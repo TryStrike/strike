@@ -19,7 +19,6 @@ const RESULT_VISIBLE_MS = 3_000;
 const ROWS = 10;
 const LINE_VIEW_SPAN = 3;
 const LINE_MIN_RANGE = 0.001;
-/** Box bands scale with the view, and multipliers are priced for this span, so it moves the house edge. */
 const BOX_VIEW_SPAN = 1.7;
 const BOX_MIN_RANGE = 0.0003;
 const OVERLAY = 'bg-white rounded-2xl ring-1 ring-line shadow-xl font-tight';
@@ -201,11 +200,13 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
   const [attemptIndex, setAttemptIndex] = useState(0);
   const [showFallback, setShowFallback] = useState(false);
 
-  useEffect(() => {
+  const [shownFor, setShownFor] = useState(`${asset}|${src}`);
+  if (shownFor !== `${asset}|${src}`) {
+    setShownFor(`${asset}|${src}`);
     setCurrentSrc(src);
     setAttemptIndex(0);
     setShowFallback(false);
-  }, [src, asset]);
+  }
 
   const getAllSources = (): string[] => {
     const sources: string[] = [];
@@ -288,6 +289,7 @@ const AssetIcon = ({ src, asset, className }: { src: string; asset: string; clas
 
   return (
     <div className={`relative flex items-center justify-center overflow-hidden w-full h-full rounded-full bg-white ring-1 ring-line ${isNear ? 'scale-90' : ''}`}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         key={`${asset}-${attemptIndex}`}
         src={currentSrc}
@@ -310,7 +312,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const maxBand = useStore((state) => state.maxBands[state.selectedAsset] ?? 0);
   const userAddress = useStore((state) => state.address);
   const houseBalance = useStore((state) => state.houseBalance);
-  const isPlacingBet = useStore((state) => state.isPlacingBet);
 
   const gameMode = useStore((state) => state.gameMode);
   const timeframeSeconds = useStore((state) => state.timeframeSeconds);
@@ -327,7 +328,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
 
-  const [isLoadingPrice, setIsLoadingPrice] = useState(true);
+  const isLoadingPrice = currentPrice <= 0 || priceHistory.length < 2;
 
   const [showInsufficientFunds, setShowInsufficientFunds] = useState(false);
 
@@ -373,11 +374,11 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   }, [assetSearchQuery, activeAssetCategory]);
 
 
-  useEffect(() => {
+  const [resultsFor, setResultsFor] = useState(selectedAsset);
+  if (resultsFor !== selectedAsset) {
+    setResultsFor(selectedAsset);
     setBetResults([]);
-    setIsLoadingPrice(priceHistory.length === 0 || currentPrice <= 0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAsset]);
+  }
 
   useEffect(() => {
     try {
@@ -386,6 +387,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
         const parsed = JSON.parse(raw) as AssetType[];
         if (Array.isArray(parsed)) {
           const valid = new Set(Object.keys(ASSET_CONFIG) as AssetType[]);
+          // eslint-disable-next-line react-hooks/set-state-in-effect -- localStorage is only readable after hydration
           setWatchlist(parsed.filter((a): a is AssetType => valid.has(a)));
         }
       }
@@ -419,11 +421,6 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     return () => clearInterval(interval);
   }, [betResults.length]);
 
-  useEffect(() => {
-    if (currentPrice > 0 && priceHistory.length >= 2) {
-      setIsLoadingPrice(false);
-    }
-  }, [currentPrice, priceHistory]);
 
   useEffect(() => {
     const updateDimensions = () => {
@@ -494,6 +491,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     const scales = chart?.scales();
     if (!scales) return;
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- marker position comes from the chart instance's scales, an external system
     setBetResults((prev) => [
       ...prev,
       {

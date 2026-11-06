@@ -166,10 +166,7 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({
   maxVisible = DEFAULT_MAX_VISIBLE
 }) => {
   const [expanded, setExpanded] = useState(false);
-
-  useEffect(() => {
-    if (toasts.length <= maxVisible) setExpanded(false);
-  }, [toasts.length, maxVisible]);
+  if (expanded && toasts.length <= maxVisible) setExpanded(false);
 
   const collapsedCount = Math.max(0, toasts.length - maxVisible);
   const visible = expanded || collapsedCount === 0

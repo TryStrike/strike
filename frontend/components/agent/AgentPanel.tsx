@@ -25,7 +25,6 @@ const MINUTES = [
 
 type Limits = Omit<StartLimits, 'asset'>;
 
-/** `agent::WAITING_FOR_HUMAN` in the Rust core. */
 const WAITING_FOR_HUMAN = 'Waiting for a human';
 
 export function AgentPanel() {

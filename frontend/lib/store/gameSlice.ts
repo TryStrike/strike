@@ -1,5 +1,6 @@
 
 import { StateCreator } from "zustand";
+import type { Store } from "./index";
 import { TargetCell, PricePoint } from "@/lib/types/game";
 import { AssetType } from "@/lib/utils/priceFeed";
 import { playWinSound, playLoseSound } from "@/lib/utils/sounds";
@@ -111,7 +112,6 @@ const SLOW_CLAIM_RETRY_MS = 5000;
 
 const sameWallet = (a?: string | null, b?: string | null) => a?.toLowerCase() === b?.toLowerCase();
 
-/** Retries until the server answers, since the sweeper settles the round even if every claim fails. */
 async function claimRound(bet: ActiveBet, userAddress: string, currency: string, onSlow: () => void) {
   let sessionRefreshed = false;
   for (let attempt = 0; attempt < FAST_CLAIMS + SLOW_CLAIMS; attempt += 1) {
@@ -146,7 +146,7 @@ async function claimRound(bet: ActiveBet, userAddress: string, currency: string,
   return null;
 }
 
-export const createGameSlice: StateCreator<any> = (set, get) => {
+export const createGameSlice: StateCreator<Store, [], [], GameState> = (set, get) => {
   const roundTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const settleRound = async (betId: string) => {
@@ -394,12 +394,11 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
           : metadata?.endTime ?? clickTime + durationSeconds * 1000;
       const betRequestId = crypto.randomUUID();
 
-      const selectedCurrency = (get() as any).selectedCurrency;
+      const selectedCurrency = get().selectedCurrency;
       const currency = resolveHouseLedgerCurrency({
         selectedCurrency,
       });
 
-      // Same betRequestId, so a resend after re-signing can never place it twice.
       const send = () => fetch('/api/balance/bet', {
         method: 'POST',
         headers: {
@@ -444,14 +443,14 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
       if (data.duplicate) {
         if (data.betId == null || data.settlementToken == null) {
-          await (get() as any).fetchBalance?.(userAddress);
+          await get().fetchBalance(userAddress);
           set({ isPlacingBet: false, error: null });
           throw new Error(data.message || 'Bet already processed');
         }
       }
 
       if (data.betId == null || data.settlementToken == null) {
-        await (get() as any).fetchBalance?.(userAddress);
+        await get().fetchBalance(userAddress);
         set({ isPlacingBet: false, error: null });
         throw new Error('Invalid bet response from server');
       }
@@ -459,7 +458,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
       const remRaw = data.remainingBalance;
       const rem = remRaw === null || remRaw === undefined ? NaN : Number(remRaw);
       if (Number.isFinite(rem)) {
-        (get() as any).setBalance?.(rem);
+        get().setBalance(rem);
       }
 
       const activeBet: ActiveBet = {
@@ -587,7 +586,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
     });
 
-    const updateObj: any = {
+    const updateObj: Partial<Store> = {
       assetPrices: updatedAssetPrices,
       assetHistories: updatedAssetHistories,
       rawAssetPrices: updatedRawPrices,

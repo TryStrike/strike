@@ -10,7 +10,6 @@ export interface ChatMessage {
 
 const KEEP = 10;
 
-/** The last turns the server takes: at most 10, starting with the trader. */
 function history(messages: ChatMessage[]): ChatMessage[] {
   const recent = messages.filter((m) => m.content.trim()).slice(-KEEP);
   while (recent[0]?.role === 'assistant') recent.shift();

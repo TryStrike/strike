@@ -268,23 +268,24 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [server, setServer] = useState<ServerBetProof | null>(null);
-  const [serverState, setServerState] = useState<'idle' | 'loading' | 'ready' | 'failed' | 'unavailable'>('idle');
+  const [serverState, setServerState] = useState<'idle' | 'ready' | 'failed'>('idle');
   const [copied, setCopied] = useState<string | null>(null);
   const requestedRef = useRef(false);
   const demo = bet.isDemoBet === true || isDemoBetId(bet.betId);
 
-  const close = useCallback(() => setOpen(false), []);
+  const close = useCallback(() => {
+    setOpen(false);
+    if (serverState === 'failed') {
+      requestedRef.current = false;
+      setServerState('idle');
+    }
+  }, [serverState]);
 
   useEffect(() => {
-    if (!open) return;
-    if (demo) {
-      setServerState((s) => (s === 'unavailable' ? s : 'unavailable'));
-      return;
-    }
+    if (!open || demo) return;
     if (!wallet || requestedRef.current) return;
     requestedRef.current = true;
     let cancelled = false;
-    setServerState('loading');
     fetch(`/api/bets/${encodeURIComponent(bet.betId)}?wallet=${encodeURIComponent(wallet)}`, { credentials: 'include' })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`status ${res.status}`))))
       .then((payload: { bet?: ServerBetProof }) => {
@@ -300,10 +301,6 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
       cancelled = true;
     };
   }, [open, wallet, bet.betId, demo]);
-
-  useEffect(() => {
-    if (!open && serverState === 'failed') requestedRef.current = false;
-  }, [open, serverState]);
 
   const local = useMemo(() => {
     const empty = {

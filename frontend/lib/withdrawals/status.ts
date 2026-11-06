@@ -94,11 +94,11 @@ function baseSteps(): {
     requested: { key: 'requested', label: 'Requested', state: 'done', detail: 'Signed intent received by Strike' },
     review: {
       key: 'review',
-      label: 'Under review',
+      label: 'Checks',
       state: 'active',
-      detail: 'Manual review by an operator — no fixed timer on the queue',
+      detail: 'Signature, balance and caps are checked automatically',
     },
-    approved: { key: 'approved', label: 'Approved & signed', state: 'upcoming' },
+    approved: { key: 'approved', label: 'Approved', state: 'upcoming' },
     sent: { key: 'sent', label: 'Sent on-chain', state: 'upcoming', detail: 'Treasury pays USDC on Arc' },
     confirmed: { key: 'confirmed', label: 'Confirmed', state: 'upcoming', detail: 'Payout settled in your wallet' },
   };
@@ -117,10 +117,10 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
     case 'pending':
       return {
         kind: 'pending',
-        label: 'Pending review',
+        label: 'Paying out',
         tone: 'waiting',
         playerMessage:
-          'Your request is in the manual approval queue. An operator reviews and pays it; you do not need to do anything. Your house balance is only deducted when the payout actually runs.',
+          'Your request passed the signature check and is being paid. This takes a few seconds; your house balance is only deducted when the payout actually runs.',
         steps: [steps.requested, steps.review, steps.approved, steps.sent, steps.confirmed],
         terminal: false,
         netTxHash: null,
@@ -148,13 +148,13 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
       const s = baseSteps();
       s.review.state = 'done';
       s.approved.state = 'active';
-      s.approved.detail = 'Approved by an operator; payout is being finalised';
+      s.approved.detail = 'Checks passed; payout is being finalised';
       return {
         kind: 'accepted',
         label: 'Approved — paying out',
         tone: 'info',
         playerMessage:
-          'An operator approved your request and the treasury payout is being finalised. The transaction hash appears here as soon as it is recorded.',
+          'Your request passed every check and the treasury payout is being finalised. The transaction hash appears here as soon as it is recorded.',
         steps: [s.requested, s.review, s.approved, s.sent, s.confirmed],
         terminal: false,
         netTxHash: null,
@@ -167,8 +167,8 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
       s.requested.state = 'done';
       s.review.state = 'done';
       s.approved.state = 'failed';
-      s.approved.label = 'Rejected';
-      s.approved.detail = 'Decision recorded by an operator';
+      s.approved.label = 'Refused';
+      s.approved.detail = 'A check failed before any money moved';
       s.sent.state = 'upcoming';
       s.sent.detail = 'No transaction — the request was not paid';
       s.confirmed.state = 'upcoming';
@@ -177,7 +177,7 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
         label: 'Rejected',
         tone: 'danger',
         playerMessage:
-          'An operator rejected this request, so nothing was sent on-chain and your house balance was not deducted for it. If the reason was not clear, contact support before submitting a new request.',
+          'This request was refused before any money moved: it was over a cap (50 USDC per request, 200 per day) or a check failed. Nothing was sent on-chain and your house balance was not deducted. You can request again.',
         steps: [s.requested, s.review, s.approved, s.sent, s.confirmed],
         terminal: true,
         netTxHash: null,
@@ -193,13 +193,13 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
       s.sent.state = 'attention';
       s.sent.detail = 'Payout attempt was made but could not be finalised automatically';
       s.confirmed.state = 'attention';
-      s.confirmed.detail = 'Awaiting operator reconciliation';
+      s.confirmed.detail = 'Held for reconciliation';
       return {
         kind: 'paid_needs_reconciliation',
         label: 'Needs reconciliation',
         tone: 'attention',
         playerMessage:
-          'A payout attempt for this request was made but could not be completed cleanly, so a Strike operator must reconcile it manually. Do NOT submit the same withdrawal again — copy your request ID below and contact support with it.',
+          'A payout attempt for this request was made but could not be confirmed, so it is held for reconciliation and will not be paid twice. Do NOT submit the same withdrawal again; keep the request ID below.',
         steps: [s.requested, s.review, s.approved, s.sent, s.confirmed],
         terminal: true,
         netTxHash: netTx,
@@ -215,7 +215,7 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
         label: rawStatus || 'Unknown status',
         tone: 'unknown',
         playerMessage:
-          'This request has a status this app does not recognise yet. It refreshes automatically; if it does not move, contact support with the request ID.',
+          'This request has a status this app does not recognise yet. It refreshes automatically; keep the request ID below.',
         steps: [s.requested, s.review, s.approved, s.sent, s.confirmed],
         terminal: false,
         netTxHash: netTx,
@@ -240,8 +240,8 @@ export function describeWithdrawal(
     const s = baseSteps();
     s.requested.detail = `Signed intent received by Strike at ${formatWhenMs(intent.signedAtMs)}`;
     s.review.state = 'failed';
-    s.review.label = 'Review window elapsed';
-    s.review.detail = `No operator accepted it within the ${windowMinutes(intent.maxAgeMs)}-minute signing window`;
+    s.review.label = 'Signature expired';
+    s.review.detail = `It was not paid within the ${windowMinutes(intent.maxAgeMs)}-minute signing window`;
     s.approved.state = 'upcoming';
     s.approved.detail = 'The expired signature can no longer be approved';
     s.sent.detail = 'Nothing was sent on-chain';
@@ -250,8 +250,8 @@ export function describeWithdrawal(
       label: 'Signature expired',
       tone: 'danger',
       playerMessage:
-        `Your signed authorization is older than ${windowMinutes(intent.maxAgeMs)} minutes, so no operator can pay this request ` +
-        `anymore — that is why nothing moved. Nothing was sent and your house balance was not deducted. ` +
+        `Your signed authorization is older than ${windowMinutes(intent.maxAgeMs)} minutes, so this request can no longer ` +
+        `be paid. Nothing was sent and your house balance was not deducted. ` +
         `Request the withdrawal again from the trade screen to create a fresh signed intent.`,
       steps: [s.requested, s.review, s.approved, s.sent, s.confirmed],
       terminal: true,
@@ -265,7 +265,7 @@ export function describeWithdrawal(
       step.key === 'review'
         ? {
             ...step,
-            detail: `Manual review by an operator — the signature can be accepted for another ${formatRemaining(intent.remainingMs)}`,
+            detail: `Checking automatically — the signature stays valid for another ${formatRemaining(intent.remainingMs)}`,
           }
         : step,
     );

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { motion } from 'framer-motion';
 import { X } from '@phosphor-icons/react';
@@ -43,18 +43,20 @@ const FOCUSABLE_SELECTOR = [
     '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
+function subscribeReducedMotion(onChange: () => void): () => void {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => {};
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (typeof mq.addEventListener !== 'function') return () => {};
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+}
+
 function usePrefersReducedMotion(): boolean {
-    const [reduced, setReduced] = useState(false);
-    useEffect(() => {
-        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-        const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-        setReduced(mq.matches);
-        if (typeof mq.addEventListener !== 'function') return;
-        const onChange = (e: MediaQueryListEvent) => setReduced(e.matches);
-        mq.addEventListener('change', onChange);
-        return () => mq.removeEventListener('change', onChange);
-    }, []);
-    return reduced;
+    return useSyncExternalStore(
+        subscribeReducedMotion,
+        () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        () => false,
+    );
 }
 
 function useTourHost(active: boolean): HTMLElement | null {
@@ -70,6 +72,7 @@ function useTourHost(active: boolean): HTMLElement | null {
             document.body.appendChild(el);
             created = true;
         }
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- the portal host is a DOM node created after mount
         setHost(el);
         return () => {
             setHost(null);
@@ -202,6 +205,7 @@ export const QuickTour: React.FC<{
         const storage = safeStorage();
         storageRef.current = storage;
         loadedScopeRef.current = scope;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- tour progress is read from localStorage when the tour opens
         setDontShowAgain(isTourDismissed(storage, scope));
         if (resumable) {
             setCurrentStep(clampTourStep(readTourStep(storage, scope, steps.length), steps.length));
@@ -257,6 +261,7 @@ export const QuickTour: React.FC<{
     useEffect(() => {
         if (!isOpen || !host) return;
 
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- the spotlight is measured from the live DOM
         measure();
 
         const scrollOnce = () => {
@@ -592,8 +597,8 @@ export const QuickTour: React.FC<{
                 </label>
 
                 <div className="mt-auto flex shrink-0 items-center justify-between">
-                    <Button variant="ghost" size="sm" onClick={() => finishTour()} className="-ml-3">
-                        Skip
+                    <Button variant="secondary" size="sm" onClick={() => finishTour()}>
+                        Skip tour
                     </Button>
                     <div className="flex gap-2">
                         {currentStep > 0 && (
@@ -622,6 +627,7 @@ export function useOnboardingTour(options?: { autoStartDelayMs?: number }) {
 
     useEffect(() => {
         const storage = safeStorage();
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- auto-start reads localStorage, only available after hydration
         setDismissed(isTourDismissed(storage, scope));
         if (startedScopesRef.current.has(scope)) return;
         if (

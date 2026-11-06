@@ -1,14 +1,16 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ethers } from 'ethers';
+import { erc20Abi, isAddress, parseUnits, formatUnits, type EIP1193Provider } from 'viem';
+import { arcPublicClient, arcWalletClient, readAssetBalance } from '@/lib/arc/client';
 import { Modal } from '@/components/ui/Modal';
 import { Badge, Button, Segmented, glassSelected } from '@/components/ui/kit';
 import { ArrowUpRight, CheckCircle, CircleNotch, WarningCircle } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
+import { resolveHouseLedgerCurrency } from '@/lib/balance/houseLedgerCurrency';
 import dynamic from 'next/dynamic';
 
-const BridgeIn = dynamic(() => import('./BridgeIn'), { ssr: false });
+const Bridge = dynamic(() => import('./Bridge'), { ssr: false });
 import { useToast } from '@/lib/hooks/useToast';
 import { useWalletClient, useAccount, useSwitchChain } from 'wagmi';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
@@ -33,11 +35,6 @@ export interface DepositProof {
   newBalance?: number;
   creditedAt?: string;
 }
-
-const ERC20_ABI = [
-  'function balanceOf(address owner) view returns (uint256)',
-  'function transfer(address to, uint256 amount) returns (bool)',
-];
 
 const REQUIRED_CONFIRMATIONS = 3;
 const GAS_BUFFER = 0.005;
@@ -279,13 +276,14 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   const [precheck, setPrecheck] = useState<PreFlight | null>(null);
   const [recheckKey, setRecheckKey] = useState(0);
 
-  const config = useMemo(getArcConfig, []);
-  const asset: ArcAsset = 'USDC';
+  const config = useMemo(() => getArcConfig(), []);
+  const selectedCurrency = useStore((state) => state.selectedCurrency);
+  const asset: ArcAsset = resolveHouseLedgerCurrency({ selectedCurrency });
   const assetConfig = config.assets[asset];
   const quickAmounts = [1, 5, 10, 25];
   const gasReserve = gasFee == null ? null : gasFee + GAS_BUFFER;
 
-  const treasuryConfigured = ethers.isAddress(config.treasuryAddress || '');
+  const treasuryConfigured = isAddress(config.treasuryAddress || '');
 
   const connectedChainId = typeof accountChainId === 'number' ? accountChainId : null;
 
@@ -345,28 +343,23 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     [handlePhase]
   );
 
-  useEffect(() => {
-    if (isOpen) setPhase((current) => (current.kind === 'credited' ? { kind: 'idle' } : current));
-  }, [isOpen]);
+  const [wasOpen, setWasOpen] = useState(isOpen);
+  if (wasOpen !== isOpen) {
+    setWasOpen(isOpen);
+    if (isOpen && phase.kind === 'credited') setPhase({ kind: 'idle' });
+  }
 
   useEffect(() => {
     if (!isOpen || !address) return;
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a fetch effect marks its own request as loading
     setBalanceState('loading');
 
     (async () => {
       try {
-        const provider = new ethers.JsonRpcProvider(config.rpcEndpoint, {
-          chainId: config.chainId,
-          name: config.name,
-        });
-        const raw = await new ethers.Contract(
-          assetConfig.address,
-          ERC20_ABI,
-          provider
-        ).balanceOf(address);
+        const balance = await readAssetBalance(address, asset);
         if (!cancelled) {
-          setWalletBalance(parseFloat(ethers.formatUnits(raw, assetConfig.decimals)));
+          setWalletBalance(balance);
           setBalanceState('ready');
         }
       } catch (err) {
@@ -386,37 +379,29 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   const estimateGasFee = useCallback(
     async (wholeTokens: number): Promise<number> => {
       try {
-        const provider = new ethers.JsonRpcProvider(config.rpcEndpoint, {
-          chainId: config.chainId,
-          name: config.name,
-        });
-        const value = ethers.parseUnits(wholeTokens.toString(), assetConfig.decimals);
-        const readonlyContract: any = new ethers.Contract(
-          assetConfig.address,
-          ERC20_ABI,
-          provider
-        );
-        const gas = await readonlyContract.estimateGas.transfer(config.treasuryAddress, value);
-        const feeData = await provider.getFeeData();
-        const gasPrice = feeData.gasPrice ?? feeData.maxFeePerGas;
-        if (gasPrice == null) return 0.01;
-        return parseFloat(ethers.formatUnits(gas * gasPrice, 18));
+        const client = arcPublicClient();
+        const [gas, gasPrice] = await Promise.all([
+          client.estimateContractGas({
+            address: assetConfig.address,
+            abi: erc20Abi,
+            functionName: 'transfer',
+            args: [config.treasuryAddress as `0x${string}`, parseUnits(wholeTokens.toString(), assetConfig.decimals)],
+            account: address as `0x${string}`,
+          }),
+          client.getGasPrice(),
+        ]);
+        return Number(formatUnits(gas * gasPrice, 18));
       } catch (err) {
         console.warn('[deposit] gas estimate failed, reserving 0.01 USDC', err);
         return 0.01;
       }
     },
-    [
-      assetConfig,
-      config.chainId,
-      config.name,
-      config.rpcEndpoint,
-      config.treasuryAddress,
-    ]
+    [address, assetConfig, config.treasuryAddress]
   );
 
   useEffect(() => {
     if (!isOpen || balanceState !== 'ready' || walletBalance <= 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- a fetch effect resets its result when its inputs go away
       setFeeState('loading');
       setGasFee(null);
       return;
@@ -436,6 +421,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   useEffect(() => {
     if (!isOpen || !address) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- a fetch effect resets its result when its inputs go away
       setPrecheck(null);
       return;
     }
@@ -538,11 +524,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       console.warn('[deposit] chain switch rejected or failed', err);
       setError(`Switch your wallet to ${config.name} and try again`);
     }
-  }, [config.chainId, config.name, connector, switchChainAsync]);
+  }, [config, connector, switchChainAsync]);
 
-  const resolveWalletProvider = useCallback(async (): Promise<ethers.Eip1193Provider> => {
+  const resolveWalletProvider = useCallback(async (): Promise<EIP1193Provider> => {
     if (connector) {
-      return (await connector.getProvider()) as ethers.Eip1193Provider;
+      return (await connector.getProvider()) as EIP1193Provider;
     }
     if (walletClient) {
       throw new Error('This wallet does not expose a signing provider. Reconnect and try again.');
@@ -566,7 +552,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       setAmount('');
       onClose();
     },
-    [asset, config.name, fetchBalance, onClose, onSuccess, toast]
+    [asset, config, fetchBalance, onClose, onSuccess, toast]
   );
 
   const isBusy = phase.kind === 'signing' || phase.kind === 'pending';
@@ -585,37 +571,33 @@ export const DepositModal: React.FC<DepositModalProps> = ({
     setPhase({ kind: 'signing' });
 
     try {
-      const provider = new ethers.BrowserProvider(await resolveWalletProvider());
+      const wallet = arcWalletClient(await resolveWalletProvider(), walletAddress as `0x${string}`);
 
-      if (Number((await provider.getNetwork()).chainId) !== config.chainId) {
+      if ((await wallet.getChainId()) !== config.chainId) {
         await switchToArc();
       }
-      const network = await provider.getNetwork();
-      if (Number(network.chainId) !== config.chainId) {
+      if ((await wallet.getChainId()) !== config.chainId) {
         throw new Error(`Switch your wallet to ${config.name} and try again`);
       }
 
-      const signer = await provider.getSigner();
-      const from = await signer.getAddress();
-      if (from.toLowerCase() !== walletAddress.toLowerCase()) {
+      const [from] = await wallet.getAddresses();
+      if (!from || from.toLowerCase() !== walletAddress.toLowerCase()) {
         throw new Error(
-          `The wallet asked to sign (${shortenAddress(from)}) is not the account you are signed in with (${shortenAddress(
+          `The wallet asked to sign (${shortenAddress(from ?? 'none')}) is not the account you are signed in with (${shortenAddress(
             walletAddress
           )}). Connect the right account first.`
         );
       }
 
-      const value = ethers.parseUnits(amount, assetConfig.decimals);
-      const tx = await new ethers.Contract(
-        assetConfig.address,
-        ERC20_ABI,
-        signer
-      ).transfer(config.treasuryAddress, value);
+      const txHash = await wallet.writeContract({
+        address: assetConfig.address,
+        abi: erc20Abi,
+        functionName: 'transfer',
+        args: [config.treasuryAddress as `0x${string}`, parseUnits(amount, assetConfig.decimals)],
+      });
+      if (!txHash) throw new Error('The wallet returned a transaction without a hash');
 
-      if (!tx.hash) throw new Error('The wallet returned a transaction without a hash');
-
-      submitted.current = { txHash: tx.hash, amount: depositAmount, userAddress: walletAddress };
-      const txHash = tx.hash;
+      submitted.current = { txHash, amount: depositAmount, userAddress: walletAddress };
       startVerification(txHash, {
         userAddress: walletAddress,
         amount: depositAmount,
@@ -684,7 +666,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         </a>
       )}
 
-      {config.chainId === 5042002 && <BridgeIn onArrived={() => void useStore.getState().refreshWalletBalance()} />}
+      {config.chainId === 5042002 && asset === 'USDC' && <Bridge direction="in" onArrived={() => void useStore.getState().refreshWalletBalance()} />}
 
       {ARC_ASSETS.length > 1 && (
         <Segmented

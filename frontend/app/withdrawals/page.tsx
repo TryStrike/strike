@@ -161,8 +161,8 @@ function HashLinks({ view }: { view: WithdrawalViewModel }) {
       <p className="text-[11px] text-subtle font-mono">
         {view.kind === 'pending'
           ? view.intentExpired
-            ? 'No transaction — the signature window elapsed before anyone could approve, so nothing was ever payable.'
-            : 'No transaction yet — the treasury pays out only after manual approval.'
+            ? 'No transaction — the signature expired before the payout ran, so nothing was ever payable.'
+            : 'No transaction yet — the payout is running.'
           : view.kind === 'rejected'
             ? 'No transaction — the request was not paid.'
             : 'No transaction hash recorded for this request.'}
@@ -234,7 +234,11 @@ export default function WithdrawalsPage() {
   const [signingInProgress, setSigningInProgress] = useState(false);
   const [statusFilter, setStatusFilter] = useState<FilterKey>('all');
   const [query, setQuery] = useState('');
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const id = Number(new URLSearchParams(window.location.search).get('request'));
+    return Number.isFinite(id) && id > 0 ? id : null;
+  });
 
   const proofCache = useRef<{ value: string; issuedAt: number; forAddress: string } | null>(null);
   const inFlight = useRef(false);
@@ -265,10 +269,9 @@ export default function WithdrawalsPage() {
           message,
         });
       } else if (connector) {
-        const provider = await connector.getProvider();
-        const { ethers } = await import('ethers');
-        const signer = await new ethers.BrowserProvider(provider as never).getSigner();
-        signature = await signer.signMessage(message);
+        const { arcWalletClient } = await import('@/lib/arc/client');
+        const provider = (await connector.getProvider()) as import('viem').EIP1193Provider;
+        signature = await arcWalletClient(provider, address as `0x${string}`).signMessage({ message });
       } else {
         throw new ReadAuthNeededError('no_signer');
       }
@@ -292,7 +295,7 @@ export default function WithdrawalsPage() {
       const offset = mode === 'more' ? rows.length : 0;
       const limit = mode === 'more' ? PAGE_SIZE : Math.max(PAGE_SIZE, rows.length);
 
-      const request = async (forceResign: boolean): Promise<{ res: Response; body: any }> => {
+      const request = async (forceResign: boolean): Promise<{ res: Response; body: { code?: string; withdrawals?: WithdrawalRow[]; paging?: Partial<Paging> } | null }> => {
         const proof = await signReadAuth(forceResign);
         const res = await fetch(`/api/withdrawals?limit=${limit}&offset=${offset}`, {
           method: 'GET',
@@ -354,6 +357,7 @@ export default function WithdrawalsPage() {
   }, [load]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loading the ledger on connect is a fetch effect
     if (isConnected && address) void load('refresh');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, isConnected]);
@@ -365,16 +369,6 @@ export default function WithdrawalsPage() {
     return () => clearInterval(int);
   }, [address, pollingActive, load]);
 
-  useEffect(() => {
-    const raw = new URLSearchParams(window.location.search).get('request');
-    const id = Number(raw);
-    if (Number.isFinite(id)) setExpandedId(id);
-  }, []);
-  useEffect(() => {
-    const raw = new URLSearchParams(window.location.search).get('request');
-    const id = Number(raw);
-    if (Number.isFinite(id) && rows.some((r) => r.id === id)) setExpandedId(id);
-  }, [rows]);
 
   const counts = useMemo(() => {
     const acc: Record<FilterKey, number> = { all: rows.length, open: 0, paid: 0, rejected: 0, review: 0, expired: 0 };
@@ -428,7 +422,7 @@ export default function WithdrawalsPage() {
           <div>
             <h1 className="text-4xl font-black tracking-tight uppercase">Withdrawal Status</h1>
             <p className="text-subtle text-sm mt-2">
-              Every request follows one path: signed intent → manual review → treasury payout on Arc.
+              Every request follows one path: signed intent → automatic checks → treasury payout on Arc.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -452,11 +446,11 @@ export default function WithdrawalsPage() {
         <div className="rounded-xl border border-line bg-surface p-4 text-xs text-muted leading-relaxed">
           <p>
             <span className="text-muted font-bold uppercase tracking-widest text-[10px]">How long things stay payable. </span>
-            Your signature is only acceptable for a {acceptWindowCopy}: an operator must approve the request within{' '}
-            {windowMinutes()} minutes of you signing, or the intent expires and nothing moves — your balance is
-            untouched and you can request again from the trade screen. Review itself is manual with no fixed queue
-            timer; a payout is shown here only once the ledger actually records it. Amounts below are exact USDC
-            (6 decimals) after your platform tier fee at request time.
+            Your signature is only acceptable for a {acceptWindowCopy}. Requests pay automatically within seconds:
+            the server re-checks the signature, your balance and the caps (50 USDC per request, 200 per day), then
+            the treasury sends USDC on Arc. A request that fails a check before any money moves is refused and your
+            balance is untouched. A payout is shown here only once the ledger records it. Amounts below are exact
+            USDC (6 decimals) after your platform tier fee at request time.
           </p>
         </div>
 
@@ -672,9 +666,8 @@ export default function WithdrawalsPage() {
         </div>
 
         <p className="text-[11px] text-faint leading-relaxed max-w-3xl">
-          Withdrawals are signed intents: you sign off-chain, an operator reviews the request within{' '}
-          {windowMinutes()} minutes, and the Strike treasury contract pays USDC on Arc. Review is manual — the code
-          has no fixed payout timer, so we never promise one. A transaction hash and explorer link appear only after
+          Withdrawals are signed intents: you sign off-chain, the server checks the signature, your balance and the
+          caps, and the Strike treasury contract pays USDC on Arc within seconds. A transaction hash and explorer link appear only after
           the ledger records a real chain hash. Refreshing this page only re-reads the ledger; it never re-submits
           your signature or creates a duplicate request.
         </p>

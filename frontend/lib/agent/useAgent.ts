@@ -56,7 +56,6 @@ export interface WorldAttempt {
   kind?: 'start' | 'checkpoint';
 }
 
-/** The IDKit step-up challenge a 401 carries when the server runs World ID through IDKit. */
 export interface WorldChallenge {
   attempt: string;
   world: {
@@ -73,7 +72,6 @@ export interface WorldChallenge {
 const START_VALID_MS = 5 * 60_000;
 const KEEP = 100;
 
-/** Byte for byte what `agent::start_message` in the Rust core renders. */
 function startMessage(wallet: string, limits: StartLimits, expires: number, nonce: string): string {
   return [
     'Strike agent session',
@@ -95,7 +93,6 @@ async function errorOf(res: Response): Promise<string> {
   return body?.error ?? `Request failed with ${res.status}`;
 }
 
-/** Reads a World attempt reply. 404 means it belongs to another browser or never existed. */
 export async function attemptOf(res: Response): Promise<WorldAttempt> {
   if (res.status === 404) {
     return {
@@ -108,7 +105,6 @@ export async function attemptOf(res: Response): Promise<WorldAttempt> {
   return res.json();
 }
 
-/** The trader's agent session, live from the decisions feed. */
 export function useAgent() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -120,14 +116,12 @@ export function useAgent() {
   const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
   const proofSession = useRef(false);
 
-  /** Takes a 401 step-up to the IDKit widget. `false` when the reply was anything else. */
   const toWorld = useCallback((res: Response, body: Partial<WorldChallenge> | null) => {
     if (res.status !== 401 || !body?.attempt || !body.world) return false;
     setChallenge({ attempt: body.attempt, world: body.world });
     return true;
   }, []);
 
-  /** The IDKit check settled. An approved start set the agent cookie, so the feed reconnects to pick it up. */
   const settle = useCallback((a: WorldAttempt) => {
     setChallenge(null);
     setBusy(false);
@@ -143,14 +137,12 @@ export function useAgent() {
       const next: Decision = JSON.parse((e as MessageEvent).data);
       setDecisions((all) => [next, ...all.filter((d) => d.id !== next.id)].slice(0, KEEP));
     });
-    // A 401 means no session yet. The browser closes and never retries it.
     source.onerror = () => {
       if (source.readyState === EventSource.CLOSED) source.close();
     };
     return () => source.close();
   }, [feedKey]);
 
-  // Placed bets open a proof, and reading a proof needs the balance session.
   useEffect(() => {
     if (proofSession.current || !decisions.some((d) => d.betId)) return;
     proofSession.current = true;
@@ -212,7 +204,6 @@ export function useAgent() {
     }
   }, []);
 
-  /** A paused YOLO agent resumes only after the same human steps up in World App. */
   const checkpoint = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -230,7 +221,6 @@ export function useAgent() {
     }
   }, [toWorld]);
 
-  /** Approve or reject a proposal. The feed carries the result to every tab. */
   const answer = useCallback(async (id: string, action: 'approve' | 'reject') => {
     setError(null);
     const res = await fetch(`/api/agent/decisions/${encodeURIComponent(id)}/${action}`, { method: 'POST' });

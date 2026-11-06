@@ -25,7 +25,6 @@ export interface Ticket {
 interface CopilotView {
   table: TableAction | null;
   chart: ChartAction | null;
-  /** A ticket the copilot filled. Open until the trader places a bet or dismisses it. */
   ticket: Ticket | null;
   closeTable: () => void;
   closeChart: () => void;
@@ -43,7 +42,6 @@ export const useCopilotView = create<CopilotView>((set) => ({
 
 let navigate: ((path: string) => void) | null = null;
 
-/** The launcher hands over the app router once it mounts. */
 export function setNavigator(push: (path: string) => void): void {
   navigate = push;
 }
@@ -62,7 +60,6 @@ const text = (action: Action, key: string): string => {
   return value;
 };
 
-/** The only actions the copilot may run. Anything else is refused. */
 const HANDLERS: Record<string, (action: Action) => void> = {
   show_table: (action) => {
     if (!Array.isArray(action.columns) || !Array.isArray(action.rows)) throw new Error('show_table action is malformed');

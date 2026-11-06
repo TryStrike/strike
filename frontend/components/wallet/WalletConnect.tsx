@@ -135,7 +135,6 @@ export const WalletConnect: React.FC = () => {
         <button
           type="button"
           onClick={() => {
-            // Never a dead button: a flow that lost track of itself is reset here.
             if (pending) dispatchConnectEvent({ type: 'RESET' });
             setConnectModalOpen(true);
           }}
@@ -189,7 +188,6 @@ export const WalletConnect: React.FC = () => {
 const MENU_LINKS = [
   ['/history', 'History'],
   ['/withdrawals', 'Withdrawals'],
-  ['/referrals', 'Referrals'],
 ] as const;
 
 function AccountMenu({

@@ -165,8 +165,8 @@ export const ReceiptDrawer: React.FC<{
 
         {isPending && receipt.kind === 'withdrawal' && (
           <p className="mt-5 text-[13px] leading-relaxed text-muted">
-            Your signed withdrawal request is queued for manual review. An operator approves it, then the
-            treasury pays USDC to your wallet on Arc — open the status timeline for the exact step it is on.
+            Your signed withdrawal request is being checked and paid automatically: the treasury sends USDC to
+            your wallet on Arc within seconds. Open the status timeline for the exact step it is on.
           </p>
         )}
         {isPending && receipt.kind !== 'withdrawal' && (
