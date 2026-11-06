@@ -29,7 +29,7 @@ interface BetProof {
   commit_tx: Hex | null;
   attestation: Attestation | null;
   status: ProofStatus;
-  strike_source: string;
+  checked: boolean;
 }
 
 type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; data: BetProof };
@@ -69,7 +69,6 @@ const Countdown: React.FC<{ target: number }> = ({ target }) => {
     return () => window.clearInterval(id);
   }, []);
   const left = Math.max(0, Math.ceil((target - now) / 1000));
-  if (left === 0) return <span>closed, commit lands within a minute</span>;
   return <span className="font-jet tabular-nums">{`${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`}</span>;
 };
 
@@ -80,7 +79,7 @@ export default function OnchainProof({ betId }: { betId: string }) {
     let cancelled = false;
     fetch(`/api/proofs/bet/${encodeURIComponent(betId)}`)
       .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`);
         return (await res.json()) as BetProof;
       })
       .then((data) => !cancelled && setState({ kind: 'ready', data }))
@@ -108,24 +107,30 @@ export default function OnchainProof({ betId }: { betId: string }) {
   );
 }
 
-const skippedRound = (d: BetProof) => d.strike_source !== 'binance';
+const skippedRound = (d: BetProof) => !d.checked;
 
 const StatusBadge: React.FC<{ data: BetProof }> = ({ data }) => {
+  if (data.status === 'mismatch') return <Badge tone="down">mismatch</Badge>;
   if (skippedRound(data)) return <Badge>not checked</Badge>;
   if (data.status === 'verified') return <Badge tone="up">verified</Badge>;
-  if (data.status === 'mismatch') return <Badge tone="down">mismatch</Badge>;
   return <Badge>{data.status}</Badge>;
 };
 
 const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
   const { epoch, status, attestation: att, commit_tx, house_root } = data;
+  const [now] = useState(Date.now);
   const epochLine = <span className="font-jet text-subtle">epoch {epoch}</span>;
+  const closeAt = data.end_ms + CLOSE_GRACE_MS;
+
+  if (status === 'pending' && now > closeAt) {
+    return <p className="mt-1.5 text-[11px] leading-relaxed text-muted">Not committed onchain yet for {epochLine}.</p>;
+  }
 
   if (status === 'pending') {
     return (
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
         Committed onchain after the epoch closes, about 10 min. {epochLine} closes in{' '}
-        <Countdown target={data.end_ms + CLOSE_GRACE_MS} />.
+        <Countdown target={closeAt} />.
       </p>
     );
   }
@@ -146,6 +151,19 @@ const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
     </p>
   );
 
+  if (status === 'mismatch') {
+    return (
+      <>
+        <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-down">
+          {att && att.mismatches > 0
+            ? `Chainlink found ${att.mismatches} ${att.mismatches === 1 ? 'mismatch' : 'mismatches'} in this epoch.`
+            : 'Chainlink recomputed a different root for this epoch than the house committed.'}
+        </p>
+        {links}
+      </>
+    );
+  }
+
   if (skippedRound(data)) {
     return (
       <>
@@ -154,19 +172,6 @@ const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
           {epochLine}.
         </p>
         {inclusion}
-        {links}
-      </>
-    );
-  }
-
-  if (status === 'mismatch') {
-    return (
-      <>
-        <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-down">
-          {att && att.mismatches > 0
-            ? `Chainlink found ${att.mismatches} mismatches in this epoch.`
-            : 'Chainlink recomputed a different root for this epoch than the house committed.'}
-        </p>
         {links}
       </>
     );

@@ -196,7 +196,13 @@ export function useWorldAttempt() {
     }
     fetch(`/api/world/attempts/${encodeURIComponent(id)}`)
       .then(async (res) => {
-        if (res.status === 404) return setAttempt({ status: 'unknown', reason: 'This approval link was already used', acr: null });
+        if (res.status === 404) {
+          return setAttempt({
+            status: 'unknown',
+            reason: 'Open the World App link in the browser where you started, then sign again',
+            acr: null,
+          });
+        }
         if (!res.ok) return setAttempt({ status: 'failed', reason: await errorOf(res), acr: null });
         setAttempt(await res.json());
       })

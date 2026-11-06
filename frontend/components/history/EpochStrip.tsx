@@ -17,6 +17,8 @@ interface EpochSummary {
 
 type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; epochs: EpochSummary[] };
 
+const count = (n: number | null, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 const TONE = { committed: 'neutral', verified: 'up', mismatch: 'down' } as const;
 
 export default function EpochStrip() {
@@ -26,7 +28,7 @@ export default function EpochStrip() {
     let cancelled = false;
     fetch('/api/proofs/epochs?limit=10')
       .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`);
         return (await res.json()) as EpochSummary[];
       })
       .then((epochs) => !cancelled && setState({ kind: 'ready', epochs }))
@@ -60,8 +62,8 @@ export default function EpochStrip() {
               </span>
               <span className="font-jet text-[11px] text-muted">
                 {e.status === 'committed'
-                  ? `${e.count} rounds · Chainlink check pending`
-                  : `${e.count} rounds · ${e.checked} checked · ${e.mismatches} mismatches · ${e.skipped} skipped · solvency ${solvencyLabel(e.solvency_bps)}`}
+                  ? `${count(e.count, 'round', 'rounds')} · Chainlink check pending`
+                  : `${count(e.count, 'round', 'rounds')} · ${e.checked} checked · ${count(e.mismatches, 'mismatch', 'mismatches')} · ${e.skipped} skipped · solvency ${solvencyLabel(e.solvency_bps)}`}
               </span>
               <TxLink hash={e.commit_tx} label="commit" />
             </li>
