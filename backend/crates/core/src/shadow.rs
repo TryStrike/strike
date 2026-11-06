@@ -12,6 +12,7 @@ use rust_decimal::prelude::ToPrimitive;
 use crate::agent::{self, Signal};
 use crate::bets::now_ms;
 use crate::db;
+use crate::edge;
 use crate::jev::{self, Gate, Proposal};
 use crate::settlement::{binomo_multiplier, end_tick, fixed_price};
 use crate::ticks;
@@ -32,6 +33,7 @@ struct Observed {
     move_pct: f64,
     range_share: f64,
     range_pct: f64,
+    model_p: Option<f64>,
 }
 
 /// Holds one paper round per asset at a time, like the agent's one open bet.
@@ -66,6 +68,7 @@ pub async fn run() {
                 move_pct,
                 range_share,
                 range_pct,
+                model_p: edge::win_chance(asset, direction, now),
             };
             tokio::spawn(async move {
                 if let Err(why) = settle_on_paper(observed).await {
@@ -114,8 +117,8 @@ async fn settle_on_paper(o: Observed) -> Result<(), String> {
         .write(move |conn| {
             conn.execute(
                 "INSERT INTO signal_shadow (id, asset, signal_at, direction, move_pct, range_share, \
-                 range_pct, signal_price, strike, jev_status, jev_score, jev_needed, jev_ms, end_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 range_pct, signal_price, strike, jev_status, jev_score, jev_needed, jev_ms, end_at, model_p) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     row,
                     o.asset,
@@ -131,6 +134,7 @@ async fn settle_on_paper(o: Observed) -> Result<(), String> {
                     needed,
                     jev_ms,
                     end_ms * 1_000,
+                    o.model_p,
                 ],
             )?;
             Ok(())

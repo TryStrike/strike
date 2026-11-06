@@ -159,6 +159,7 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("signal_shadow", "jev_ms", "bigint"),
     ("signal_shadow", "end_at", TS),
     ("signal_shadow", "outcome", "text"),
+    ("signal_shadow", "model_p", "double precision"),
     ("arkiv_seals", "bet_id", "text"),
     ("arkiv_seals", "tx", "text"),
     ("arkiv_seals", "sent_at", TS),

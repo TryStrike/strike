@@ -39,6 +39,8 @@ const MINUTES = [
 type Limits = Pick<StartLimits, "mode" | "minutes">;
 type Amount = "budget" | "maxPerTrade" | "stopLoss";
 const AMOUNT_INPUT = /^\d*\.?\d*$/;
+/** `stake_floor` in the Rust agent. A smaller limit could never place a trade. */
+const MIN_AMOUNT = 0.1;
 
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
@@ -92,6 +94,9 @@ export function AgentPanel() {
   const budget = Number(amounts.budget);
   const maxPerTrade = Number(amounts.maxPerTrade);
   const stopLoss = Number(amounts.stopLoss);
+  const tooSmall = [budget, maxPerTrade, stopLoss].some(
+    (amount) => !(amount >= MIN_AMOUNT),
+  );
 
   const checks = (
     <>
@@ -237,15 +242,19 @@ export function AgentPanel() {
         </p>
       )}
 
+      {tooSmall && (
+        <p className="-mt-3 text-xs text-down">
+          Budget, per trade and stop-loss need at least {MIN_AMOUNT} USDC each.
+        </p>
+      )}
+
       <Button
         size="lg"
         onClick={() => {
           setWorld(null);
           start({ ...limits, budget, maxPerTrade, stopLoss, asset });
         }}
-        disabled={
-          busy || !address || budget <= 0 || maxPerTrade <= 0 || stopLoss <= 0
-        }
+        disabled={busy || !address || tooSmall}
       >
         <Play size={18} weight="fill" />{" "}
         {!address

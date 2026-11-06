@@ -172,6 +172,8 @@ const MIGRATIONS: &[&str] = &[
     // 13: where each committed epoch is archived: its Swarm bundle and its Arkiv entity.
     "ALTER TABLE round_commits ADD COLUMN swarm_ref TEXT;
      ALTER TABLE round_commits ADD COLUMN arkiv_key TEXT;",
+    // 14: the paper model's win chance for each signal.
+    "ALTER TABLE signal_shadow ADD COLUMN model_p REAL;",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

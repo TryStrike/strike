@@ -21,6 +21,7 @@ use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::config;
+use crate::edge;
 use crate::prices::{self, binance_symbol};
 
 const MAX_TRADE_AGE_MS: i64 = 1_000;
@@ -65,14 +66,25 @@ fn perp_url() -> String {
     )
 }
 
-/// `(asset, price, traded_at_ms)` from one stream frame.
-fn parse_trade(frame: &str) -> Option<(&'static str, f64, i64)> {
+#[derive(Debug, PartialEq)]
+struct Trade {
+    asset: &'static str,
+    price: f64,
+    qty: f64,
+    taker_buy: bool,
+    traded_at: i64,
+}
+
+fn parse_trade(frame: &str) -> Option<Trade> {
     let value: Value = serde_json::from_str(frame).ok()?;
     let trade = value.get("data")?;
-    let asset = prices::binance_asset(trade.get("s")?.as_str()?)?;
-    let price = trade.get("p")?.as_str()?.parse().ok()?;
-    let traded_at = trade.get("T")?.as_i64()?;
-    Some((asset, price, traded_at))
+    Some(Trade {
+        asset: prices::binance_asset(trade.get("s")?.as_str()?)?,
+        price: trade.get("p")?.as_str()?.parse().ok()?,
+        qty: trade.get("q")?.as_str()?.parse().ok()?,
+        taker_buy: !trade.get("m")?.as_bool()?,
+        traded_at: trade.get("T")?.as_i64()?,
+    })
 }
 
 fn is_backlog(traded_at: i64, now_ms: i64) -> bool {
@@ -102,16 +114,23 @@ pub fn covers(asset: &str, now_ms: i64) -> bool {
 fn on_frame(frame: &str, frames: &AtomicI64) {
     let now = prices::now_millis();
     frames.store(now, Ordering::Relaxed);
-    let Some((asset, price, traded_at)) = parse_trade(frame) else {
+    let Some(trade) = parse_trade(frame) else {
         return;
     };
-    if is_backlog(traded_at, now) {
+    if is_backlog(trade.traded_at, now) {
         return;
     }
     if let Ok(mut trades) = LAST_TRADE_MS.lock() {
-        trades.insert(asset, now);
+        trades.insert(trade.asset, now);
     }
-    prices::record_trade(asset, price, now);
+    prices::record_trade(trade.asset, trade.price, now);
+    edge::record_trade(
+        trade.asset,
+        trade.price,
+        trade.qty,
+        trade.taker_buy,
+        trade.traded_at,
+    );
 }
 
 /// One connection, until it fails or reaches [`MAX_SESSION`].
@@ -121,6 +140,9 @@ async fn session(url: &str, frames: &AtomicI64) -> Result<(), String> {
             .await
             .map_err(|_| "connect timed out".to_string())?
             .map_err(|err| format!("connect: {err}"))?;
+    if std::ptr::eq(frames, &SPOT_FRAME_MS) {
+        edge::reset();
+    }
     let deadline = tokio::time::Instant::now() + MAX_SESSION;
     loop {
         let read = tokio::time::timeout_at(
@@ -173,7 +195,13 @@ mod tests {
     fn a_stream_frame_becomes_an_asset_price_and_exchange_time() {
         assert_eq!(
             parse_trade(TRADE),
-            Some(("BTC", 67123.45, 1_700_000_000_120))
+            Some(Trade {
+                asset: "BTC",
+                price: 67123.45,
+                qty: 0.1,
+                taker_buy: false,
+                traded_at: 1_700_000_000_120,
+            })
         );
     }
 

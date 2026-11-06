@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { Copy, ShieldCheck } from "@phosphor-icons/react";
 import { useStore } from "@/lib/store";
+import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
 import { Modal } from "@/components/ui/Modal";
 import dynamic from "next/dynamic";
 
@@ -357,10 +358,13 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
     if (!wallet || requestedRef.current) return;
     requestedRef.current = true;
     let cancelled = false;
-    fetch(
-      `/api/bets/${encodeURIComponent(bet.betId)}?wallet=${encodeURIComponent(wallet)}`,
-      { credentials: "include" },
-    )
+    ensureBalanceSession()
+      .then(() =>
+        fetch(
+          `/api/bets/${encodeURIComponent(bet.betId)}?wallet=${encodeURIComponent(wallet)}`,
+          { credentials: "include" },
+        ),
+      )
       .then((res) =>
         res.ok ? res.json() : Promise.reject(new Error(`status ${res.status}`)),
       )
@@ -371,6 +375,7 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
       })
       .catch((err) => {
         console.error("[proof] settlement proof fetch failed", bet.betId, err);
+        requestedRef.current = false;
         if (!cancelled) setServerState("failed");
       });
     return () => {

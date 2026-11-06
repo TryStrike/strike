@@ -159,6 +159,12 @@ pub fn check_start(t: &StartTerms, now_ms: i64) -> Result<(), Rejection> {
                 &format!("{name} must be a positive USDC amount"),
             ));
         }
+        if value < stake_floor() {
+            return Err(refuse(
+                400,
+                &format!("{name} must be at least {} USDC", stake_floor().normalize()),
+            ));
+        }
     }
     let ceiling = |name: &str, max: Decimal| {
         refuse(
@@ -726,7 +732,7 @@ pub enum Reserve {
     Held(Decimal),
     Blocked,
     Stop(&'static str),
-    /// The proposal was answered or expired before this approve got to it.
+    /// The session stopped, or the proposal was answered or expired, first.
     Gone,
 }
 
@@ -780,6 +786,9 @@ pub async fn reserve(
     let cap = config().agent_max_open_stake;
     db.write(move |conn| {
         let session = load_session(conn, &session_id)?;
+        if session.status != "running" {
+            return Ok(Reserve::Gone);
+        }
         if now_ms >= session.ends_at_ms {
             return Ok(Reserve::Stop(TIME_UP));
         }
@@ -816,7 +825,8 @@ pub async fn reserve(
     .await
 }
 
-/// A normal mode proposal, waiting for the trader until `expires_ms`.
+/// A normal mode proposal, waiting for the trader until `expires_ms`. `None`
+/// when the session stopped first.
 pub async fn record_proposal(
     db: &Db,
     session_id: &str,
@@ -824,7 +834,7 @@ pub async fn record_proposal(
     reason: &str,
     confidence: Option<f64>,
     now_ms: i64,
-) -> ApiResult<Decision> {
+) -> ApiResult<Option<Decision>> {
     let confidence = confidence.map(confidence_fixed);
     let Proposed {
         direction,
@@ -840,6 +850,9 @@ pub async fn record_proposal(
     );
     let stake = fixed(stake)?;
     db.write(move |conn| {
+        if load_session(conn, &session_id)?.status != "running" {
+            return Ok(None);
+        }
         conn.execute(
             "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, expires_at, confidence, trace) \
              VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting', ?6, ?7, ?8, ?9)",
@@ -855,7 +868,7 @@ pub async fn record_proposal(
                 trace
             ],
         )?;
-        load_decision(conn, &id)
+        load_decision(conn, &id).map(Some)
     })
     .await
 }
@@ -971,6 +984,23 @@ pub async fn release(
     .await
 }
 
+/// Settled rounds of stopped sessions whose result isn't copied yet, as
+/// `(decision id, session id)`. A session's own task may still be following one.
+pub async fn unrecorded_results(db: &Db) -> ApiResult<Vec<(String, String)>> {
+    db.read(|conn| {
+        let mut statement = conn.prepare_cached(
+            "SELECT d.id, d.session_id FROM agent_decisions d \
+             JOIN agent_sessions s ON s.id = d.session_id \
+             JOIN bet_rounds r ON r.bet_id = d.bet_id \
+             WHERE d.verdict = 'placed' AND d.result IS NULL \
+               AND r.outcome IS NOT NULL AND s.status = 'stopped'",
+        )?;
+        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    })
+    .await
+}
+
 /// Copies a settled round's outcome onto its decision and the session's P&L,
 /// once. P&L is payout minus stake: a win's profit, a loss or withheld round's
 /// whole stake, zero for a tie or refund. `None` while the round is open.
@@ -1082,6 +1112,38 @@ mod tests {
         for mode in ["normal", "yolo"] {
             assert_eq!(stake(&session(mode), Decimal::ZERO), Ok(Decimal::new(2, 1)));
         }
+    }
+
+    #[test]
+    fn limits_too_small_to_trade_are_refused_at_the_start() {
+        let now = terms().expires_ms - 60_000;
+        let small = Decimal::new(9, 2);
+        for t in [
+            StartTerms {
+                budget: small,
+                max_per_trade: small,
+                stop_loss: small,
+                ..terms()
+            },
+            StartTerms {
+                max_per_trade: small,
+                ..terms()
+            },
+            StartTerms {
+                stop_loss: small,
+                ..terms()
+            },
+        ] {
+            assert_eq!(check_start(&t, now).unwrap_err().0, 400, "{t:?}");
+        }
+        let floor = stake_floor();
+        let t = StartTerms {
+            budget: floor,
+            max_per_trade: floor,
+            stop_loss: floor,
+            ..terms()
+        };
+        assert!(check_start(&t, now).is_ok());
     }
 
     #[test]
