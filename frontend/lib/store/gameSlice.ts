@@ -399,7 +399,8 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         selectedCurrency,
       });
 
-      const response = await fetch('/api/balance/bet', {
+      // Same betRequestId, so a resend after re-signing can never place it twice.
+      const send = () => fetch('/api/balance/bet', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -427,6 +428,12 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
           },
         }),
       });
+      let response = await send();
+      if (response.status === 401) {
+        const { ensureBalanceSession } = await import('@/lib/balance/balanceClientHeaders');
+        await ensureBalanceSession();
+        response = await send();
+      }
 
       if (!response.ok) {
         const errorData = await response.json();

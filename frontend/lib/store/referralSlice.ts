@@ -1,4 +1,5 @@
 import { StateCreator } from 'zustand';
+import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
 
 const PENDING_KEY = 'referred_by';
 
@@ -71,6 +72,7 @@ async function postRegistration(
     if (key) claimAttempts += 1;
 
     try {
+        await ensureBalanceSession();
         const res = await fetch('/api/referral', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -140,6 +142,7 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
 
     fetchReferralInfo: async (address: string) => {
         try {
+            await ensureBalanceSession();
             const res = await fetch(`/api/referral?address=${encodeURIComponent(address)}`);
             if (!res.ok) {
                 console.warn('fetchReferralInfo: API returned', res.status);
@@ -201,6 +204,7 @@ export const createReferralSlice: StateCreator<ReferralState> = (set, get) => ({
 
     fetchReferralFriends: async (address: string) => {
         try {
+            await ensureBalanceSession();
             const res = await fetch(
                 `/api/referral?friends=1&address=${encodeURIComponent(address)}`
             );
@@ -266,6 +270,3 @@ function normaliseTotals(raw: unknown): ReferralTotals | null {
     };
 }
 
-export function __resetAcceptedClaimsForTests(): void {
-    acceptedClaims.clear();
-}

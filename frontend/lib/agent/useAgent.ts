@@ -205,6 +205,8 @@ export function useAgent() {
       const res = await fetch('/api/agent/stop', { method: 'POST' });
       if (res.ok) setSession((await res.json()).session);
       else setError(await errorOf(res));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Stop failed');
     } finally {
       setBusy(false);
     }
@@ -243,25 +245,3 @@ export function useAgent() {
   return { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle };
 }
 
-/** Outcome of the World ID check the callback redirected back with as `?world=<attempt>`. Read once, never polled. */
-export function useWorldAttempt() {
-  const [attempt, setAttempt] = useState<WorldAttempt | null>(null);
-
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const id = url.searchParams.get('world');
-    if (!id) return;
-    url.searchParams.delete('world');
-    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
-    if (id === 'unknown') {
-      setAttempt({ status: 'unknown', reason: 'This approval link was already used', acr: null });
-      return;
-    }
-    fetch(`/api/world/attempts/${encodeURIComponent(id)}`)
-      .then(attemptOf)
-      .then(setAttempt)
-      .catch((e) => setAttempt({ status: 'failed', reason: `Could not read the human check: ${e.message}`, acr: null }));
-  }, []);
-
-  return [attempt, setAttempt] as const;
-}

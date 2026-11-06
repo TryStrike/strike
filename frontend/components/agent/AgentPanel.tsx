@@ -8,7 +8,6 @@ import { useStore } from '@/lib/store';
 import { Badge, Button, Field, Label, Segmented, cx } from '@/components/ui/kit';
 import {
   useAgent,
-  useWorldAttempt,
   type AgentSession,
   type Decision,
   type StartLimits,
@@ -33,7 +32,7 @@ export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
   const { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle } = useAgent();
-  const [world, setWorld] = useWorldAttempt();
+  const [world, setWorld] = useState<WorldAttempt | null>(null);
   const [limits, setLimits] = useState<Limits>({ mode: 'normal', budget: 20, maxPerTrade: 2, stopLoss: 5, minutes: 15 });
   const running = session?.status === 'running';
   const newest = decisions.reduce<Decision | undefined>((a, d) => (!a || d.createdAt > a.createdAt ? d : a), undefined);
