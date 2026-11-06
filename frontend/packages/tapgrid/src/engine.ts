@@ -177,7 +177,7 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
           }
           if (!label) continue;
           ctx.fillStyle = label.accent ? colors.accentText : colors.cellText;
-          ctx.globalAlpha = cell.state === 'locked' ? 0.4 : 1;
+          ctx.globalAlpha = label.cold ? 0.2 : cell.state === 'locked' ? 0.4 : 1;
           const labelX = s.x(cell.time) + columnPx / 2;
           // The price axis owns the right edge; a multiplier there would print over it.
           if (labelX > width - AXIS_GUTTER_PX) continue;

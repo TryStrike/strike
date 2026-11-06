@@ -24,6 +24,7 @@ import {
 } from "./chartOverlays";
 import type { OverlayPalette } from "./chartOverlays";
 import { useToast } from "@/lib/hooks/useToast";
+import { bandMultiplierCeiling } from "@/lib/markets/bandCeiling";
 import {
   CaretDown,
   X,
@@ -54,6 +55,8 @@ interface BoxQuote {
   asset: AssetType;
   multiplier: string;
   isUp: boolean;
+  cold?: boolean;
+  boosted?: boolean;
 }
 
 function readPalette(el: HTMLElement): {
@@ -921,6 +924,7 @@ export const LiveChart = React.memo(function LiveChart({
   const marketClosed = useStore((state) =>
     state.closedAssets.includes(state.selectedAsset),
   );
+  const quiet = useStore((state) => !!state.markets[state.selectedAsset]?.quiet);
   const { mode: feedMode, connected: streamLive } = useStore(
     (state) => state.priceFeed,
   );
@@ -1165,8 +1169,11 @@ export const LiveChart = React.memo(function LiveChart({
         hasBlitzAccess,
         blitzMultiplier,
         closedAssets,
+        markets,
+        serverOffsetMs,
       } = useStore.getState();
       if (closedAssets.includes(asset)) return null;
+      const market = markets[asset];
       const center = (cell.top + cell.bottom) / 2;
       const priceRange = scales.maxPrice - scales.minPrice;
       const inRow = price <= cell.top && price >= cell.bottom;
@@ -1185,15 +1192,37 @@ export const LiveChart = React.memo(function LiveChart({
         0;
       const boosted =
         isBlitzActive && hasBlitzAccess && (base > 2.2 || isLuckyDiagonal);
-      const multiplier = Math.min(
+      const quote = Math.min(
         Math.min(base + timeBonus, 10) * (boosted ? blitzMultiplier : 1),
         20,
-      ).toFixed(2);
+      );
+      // Never show more than the server will accept (2% margin for clock drift).
+      const ceiling = market
+        ? bandMultiplierCeiling(
+            price,
+            cell.top,
+            cell.bottom,
+            market.range,
+            market.windowMs,
+            cell.time - (Date.now() + serverOffsetMs),
+            boosted ? blitzMultiplier : 1,
+          )
+        : Infinity;
+      const shown = Math.min(quote, Math.floor(ceiling * 0.98 * 100) / 100);
+      const cold = !!market?.quiet || !(shown >= 1.01);
+      if (cold) {
+        return {
+          text: "--",
+          cold: true,
+          value: { asset, multiplier: "0", isUp: center > price, cold: true },
+        };
+      }
+      const multiplier = shown.toFixed(2);
 
       return {
         text: `${multiplier}x`,
         accent: boosted,
-        value: { asset, multiplier, isUp: center > price },
+        value: { asset, multiplier, isUp: center > price, boosted },
       };
     },
     [timeframeSeconds],
@@ -1205,6 +1234,10 @@ export const LiveChart = React.memo(function LiveChart({
       return;
     }
     const quote = label?.value as BoxQuote | undefined;
+    if (quote?.cold) {
+      toast.info("Market is quiet. Pick another cell or asset.");
+      return;
+    }
     if (
       !quote ||
       quote.asset !== useStore.getState().selectedAsset ||
@@ -1230,6 +1263,7 @@ export const LiveChart = React.memo(function LiveChart({
           priceBottom: cell.bottom,
           startTime: cell.time,
           endTime: cell.time,
+          blitz: quote.boosted,
         },
       );
     } catch (error) {
@@ -1336,6 +1370,14 @@ export const LiveChart = React.memo(function LiveChart({
             onReady={setChart}
             style={{ cursor: isBox ? "pointer" : "default" }}
           />
+        </div>
+      )}
+
+      {isBox && quiet && (
+        <div className="absolute bottom-8 right-4 z-40 pointer-events-none">
+          <div className={`${OVERLAY} px-3 py-1.5 text-[11px] text-subtle`}>
+            Market is quiet
+          </div>
         </div>
       )}
 
