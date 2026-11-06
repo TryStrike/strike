@@ -13,7 +13,7 @@ export default function AgentPage() {
         <div className="relative min-h-[420px] flex-1 lg:min-h-0">
           <LiveChart betAmount="1" />
         </div>
-        <aside className="w-full shrink-0 overflow-y-auto border-t border-line lg:w-[400px] lg:border-l lg:border-t-0">
+        <aside className="h-[80vh] w-full shrink-0 overflow-hidden border-t border-line lg:h-auto lg:w-[440px] lg:border-l lg:border-t-0">
           <AgentPanel />
         </aside>
       </div>

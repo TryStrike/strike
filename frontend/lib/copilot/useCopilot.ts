@@ -1,6 +1,4 @@
-'use client';
-
-import { useCallback, useState } from 'react';
+import { create } from 'zustand';
 import { dispatch, useCopilotView } from './actions';
 
 export interface ToolStep {
@@ -12,41 +10,41 @@ export interface ToolStep {
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** What the stream shows when it isn't what the model was asked. */
+  label?: string;
+  at: number;
   steps?: ToolStep[];
 }
 
 const KEEP = 10;
 
 /** The last turns the server takes: at most 10, starting with the trader. */
-function history(messages: ChatMessage[]): ChatMessage[] {
+function history(messages: ChatMessage[]) {
   const recent = messages.filter((m) => m.content.trim()).slice(-KEEP);
   while (recent[0]?.role === 'assistant') recent.shift();
   return recent.map(({ role, content }) => ({ role, content }));
 }
 
-export function useCopilot() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+interface CopilotChat {
+  messages: ChatMessage[];
+  busy: boolean;
+  error: string | null;
+  send: (question: string, label?: string) => Promise<void>;
+  clear: () => void;
+}
 
-  const appendAnswer = (text: string) =>
-    setMessages((all) => {
-      const last = all[all.length - 1];
-      return [...all.slice(0, -1), { ...last, content: last.content + text }];
-    });
+export const useCopilot = create<CopilotChat>((set, get) => {
+  const onLast = (change: (last: ChatMessage) => ChatMessage) =>
+    set((s) => ({ messages: [...s.messages.slice(0, -1), change(s.messages[s.messages.length - 1])] }));
 
-  const appendStep = (step: ToolStep) =>
-    setMessages((all) => {
-      const last = all[all.length - 1];
-      return [...all.slice(0, -1), { ...last, steps: [...(last.steps ?? []), step] }];
-    });
-
-  const send = useCallback(
-    async (question: string) => {
-      const asked = [...messages, { role: 'user' as const, content: question }];
-      setMessages([...asked, { role: 'assistant', content: '' }]);
-      setBusy(true);
-      setError(null);
+  return {
+    messages: [],
+    busy: false,
+    error: null,
+    clear: () => set({ messages: [], error: null }),
+    send: async (question, label) => {
+      const asked = [...get().messages, { role: 'user' as const, content: question, label, at: Date.now() }];
+      set({ messages: [...asked, { role: 'assistant', content: '', at: Date.now() }], busy: true, error: null });
       try {
         const res = await fetch('/api/copilot', {
           method: 'POST',
@@ -55,7 +53,7 @@ export function useCopilot() {
         });
         if (!res.ok || !res.body) {
           const body = await res.json().catch(() => null);
-          setError(body?.error ?? `Copilot failed with ${res.status}`);
+          set({ error: body?.error ?? `Copilot failed with ${res.status}` });
           return;
         }
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -72,27 +70,22 @@ export function useCopilot() {
             const data = frame.match(/^data: (.*)$/m)?.[1];
             if (!event || !data) continue;
             const payload = JSON.parse(data);
-            if (event === 'text') appendAnswer(payload.text);
-            else if (event === 'tool') appendStep(payload);
+            if (event === 'text') onLast((last) => ({ ...last, content: last.content + payload.text }));
+            else if (event === 'tool') onLast((last) => ({ ...last, steps: [...(last.steps ?? []), payload] }));
             else if (event === 'action') {
               try {
                 dispatch(payload);
               } catch (e) {
-                setError(e instanceof Error ? e.message : 'Copilot action failed');
+                set({ error: e instanceof Error ? e.message : 'Copilot action failed' });
               }
-            }
-            else if (event === 'error') setError(payload.error);
+            } else if (event === 'error') set({ error: payload.error });
           }
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Copilot failed');
+        set({ error: e instanceof Error ? e.message : 'Copilot failed' });
       } finally {
-        setMessages((all) => all.filter((m) => m.content.trim() || m.steps?.length));
-        setBusy(false);
+        set((s) => ({ messages: s.messages.filter((m) => m.content.trim() || m.steps?.length), busy: false }));
       }
     },
-    [messages]
-  );
-
-  return { messages, busy, error, send };
-}
+  };
+});

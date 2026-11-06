@@ -5,40 +5,9 @@ import type { RpContext } from '@worldcoin/idkit';
 import { useAccount, useSignMessage } from 'wagmi';
 import { getArcConfig } from '@/lib/arc/config';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
+import { useAgentFeed, type Decision } from './agentFeed';
 
-export type Verdict = 'awaiting' | 'placed' | 'skipped' | 'blocked' | 'rejected';
-
-export interface AgentSession {
-  id: string;
-  wallet: string;
-  asset: string;
-  mode: 'normal' | 'yolo';
-  budget: number;
-  maxPerTrade: number;
-  stopLoss: number;
-  startsAt: number;
-  endsAt: number;
-  status: 'running' | 'stopped';
-  stoppedReason: string | null;
-  spent: number;
-  realizedPnl: number;
-}
-
-export interface Decision {
-  id: string;
-  sessionId: string;
-  createdAt: number;
-  direction: 'UP' | 'DOWN' | null;
-  stake: number | null;
-  verdict: Verdict;
-  reason: string;
-  skipCount: number;
-  confidence: number | null;
-  betId: string | null;
-  result: string | null;
-  pnl: number | null;
-  expiresAt: number | null;
-}
+export type { AgentSession, Decision } from './agentFeed';
 
 export interface StartLimits {
   asset: string;
@@ -71,7 +40,6 @@ export interface WorldChallenge {
 }
 
 const START_VALID_MS = 5 * 60_000;
-const KEEP = 100;
 
 /** Byte for byte what `agent::start_message` in the Rust core renders. */
 function startMessage(wallet: string, limits: StartLimits, expires: number, nonce: string): string {
@@ -112,11 +80,9 @@ export async function attemptOf(res: Response): Promise<WorldAttempt> {
 export function useAgent() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
-  const [session, setSession] = useState<AgentSession | null>(null);
-  const [decisions, setDecisions] = useState<Decision[]>([]);
+  const { session, decisions, connect, showSession, showDecision } = useAgentFeed();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [feedKey, setFeedKey] = useState(0);
   const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
   const proofSession = useRef(false);
 
@@ -131,24 +97,10 @@ export function useAgent() {
   const settle = useCallback((a: WorldAttempt) => {
     setChallenge(null);
     setBusy(false);
-    if (a.status !== 'approved') return;
-    if (a.kind === 'start') setDecisions([]);
-    setFeedKey((k) => k + 1);
-  }, []);
+    if (a.status === 'approved') connect(true);
+  }, [connect]);
 
-  useEffect(() => {
-    const source = new EventSource('/api/agent/decisions');
-    source.addEventListener('session', (e) => setSession(JSON.parse((e as MessageEvent).data)));
-    source.addEventListener('decision', (e) => {
-      const next: Decision = JSON.parse((e as MessageEvent).data);
-      setDecisions((all) => [next, ...all.filter((d) => d.id !== next.id)].slice(0, KEEP));
-    });
-    // A 401 means no session yet. The browser closes and never retries it.
-    source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED) source.close();
-    };
-    return () => source.close();
-  }, [feedKey]);
+  useEffect(() => connect(), [connect]);
 
   // Placed bets open a proof, and reading a proof needs the balance session.
   useEffect(() => {
@@ -186,31 +138,16 @@ export function useAgent() {
           setError(body?.error ?? `Request failed with ${res.status}`);
           return;
         }
-        setSession((await res.json()).session);
-        setDecisions([]);
-        setFeedKey((k) => k + 1);
+        showSession((await res.json()).session);
+        connect(true);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Signing failed');
       } finally {
         if (!leaving) setBusy(false);
       }
     },
-    [address, signMessageAsync, toWorld]
+    [address, signMessageAsync, toWorld, showSession, connect]
   );
-
-  const stop = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/agent/stop', { method: 'POST' });
-      if (res.ok) setSession((await res.json()).session);
-      else setError(await errorOf(res));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Stop failed');
-    } finally {
-      setBusy(false);
-    }
-  }, []);
 
   /** A paused YOLO agent resumes only after the same human steps up in World App. */
   const checkpoint = useCallback(async () => {
@@ -239,9 +176,9 @@ export function useAgent() {
       return;
     }
     const { decision } = (await res.json()) as { decision: Decision };
-    setDecisions((all) => all.map((d) => (d.id === decision.id ? decision : d)));
-  }, []);
+    showDecision(decision);
+  }, [showDecision]);
 
-  return { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle };
+  return { session, decisions, error, busy, start, answer, checkpoint, challenge, settle };
 }
 
