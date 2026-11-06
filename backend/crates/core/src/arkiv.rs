@@ -8,7 +8,7 @@ use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use k256::ecdsa::SigningKey;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 use tokio::sync::Notify;
 
@@ -265,7 +265,7 @@ impl Arkiv {
                         [],
                         |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
                     )
-                    .ok())
+                    .optional()?)
             })
             .await?;
         match inflight {

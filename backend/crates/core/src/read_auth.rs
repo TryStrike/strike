@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::address::canonical;
 use crate::crypto::MAX_CLOCK_SKEW_MS;
-use crate::eth::recover_personal_signer;
+use crate::eth::verify_personal_signature;
 
 /// `WITHDRAWAL_READ_AUTH_HEADER`.
 pub const READ_AUTH_HEADER: &str = "x-strike-withdrawal-read-auth";
@@ -122,13 +122,20 @@ pub fn is_nonce(value: &str) -> bool {
 }
 
 /// `/^0x[0-9a-fA-F]{130}$/` — 65 bytes, either casing.
+/// A 65 byte EOA signature, or a longer smart account one (ERC-1271 or ERC-6492).
 pub fn is_signature(value: &str) -> bool {
     let hex = value.strip_prefix("0x").unwrap_or(value);
-    hex.len() == 130 && value.starts_with("0x") && hex.chars().all(|c| c.is_ascii_hexdigit())
+    value.starts_with("0x")
+        && (130..=8192).contains(&hex.len())
+        && hex.len().is_multiple_of(2)
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// `verifyWithdrawalReadAuth`.
-pub fn verify_read_auth(raw: Option<&str>, now_ms: i64) -> Result<ReadAuthProof, ReadAuthFailure> {
+pub async fn verify_read_auth(
+    raw: Option<&str>,
+    now_ms: i64,
+) -> Result<ReadAuthProof, ReadAuthFailure> {
     let proof = parse_read_auth_header(raw).ok_or(ReadAuthFailure::Malformed)?;
 
     let age_ms = now_ms - proof.issued_at as i64;
@@ -136,14 +143,14 @@ pub fn verify_read_auth(raw: Option<&str>, now_ms: i64) -> Result<ReadAuthProof,
         return Err(ReadAuthFailure::Stale);
     }
 
-    let recovered = recover_personal_signer(
-        &read_auth_message(&proof.address, proof.issued_at, &proof.nonce),
-        &proof.signature,
-    )
-    .ok_or(ReadAuthFailure::InvalidSignature)?;
-
-    if canonical(&recovered) != canonical(&proof.address) {
-        return Err(ReadAuthFailure::InvalidSignature);
+    let message = read_auth_message(&proof.address, proof.issued_at, &proof.nonce);
+    match verify_personal_signature(&proof.address, &message, &proof.signature).await {
+        Ok(true) => {}
+        Ok(false) => return Err(ReadAuthFailure::InvalidSignature),
+        Err(err) => {
+            tracing::error!("[read_auth] could not check the signature: {err}");
+            return Err(ReadAuthFailure::InvalidSignature);
+        }
     }
 
     Ok(proof)
@@ -215,17 +222,19 @@ mod tests {
         assert!(!read_auth_message("0xAbC", 5.0, "beef").contains("5.0"));
     }
 
-    #[test]
-    fn a_proof_recovering_its_own_address_verifies() {
+    #[tokio::test]
+    async fn a_proof_recovering_its_own_address_verifies() {
         let key = signer();
         let (raw, address) = valid(&key, NOW);
-        let proof = verify_read_auth(Some(&raw), NOW).expect("valid proof");
+        let proof = verify_read_auth(Some(&raw), NOW)
+            .await
+            .expect("valid proof");
         assert_eq!(proof.address, address);
         assert_eq!(scope_key(&proof), canonical(&address));
     }
 
-    #[test]
-    fn junk_headers_are_malformed_rather_than_a_panic() {
+    #[tokio::test]
+    async fn junk_headers_are_malformed_rather_than_a_panic() {
         for raw in [
             None,
             Some(""),
@@ -235,7 +244,7 @@ mod tests {
             Some("{\"address\":\"0x1\"}"),
         ] {
             assert_eq!(
-                verify_read_auth(raw, NOW).unwrap_err(),
+                verify_read_auth(raw, NOW).await.unwrap_err(),
                 ReadAuthFailure::Malformed,
                 "{raw:?}"
             );
@@ -273,30 +282,38 @@ mod tests {
         .is_none());
     }
 
-    #[test]
-    fn an_expired_or_future_proof_is_stale() {
+    #[tokio::test]
+    async fn an_expired_or_future_proof_is_stale() {
         let key = signer();
         let (raw, _) = valid(&key, NOW);
         // `ageMs > MAX_AGE`: the boundary itself is still accepted.
         assert_eq!(
-            verify_read_auth(Some(&raw), NOW + READ_AUTH_MAX_AGE_MS).map(|_| ()),
+            verify_read_auth(Some(&raw), NOW + READ_AUTH_MAX_AGE_MS)
+                .await
+                .map(|_| ()),
             Ok(()),
             "exactly ten minutes old is the last valid instant"
         );
         assert_eq!(
-            verify_read_auth(Some(&raw), NOW + READ_AUTH_MAX_AGE_MS + 1).unwrap_err(),
+            verify_read_auth(Some(&raw), NOW + READ_AUTH_MAX_AGE_MS + 1)
+                .await
+                .unwrap_err(),
             ReadAuthFailure::Stale
         );
         // Clock skew tolerance, then hard rejection.
-        assert!(verify_read_auth(Some(&raw), NOW - MAX_CLOCK_SKEW_MS).is_ok());
+        assert!(verify_read_auth(Some(&raw), NOW - MAX_CLOCK_SKEW_MS)
+            .await
+            .is_ok());
         assert_eq!(
-            verify_read_auth(Some(&raw), NOW - MAX_CLOCK_SKEW_MS - 1).unwrap_err(),
+            verify_read_auth(Some(&raw), NOW - MAX_CLOCK_SKEW_MS - 1)
+                .await
+                .unwrap_err(),
             ReadAuthFailure::Stale
         );
     }
 
-    #[test]
-    fn a_proof_signed_by_someone_else_is_rejected_even_with_a_plausible_address() {
+    #[tokio::test]
+    async fn a_proof_signed_by_someone_else_is_rejected_even_with_a_plausible_address() {
         // The invariant: the ledger is scoped to the recovered signer, so a
         // valid signature can never be pointed at a different wallet.
         let attacker = SigningKey::from_slice(&[0x22u8; 32]).unwrap();
@@ -309,7 +326,7 @@ mod tests {
             &sign(&attacker, &message),
         );
         assert_eq!(
-            verify_read_auth(Some(&raw), NOW).unwrap_err(),
+            verify_read_auth(Some(&raw), NOW).await.unwrap_err(),
             ReadAuthFailure::InvalidSignature
         );
 
@@ -317,7 +334,7 @@ mod tests {
         let (good, _) = valid(&signer(), NOW);
         let tampered = good.replace("deadbeef01", "cafebabeff");
         assert_eq!(
-            verify_read_auth(Some(&tampered), NOW).unwrap_err(),
+            verify_read_auth(Some(&tampered), NOW).await.unwrap_err(),
             ReadAuthFailure::InvalidSignature
         );
     }

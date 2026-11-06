@@ -77,8 +77,7 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
         Ok(terms) => terms,
         Err(rejection) => return Ok(reject(rejection)),
     };
-    let signer = eth::recover_personal_signer(message, signature);
-    if !signer.is_some_and(|s| s.eq_ignore_ascii_case(&terms.wallet)) {
+    if !eth::verify_personal_signature(&terms.wallet, message, signature).await? {
         return Err(ApiError::unauthorized(
             "Signature does not match the wallet in the message",
         ));
@@ -216,11 +215,23 @@ fn decision_reply(decision: &agent::Decision) -> Response {
 /// Places a waiting proposal after re-running the signal and every limit. The
 /// session's approval lock makes a repeat wait for the first answer and get it.
 async fn approve(Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    answer_proposal(&id, &headers, true).await
+    answer_in_task(id, headers, true).await
 }
 
 async fn reject_proposal(Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    answer_proposal(&id, &headers, false).await
+    answer_in_task(id, headers, false).await
+}
+
+/// Its own task: a client hanging up mid-placement must not leave the stake held
+/// with no bet behind it.
+async fn answer_in_task(
+    id: String,
+    headers: HeaderMap,
+    approve: bool,
+) -> Result<Response, ApiError> {
+    tokio::spawn(async move { answer_proposal(&id, &headers, approve).await })
+        .await
+        .map_err(|panic| ApiError::Other(format!("proposal answer task failed: {panic}")))?
 }
 
 async fn answer_proposal(

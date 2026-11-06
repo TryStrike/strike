@@ -179,7 +179,8 @@ pub async fn verify_proof(
         tracing::warn!("[world] verify endpoint said {status} {code}");
         return Err(Failure::Rejected(code.to_string()));
     }
-    grant_from(&reply, presence(result), app, attempt).map_err(Failure::Invalid)
+    // The tier comes from World's answer, never from the flag the browser posted.
+    grant_from(&reply, presence(&reply), app, attempt).map_err(Failure::Invalid)
 }
 
 /// The human in World's verify answer: the first proof it accepted.

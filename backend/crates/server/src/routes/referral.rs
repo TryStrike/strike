@@ -42,7 +42,7 @@ use strike_core::referral::{
     LEADERBOARD_SCAN_CAP, MAX_ROWS_PER_QUERY,
 };
 
-use crate::http::{json_truthy, require_balance_session};
+use crate::http::{json_truthy, require_balance_session, require_wallet_session};
 use crate::sql;
 
 /// `.slice(0, 20)` in the TS: the scan reads `LEADERBOARD_SCAN_CAP` rows so the
@@ -65,8 +65,12 @@ async fn get_handler(
         return respond(leaderboard().await);
     }
 
-    // Everything below is first-party only.
-    if let Err(err) = require_balance_session(&headers) {
+    // Everything below is first-party only, and only for the signed-in wallet.
+    let address = params
+        .get("address")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if let Err(err) = require_wallet_session(&headers, address) {
         return err.into_response();
     }
 
@@ -256,6 +260,10 @@ async fn post_handler(headers: HeaderMap, raw: Bytes) -> Response {
         }
     };
 
+    if let Err(err) = require_wallet_session(&headers, body["address"].as_str().unwrap_or_default())
+    {
+        return err.into_response();
+    }
     match register(&body).await {
         Ok(response) => axum::Json(response).into_response(),
         Err(err) => err.into_response(),

@@ -86,7 +86,7 @@ async fn list(headers: HeaderMap, Query(query): Query<Paging>) -> Response {
 
 async fn fetch(headers: &HeaderMap, query: Paging) -> ApiResult<Response> {
     let raw = http::header_str(headers, READ_AUTH_HEADER);
-    let proof = match read_auth::verify_read_auth(raw.as_deref(), now_ms()) {
+    let proof = match read_auth::verify_read_auth(raw.as_deref(), now_ms()).await {
         Ok(proof) => proof,
         Err(failure) => {
             return Ok(http::json_status(

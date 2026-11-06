@@ -424,6 +424,7 @@ pub fn recover_personal_signer(message: &str, signature: &str) -> Option<String>
 /// EOA signature, a deployed smart account (ERC-1271) and a not-yet-deployed one
 /// (ERC-6492 wrapped) alike. Bytecode from viem's `erc6492SignatureValidatorByteCode`.
 const ERC6492_VALIDATOR: &str = include_str!("erc6492_validator.hex");
+const MAX_SIGNATURE_BYTES: usize = 4096;
 
 /// True when `signer` signed `message` (EIP-191). Plain EOA signatures are checked
 /// locally; anything else, such as a passkey smart account, is checked on Arc.
@@ -439,6 +440,11 @@ pub async fn verify_personal_signature(
     }
     let sig = hex_decode(signature.strip_prefix("0x").unwrap_or(signature))
         .ok_or_else(|| ApiError::bad_request("Signature is not hex"))?;
+    // A passkey account's ERC-6492 signature is about 1 KB. Anything far past
+    // that is not a signature, and each one would cost an Arc eth_call.
+    if sig.len() > MAX_SIGNATURE_BYTES {
+        return Err(ApiError::bad_request("Signature is too long"));
+    }
     let owner = hex_decode(signer.strip_prefix("0x").unwrap_or(signer))
         .filter(|b| b.len() == 20)
         .ok_or_else(|| ApiError::bad_request("Signer is not an address"))?;
@@ -466,12 +472,15 @@ pub async fn verify_personal_signature(
     let result = Rpc::from_config()
         .call("eth_call", json!([{ "data": data }, "latest"]))
         .await;
-    Ok(match result {
+    match result {
         Ok(Value::String(out)) => {
-            hex_decode(out.trim_start_matches("0x")).is_some_and(|b| b.last() == Some(&1))
+            Ok(hex_decode(out.trim_start_matches("0x")).is_some_and(|b| b.last() == Some(&1)))
         }
-        Ok(_) | Err(_) => false,
-    })
+        Ok(_) => Ok(false),
+        // The validator reverts on a bad signature. Anything else is the node, not the user.
+        Err(err) if err.to_string().to_lowercase().starts_with("rpc error") => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 fn verifying_key_to_address(vk: &VerifyingKey) -> String {
@@ -574,13 +583,13 @@ pub async fn verify_deposit(
     }
 
     let rpc = Rpc::from_config();
-    let (tx, receipt) = match tokio::join!(rpc.transaction(tx_hash), rpc.receipt(tx_hash)) {
-        (Ok(Some(t)), Ok(Some(r))) => (t, r),
-        (Err(_), _) | (_, Err(_)) => {
+    let receipt = match rpc.receipt(tx_hash).await {
+        Ok(Some(r)) => r,
+        Err(_) => {
             let f = DepositFailure::RpcError;
             return Err((f, f.message()));
         }
-        (Ok(None), _) | (_, Ok(None)) => {
+        Ok(None) => {
             let f = DepositFailure::TxNotFound;
             return Err((f, f.message()));
         }
@@ -674,8 +683,8 @@ pub async fn verify_deposit(
         return Err((f, f.message()));
     }
 
-    // Contract-mediated flows put the player in the Transfer log `from` while
-    // tx.from is a router; the log wins, with the EOA sender as fallback.
+    // Only a Transfer whose `from` is the claimant counts. Crediting tx.from for
+    // someone else's transfer would let a router call pay a third party's funds in.
     if let Some((from, value)) = incoming
         .iter()
         .find(|(from, _)| canonical(from) == canonical(user_address))
@@ -687,19 +696,6 @@ pub async fn verify_deposit(
             transaction_hash: tx_hash.to_string(),
         });
     }
-    let tx_from = tx.get("from").and_then(Value::as_str).unwrap_or_default();
-    if canonical(tx_from) == canonical(user_address) {
-        let (_, value) = &incoming[0];
-        return Ok(DepositOk {
-            // The sender is the claimant, not the log's contract: the credit
-            // follows this address, so a router must never receive it.
-            payer_address: tx_from.to_string(),
-            transferred_amount: format_units(*value, decimals),
-            confirmations,
-            transaction_hash: tx_hash.to_string(),
-        });
-    }
-
     let f = DepositFailure::SenderMismatch;
     Err((f, f.message()))
 }

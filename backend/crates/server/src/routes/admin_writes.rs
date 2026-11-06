@@ -488,7 +488,9 @@ async fn accept_run(id: i64) -> ApiResult<Response> {
         &normalized_currency,
         signed_at,
         &signature,
-    ) {
+    )
+    .await?
+    {
         return Ok(error(
             StatusCode::UNAUTHORIZED,
             "Invalid withdrawal signature",

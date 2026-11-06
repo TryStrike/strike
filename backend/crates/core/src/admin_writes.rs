@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use crate::address::{canonical, is_address_shape, to_checksum};
 use crate::bets::{is_demo_bet_row, js_num, to_number, value_to_string};
 use crate::crypto::{is_within_accept_window_at, MAX_ACCEPT_INTENT_AGE_MS};
-use crate::eth::recover_personal_signer;
+use crate::eth::verify_personal_signature;
 use crate::ledger::{floor_to_token, split_fee, Tier};
 
 // ── Request-id guard (`/^\d{1,15}$/` + safe integer) ────────────────────────
@@ -138,22 +138,20 @@ pub fn signature_spellings(stored: &str) -> Vec<String> {
 
 /// True when any spelling's rebuilt message recovers a signer whose canonical
 /// form is the row's wallet — the exact `some(...)` in the TS accept route.
-pub fn verify_withdrawal_intent(
+pub async fn verify_withdrawal_intent(
     stored_address: &str,
     amount: f64,
     normalized_currency: &str,
     signed_at: f64,
     signature: &str,
-) -> bool {
-    let target = canonical(stored_address);
-    signature_spellings(stored_address).iter().any(|spelling| {
-        recover_personal_signer(
-            &withdrawal_intent_message(spelling, amount, normalized_currency, signed_at),
-            signature,
-        )
-        .map(|recovered| canonical(&recovered) == target)
-        .unwrap_or(false)
-    })
+) -> crate::error::ApiResult<bool> {
+    for spelling in signature_spellings(stored_address) {
+        let message = withdrawal_intent_message(&spelling, amount, normalized_currency, signed_at);
+        if verify_personal_signature(stored_address, &message, signature).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The 400 body when the stored intent has aged out of the acceptance window.

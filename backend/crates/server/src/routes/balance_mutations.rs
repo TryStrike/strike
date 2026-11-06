@@ -427,6 +427,11 @@ async fn deposit(headers: HeaderMap, raw: Bytes) -> Response {
         Ok(body) => body,
         Err(response) => return response,
     };
+    if let Err(err) =
+        require_wallet_session(&headers, body["userAddress"].as_str().unwrap_or_default())
+    {
+        return err.into_response();
+    }
     // Its own task: from the lock on, the fee transfer can outlast the client, and
     // a dropped future would leave the tx hash burned with nothing credited.
     let hold = eth::hold_payout();
@@ -476,7 +481,14 @@ async fn deposit_run(body: &Value) -> Result<Value, ledger::Rejection> {
     // Verify the transfer on-chain before crediting. The requirement is the
     // claimed amount in base units rounded UP, so the ledger can never credit
     // more than demonstrably reached the treasury.
-    let tx_hash = ledger::js_to_string(head.tx_hash);
+    // One spelling per transaction: nodes accept any hex case, the lock does not.
+    let tx_hash = ledger::js_to_string(head.tx_hash).trim().to_lowercase();
+    if tx_hash.len() != 66
+        || !tx_hash.starts_with("0x")
+        || !tx_hash[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err((400, ledger::error_body("Invalid transaction hash")));
+    }
     let verification = match eth::verify_deposit(
         &tx_hash,
         user_address,
@@ -789,12 +801,19 @@ async fn withdraw_run(body: &Value) -> Result<Value, ledger::Rejection> {
         let signature_text = signature.and_then(Value::as_str);
         // `ethers.verifyMessage` throws on a signature it cannot parse, and the
         // outer catch answers the generic 500.
-        let recovered =
-            match signature_text.and_then(|sig| eth::recover_personal_signer(&message, sig)) {
-                Some(recovered) => recovered,
-                None => return Err(ledger::route_crash()),
-            };
-        if address::canonical(&recovered) != address::canonical(user_address) {
+        let Some(signature_text) = signature_text else {
+            return Err(ledger::route_crash());
+        };
+        let signed = eth::verify_personal_signature(user_address, &message, signature_text)
+            .await
+            .map_err(|err| {
+                tracing::error!("[withdraw] could not check the signature: {err}");
+                (
+                    503,
+                    ledger::error_body("Could not check the signature right now, try again"),
+                )
+            })?;
+        if !signed {
             return Err(ledger::withdraw_signature_mismatch());
         }
     }

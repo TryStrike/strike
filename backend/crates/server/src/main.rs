@@ -36,6 +36,17 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{stale} agent sessions were running before the restart, marked stopped");
     }
 
+    // A deposit lock with no credit is a crash between the two commits. No
+    // request runs yet, so releasing it lets the same hash be submitted again.
+    let released = strike_core::db::execute(
+        "DELETE FROM deposit_locks WHERE transaction_hash NOT IN \
+         (SELECT transaction_hash FROM balance_audit_log WHERE transaction_hash IS NOT NULL)",
+        &[],
+    )
+    .await?;
+    if released > 0 {
+        tracing::warn!("released {released} deposit locks left without a credit");
+    }
     supervise("tick flusher", strike_core::ticks::run_flusher());
     supervise(
         "stuck-withdrawal watcher",
@@ -48,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
     if !strike_core::world::enabled() {
         tracing::warn!(
-            "NEXT_PUBLIC_WORLD_APP_ID is unset: YOLO agents start without a World ID check"
+            "NEXT_PUBLIC_WORLD_APP_ID, WORLD_RP_ID or WORLD_RP_SIGNING_KEY is unset: YOLO agents start without a World ID check"
         );
     }
     if !strike_core::jev::enabled() {
