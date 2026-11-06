@@ -15,5 +15,5 @@ npm-debug.log*
 CLAUDE.md
 AGENTS.md
 
-# pitch material, managed outside the repo for now
-docs/PITCH_DECK.md
+# docs, managed outside the repo for now
+/docs/

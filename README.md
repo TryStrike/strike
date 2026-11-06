@@ -17,7 +17,7 @@ This repo settles on **Arc only**. Players deposit **USDC**, trade binary rounds
 
 ## ETHGlobal Mumbai
 
-Tracks: Arc (main), World ID Agent Pass. Architecture: [`docs/architecture.md`](docs/architecture.md). Demo order: [`docs/demo-script.md`](docs/demo-script.md).
+Tracks: Arc (main), World ID Agent Pass.
 
 **Arc Studio project:** https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd
 
@@ -40,7 +40,7 @@ During the event: `TODO` list the commits after Nov 5, 21:00 IST with their rang
 
 **What.** A YOLO agent spends USDC with no tap per trade. It starts only after a live human approves in World App. One human, one YOLO agent. Bans follow the human across wallets. Normal mode, where every trade waits for a tap, needs no World.
 
-**How.** IDKit 4.0 on developer.world.org, checked and verified in Rust. Local setup and test cases: [`docs/world.md`](docs/world.md).
+**How.** IDKit 4.0 on developer.world.org, checked and verified in Rust.
 
 - `POST /api/agent/start` in YOLO mode saves a pending attempt and answers `401` with `WWW-Authenticate` and `world`: app id, action `strike-yolo`, signal, preset and an `rp_context` the server signs with `WORLD_RP_SIGNING_KEY`.
 - The signal is `sha256(attempt id + signed start message)`, so a proof is for those exact terms only. The action is fixed, so the nullifier is one stable id per human.
@@ -225,8 +225,6 @@ Net amount is what is credited on deposit or sent on withdrawal. Blitz entry fee
 
 ## Architecture
 
-Whole system with World and the settlement proofs, plus sequence diagrams: [`docs/architecture.md`](docs/architecture.md).
-
 ### State (Zustand — `lib/store/`)
 
 | Slice | Responsibility |
@@ -341,8 +339,7 @@ Wallet Intel, Ledger, Player P&L, Gameplay, Financials (including withdrawal Acc
 │   └── public/                 # market logos
 │
 ├── backend/                    # Rust API (axum + SQLite), schema.sql, deploy/
-├── contracts/                  # StrikeTreasury.sol, deploy
-└── docs/                       # prd, ops, pitch deck
+└── contracts/                  # StrikeTreasury.sol, deploy
 ```
 
 ---
@@ -367,10 +364,6 @@ App: http://localhost:3000. Next proxies `/api/*` to the Rust service, so both m
 ```bash
 .strike/check.sh all      # fmt, clippy, tests, typecheck, next build
 ```
-
-Running it in production: `docs/OPERATIONS.md`.
-
-`docs/CONTRIBUTING.md` covers PR expectations.
 
 ---
 
@@ -399,4 +392,4 @@ Set the Arc env vars in the project. `next.config.ts` applies CSP, `X-Frame-Opti
 - Admin routes behind `requireAdminAuth`
 - Balance mutation routes gated by session cookie / `BALANCE_INTERNAL_SECRET`
 
-Report issues via `docs/SECURITY_REPORTING.md`.
+Report issues on [GitHub](https://example.com/strike/issues).

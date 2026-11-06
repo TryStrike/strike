@@ -112,6 +112,13 @@ export default function MarketsPage() {
   const hero = bySpread[0] && spread(bySpread[0]) > 0 ? bySpread[0] : null;
   const venueCount = assets.reduce((n, a) => n + quoted(a).length, 0);
 
+  const reveal = (ticker: string) => {
+    setOpen(ticker);
+    setFilter('all');
+    setQuery('');
+    requestAnimationFrame(() => document.getElementById(`market-${ticker}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+  };
+
   const predict = (ticker: string) => {
     if (!tradable(ticker)) return;
     setSelectedAsset(ticker);
@@ -187,13 +194,14 @@ export default function MarketsPage() {
             </section>
 
             <div className="grid gap-3 lg:grid-cols-3">
-              <MiniList title="Best today" rows={byChange.slice(0, 3)} value={(a) => pct(a.changePct)} onPick={setOpen} />
-              <MiniList title="Worst today" rows={byChange.slice(-3).reverse()} value={(a) => pct(a.changePct)} onPick={setOpen} />
+              <MiniList title="Best today" rows={byChange.slice(0, 3)} value={(a) => pct(a.changePct)} onPick={reveal} />
+              <MiniList title="Worst today" rows={byChange.slice(-3).reverse()} value={(a) => pct(a.changePct)} onPick={reveal} />
               <MiniList
                 title="Widest venue gap"
                 rows={bySpread.slice(0, 3)}
                 value={(a) => (spread(a) ? `${spread(a).toFixed(2)}%` : 'one venue')}
-                onPick={setOpen}
+                onPick={reveal}
+                neutral
               />
             </div>
 
@@ -261,6 +269,7 @@ export default function MarketsPage() {
                       return (
                         <Fragment key={a.ticker}>
                           <tr
+                            id={`market-${a.ticker}`}
                             onClick={() => setOpen(expanded ? null : a.ticker)}
                             className="cursor-pointer border-b border-line/70 transition-colors hover:bg-surface/70"
                           >
@@ -413,11 +422,13 @@ function MiniList({
   rows,
   value,
   onPick,
+  neutral,
 }: {
   title: string;
   rows: Asset[];
   value: (a: Asset) => string;
   onPick: (ticker: string) => void;
+  neutral?: boolean;
 }) {
   return (
     <div className="rounded-3xl bg-white/70 px-4 py-3.5 ring-1 ring-ink/[0.06]">
@@ -437,7 +448,7 @@ function MiniList({
               </span>
               <span className="text-right">
                 <span className="block font-jet text-[13px] tabular-nums">{usd(a.price)}</span>
-                <span className={cx('block font-jet text-xs tabular-nums', title.includes('gap') ? 'text-muted' : tone(a.changePct))}>
+                <span className={cx('block font-jet text-xs tabular-nums', neutral ? 'text-muted' : tone(a.changePct))}>
                   {value(a)}
                 </span>
               </span>

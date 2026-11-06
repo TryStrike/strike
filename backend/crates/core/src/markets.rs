@@ -24,6 +24,12 @@ const USDT_BSC: &str = "0x55d398326f99059fF775485246999027B3197955";
 const DECIMALS: f64 = 1e18;
 pub const QUOTE_USD: u32 = 100;
 const TTL: Duration = Duration::from_secs(30);
+/// Per upstream call. With 6 quotes in flight, 17 wrappers finish in at most
+/// three rounds, so a refresh never holds the cache lock past ~9s.
+const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// A wrapper priced further than this from the stock is a wrong-decimals token
+/// or a drained pool, not a deal, so it is shown as unquoted.
+const MAX_PREMIUM_BPS: f64 = 2_000.0;
 
 pub const TICKERS: &[&str] = &["NVDA", "AAPL", "TSLA", "META", "SPY", "AMZN", "GOOGL", "MSFT", "AMD", "NFLX"];
 
@@ -92,13 +98,14 @@ pub struct Markets {
 
 static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .timeout(CALL_TIMEOUT)
         .user_agent("Mozilla/5.0")
         .build()
         .expect("markets reqwest client")
 });
 
-static CACHE: Lazy<Mutex<Option<(Instant, Arc<Markets>)>>> = Lazy::new(|| Mutex::new(None));
+type Cached = Option<(Instant, Arc<Markets>)>;
+static CACHE: Lazy<Mutex<Cached>> = Lazy::new(|| Mutex::new(None));
 
 /// Cached for 30s. The lock is held through a refresh, so concurrent callers
 /// share one upstream fetch instead of each firing 18 requests.
@@ -140,7 +147,7 @@ async fn fetch_spark() -> Option<Value> {
 async fn fetch_quotes() -> HashMap<&'static str, Result<(f64, Vec<String>), String>> {
     let jobs: Vec<_> = WRAPPERS.iter().map(|w| quote_one(w.2, w.3)).collect();
     stream::iter(jobs)
-        .buffer_unordered(4)
+        .buffer_unordered(6)
         .collect()
         .await
 }
@@ -229,6 +236,9 @@ fn build_asset(
         .filter(|w| w.1 == ticker)
         .map(|&(issuer, _, symbol, address)| {
             let (quoted, error) = match quotes.get(symbol) {
+                Some(Ok((p, _))) if price.is_some_and(|r| ((p / r - 1.0) * 10_000.0).abs() > MAX_PREMIUM_BPS) => {
+                    (None, Some("quote too far from the stock price".into()))
+                }
                 Some(Ok((p, route))) => (Some((*p, route.clone())), None),
                 Some(Err(e)) => (None, Some(e.clone())),
                 None => (None, Some("not quoted".into())),
@@ -287,6 +297,11 @@ mod tests {
 
         let a = build_asset("NVDA", Some(&spark), &quotes);
         assert_eq!(a.best, Some("Ondo"));
+        let mut drained = quotes.clone();
+        drained.insert("NVDAon", quote("1000000000000")); // $100 for a dust amount
+        let d = build_asset("NVDA", Some(&spark), &drained);
+        assert_eq!(d.best, Some("bStocks"));
+        assert_eq!(d.venues[1].error.as_deref(), Some("quote too far from the stock price"));
         assert_eq!(a.points, vec![1.0, 2.0]);
         assert_eq!(a.change_pct.map(f64::round), Some(-10.0));
         assert_eq!(a.venues.iter().find(|v| v.issuer == "bStocks").unwrap().premium_bps, Some(1111.0));
