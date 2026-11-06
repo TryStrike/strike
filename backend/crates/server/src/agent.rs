@@ -258,7 +258,7 @@ async fn check(
         Ok(stake) => stake,
         Err(reason) => return Ok(Placement::Stop(reason.into())),
     };
-    if !human_checked && agent::needs_human(session) {
+    if world::enabled() && !human_checked && agent::needs_human(session) {
         return Ok(Placement::Pause);
     }
     let (direction, strike, reason, proposal) =

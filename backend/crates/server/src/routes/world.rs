@@ -1,12 +1,12 @@
-//! `/api/world/*`: the IDKit proof post and the World IdP callback that turn
-//! a verified human into a YOLO session, and the attempt read behind the agent
-//! panel's chip. Neither logs a code, token, proof or nullifier.
+//! `/api/world/*`: the IDKit proof post that turns a verified human into a
+//! YOLO session, and the attempt read behind the agent panel's chip. Nothing
+//! here logs a proof or nullifier.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query};
+use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -27,48 +27,13 @@ use crate::routes::agent::{start_session, AGENTS_NOT_CONFIGURED};
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/api/world/callback", get(callback))
         .route("/api/world/attempts/{id}", get(attempt))
         .route("/api/world/attempts/{id}/proof", post(proof))
 }
 
+/// The agent cookie on approval. `Err(Some)` is an outcome to record,
+/// `Err(None)` one the session write already recorded.
 type Outcome = Result<Result<Cookie, Option<(&'static str, String)>>, ApiError>;
-
-fn back(attempt: &str, cookies: &[Cookie]) -> Response {
-    http::redirect_with_cookies(&format!("/agent?world={attempt}"), cookies)
-}
-
-async fn callback(
-    headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
-) -> Result<Response, ApiError> {
-    let database = db::db().await?;
-    let found = match query.get("state") {
-        Some(state) => world::attempt_by_state(database, state).await?,
-        None => None,
-    };
-    let Some(attempt) = found else {
-        return Ok(back("unknown", &[]));
-    };
-    if attempt.status != "pending" {
-        return Ok(back(&attempt.id, &[]));
-    }
-    let now = now_ms();
-    match decide(database, &headers, &query, &attempt, now).await? {
-        Ok(cookie) => Ok(back(
-            &attempt.id,
-            &[cookie, http::cleared_cookie(WORLD_COOKIE, "Lax")],
-        )),
-        Err(Some((status, reason))) => {
-            tracing::info!("[world] attempt {} {status}: {reason}", attempt.id);
-            if world::deny(database, &attempt.id, status, &reason, now).await? {
-                end_paused(database, &attempt, status).await;
-            }
-            Ok(back(&attempt.id, &[]))
-        }
-        Err(None) => Ok(back(&attempt.id, &[])),
-    }
-}
 
 /// A paused agent whose human said no, or whose checkpoint another human
 /// answered, stops. A failed or expired check leaves it waiting out its pause.
@@ -81,9 +46,8 @@ async fn end_paused(database: &Db, attempt: &Attempt, status: &str) {
     }
 }
 
-/// Attempts whose code is out at World. A duplicate callback (a reload, a
-/// double redirect) leaves the first to finish instead of spending the code
-/// and recording its `invalid_grant` over the approval.
+/// Attempts whose proof is out at World. A duplicate post (a reload, a double
+/// tap) leaves the first to finish instead of verifying the proof twice.
 // ponytail: per process, a claim column on world_attempts if the API ever runs twice.
 static REDEEMING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
@@ -103,53 +67,6 @@ impl Drop for Redeeming {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.0);
     }
-}
-
-/// The agent cookie on approval. `Err(Some)` is an outcome to record,
-/// `Err(None)` one the session write already recorded.
-async fn decide(
-    database: &'static Db,
-    headers: &HeaderMap,
-    query: &HashMap<String, String>,
-    attempt: &Attempt,
-    now: i64,
-) -> Outcome {
-    let fail = |reason: &str| Ok(Err(Some(("failed", reason.to_string()))));
-    let browser = http::cookie(headers, WORLD_COOKIE).map(|secret| world::browser_hash(&secret));
-    if browser.as_deref() != Some(attempt.browser.as_str()) {
-        return fail(world::OTHER_BROWSER);
-    }
-    let Ok(client) = world::configured() else {
-        return fail(world::NOT_CONFIGURED);
-    };
-    if !config().is_settlement_signing_configured() {
-        return fail(AGENTS_NOT_CONFIGURED);
-    }
-    if query.get("iss") != Some(&client.issuer) {
-        return fail(world::WRONG_ISSUER);
-    }
-    let terms = agent::parse_start(&attempt.message).ok();
-    if let Some(error) = query.get("error") {
-        return Ok(Err(Some(world::error_outcome(
-            error,
-            terms.as_ref().map(|t| t.budget),
-        ))));
-    }
-    let terms = match live_terms(attempt, terms, now) {
-        Ok(terms) => terms,
-        Err(outcome) => return Ok(Err(Some(outcome))),
-    };
-    let Some(code) = query.get("code") else {
-        return fail("World ID could not finish: no code");
-    };
-    let Some(_redeeming) = Redeeming::take(&attempt.id) else {
-        return Ok(Err(None));
-    };
-    let grant = match world::redeem(code, attempt, now).await {
-        Ok(grant) => grant,
-        Err(failure) => return Ok(Err(Some(("failed", failure.reason())))),
-    };
-    finish(database, attempt, terms, grant).await
 }
 
 /// The terms a still live start attempt would create, `None` for a checkpoint.

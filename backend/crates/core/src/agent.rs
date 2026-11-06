@@ -507,7 +507,7 @@ pub async fn create_session(
         fixed(t.max_per_trade)?,
         fixed(t.stop_loss)?,
     );
-    if t.mode == "yolo" && human.is_none() {
+    if t.mode == "yolo" && human.is_none() && world::enabled() {
         return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
     }
     db.write(move |conn| {

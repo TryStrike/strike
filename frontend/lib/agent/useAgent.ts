@@ -120,15 +120,10 @@ export function useAgent() {
   const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
   const proofSession = useRef(false);
 
-  /** Takes a 401 step-up to World, by IDKit in place or by redirect. `false` when the reply was anything else. */
-  const toWorld = useCallback((res: Response, body: (Partial<WorldChallenge> & { verifyUrl?: string }) | null) => {
-    if (res.status !== 401) return false;
-    if (body?.attempt && body.world) {
-      setChallenge({ attempt: body.attempt, world: body.world });
-      return true;
-    }
-    if (!body?.verifyUrl) return false;
-    window.location.assign(body.verifyUrl);
+  /** Takes a 401 step-up to the IDKit widget. `false` when the reply was anything else. */
+  const toWorld = useCallback((res: Response, body: Partial<WorldChallenge> | null) => {
+    if (res.status !== 401 || !body?.attempt || !body.world) return false;
+    setChallenge({ attempt: body.attempt, world: body.world });
     return true;
   }, []);
 

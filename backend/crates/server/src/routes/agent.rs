@@ -94,7 +94,7 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
         return Err(ApiError::unavailable(AGENTS_NOT_CONFIGURED));
     }
     let database = db::db().await?;
-    if terms.mode == "yolo" {
+    if terms.mode == "yolo" && world::enabled() {
         return Ok(match world::begin(database, &terms, message, now).await? {
             Ok(challenge) => human_check(&challenge),
             Err(rejection) => reject(rejection),

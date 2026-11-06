@@ -46,6 +46,11 @@ async fn main() -> anyhow::Result<()> {
         supervise("binance stream", strike_core::binance_ws::run());
     }
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    if !strike_core::world::enabled() {
+        tracing::warn!(
+            "NEXT_PUBLIC_WORLD_APP_ID is unset: YOLO agents start without a World ID check"
+        );
+    }
     if !strike_core::jev::enabled() {
         tracing::warn!("OPENROUTER_API_KEY is unset: the jev gate is off, the rule decides alone");
     }

@@ -96,9 +96,7 @@ pub struct Config {
     pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
     pub agent_max_open_stake: rust_decimal::Decimal,
-    /// World ID step-up for YOLO starts. `world_idkit` wins when both are set,
-    /// and YOLO starts answer 503 when neither is.
-    pub world: Option<WorldClient>,
+    /// World ID step-up for YOLO starts. Unset, YOLO starts need no human check.
     pub world_idkit: Option<IdkitApp>,
     /// Budgets up to this take a selfie check, up to `world_orb_max` an Orb,
     /// anything above an Orb plus a live face.
@@ -196,7 +194,6 @@ impl Config {
                 .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
                 .unwrap_or(rust_decimal::Decimal::from(200)),
-            world: WorldClient::from_env(),
             world_idkit: IdkitApp::from_env(),
             world_selfie_max: parse_num("WORLD_SELFIE_MAX")
                 .unwrap_or(rust_decimal::Decimal::from(10)),
@@ -210,29 +207,6 @@ impl Config {
 
     pub fn is_settlement_signing_configured(&self) -> bool {
         self.balance_settlement_secret.is_some()
-    }
-}
-
-/// A World IdP OIDC client registered in the World developer portal.
-#[derive(Debug, Clone)]
-pub struct WorldClient {
-    pub issuer: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub redirect_uri: String,
-}
-
-impl WorldClient {
-    fn from_env() -> Option<Self> {
-        Some(Self {
-            issuer: str_var("WORLD_ISSUER")
-                .unwrap_or_else(|| "https://auth.world.org".to_string())
-                .trim_end_matches('/')
-                .to_string(),
-            client_id: str_var("WORLD_CLIENT_ID")?,
-            client_secret: str_var("WORLD_CLIENT_SECRET")?,
-            redirect_uri: str_var("WORLD_REDIRECT_URI")?,
-        })
     }
 }
 
