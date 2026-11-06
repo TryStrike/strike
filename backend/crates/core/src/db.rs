@@ -169,6 +169,9 @@ const MIGRATIONS: &[&str] = &[
        created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
      ) STRICT;
      CREATE INDEX arkiv_keys_by_wallet ON arkiv_keys(wallet, created_at);",
+    // 13: where each committed epoch is archived: its Swarm bundle and its Arkiv entity.
+    "ALTER TABLE round_commits ADD COLUMN swarm_ref TEXT;
+     ALTER TABLE round_commits ADD COLUMN arkiv_key TEXT;",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

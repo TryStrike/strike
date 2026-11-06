@@ -68,7 +68,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("OPENROUTER_API_KEY is unset: the jev gate is off, the rule decides alone");
     }
     match strike_core::arkiv::init()? {
-        Some(arkiv) => supervise("arkiv sealer", strike_core::arkiv::run_sealer(arkiv)),
+        Some(arkiv) => {
+            supervise("arkiv sealer", strike_core::arkiv::run_sealer(arkiv));
+            supervise(
+                "arkiv epoch archive",
+                strike_core::arkiv::run_archiver(arkiv),
+            );
+        }
         None => {
             tracing::warn!("ARKIV_PRIVATE_KEY is unset: settled rounds are not sealed on Arkiv")
         }

@@ -7,6 +7,7 @@ import { explorerAddressUrl, explorerTxUrl, getArcConfig } from '@/lib/arc/confi
 import { arcPublicClient } from '@/lib/arc/client';
 import { roundLeaf, type RoundFields } from '@/lib/proofs/leaf';
 import { Badge } from '@/components/ui/kit';
+import { entityUrl } from '@/lib/arkiv';
 
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 60_000;
@@ -19,6 +20,8 @@ interface BetProof {
   proof: Hex[] | null;
   house_root: Hex | null;
   commit_tx: Hex | null;
+  epoch_entity?: Hex | null;
+  swarm_ref?: string | null;
   status: 'pending' | 'committed' | 'off';
 }
 
@@ -81,6 +84,17 @@ export const TxLink: React.FC<{ hash: string; label: string }> = ({ hash, label 
   >
     <span className="text-subtle">{label}</span>
     <span className="truncate">{`${hash.slice(0, 10)}…${hash.slice(-6)}`}</span>
+    <ArrowUpRight size={12} />
+  </a>
+);
+
+/** Reads raw bytes by reference; the web gateway answers 200 for any address, so it cannot tell a miss. */
+const SWARM_GATEWAY = 'https://api.gateway.ethswarm.org';
+
+const ArchiveLink: React.FC<{ href: string; label: string; id: string }> = ({ href, label, id }) => (
+  <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-jet text-up">
+    <span className="text-subtle">{label}</span>
+    <span className="truncate">{`${id.slice(0, 8)}…${id.slice(-4)}`}</span>
     <ArrowUpRight size={12} />
   </a>
 );
@@ -177,6 +191,14 @@ const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
       {commit_tx && (
         <div className="mt-2 text-xs">
           <TxLink hash={commit_tx} label="House commit" />
+        </div>
+      )}
+      {data.epoch_entity && (
+        <div className="mt-1 flex flex-wrap gap-x-3 text-xs">
+          <ArchiveLink href={entityUrl(data.epoch_entity)} label="Epoch on Arkiv" id={data.epoch_entity} />
+          {data.swarm_ref && (
+            <ArchiveLink href={`${SWARM_GATEWAY}/bytes/${data.swarm_ref}`} label="Every round + proof on Swarm" id={data.swarm_ref} />
+          )}
         </div>
       )}
     </>

@@ -193,6 +193,8 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("round_commits", "rounds", "bigint"),
     ("round_commits", "tx_hash", "text"),
     ("round_commits", "created_at", TS),
+    ("round_commits", "swarm_ref", "text"),
+    ("round_commits", "arkiv_key", "text"),
 ];
 
 /// How an INTEGER cell in a result set becomes JSON.

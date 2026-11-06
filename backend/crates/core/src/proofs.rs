@@ -270,15 +270,21 @@ fn read_epoch_rows(conn: &Connection, n: u64) -> ApiResult<EpochRows> {
 pub struct Commit {
     pub root: String,
     pub tx_hash: String,
+    pub swarm_ref: Option<String>,
+    pub arkiv_key: Option<String>,
 }
 
 fn read_commit(conn: &Connection, n: u64) -> ApiResult<Option<Commit>> {
     Ok(conn
-        .prepare_cached("SELECT root, tx_hash FROM round_commits WHERE epoch = ?1")?
+        .prepare_cached(
+            "SELECT root, tx_hash, swarm_ref, arkiv_key FROM round_commits WHERE epoch = ?1",
+        )?
         .query_row([n as i64], |r| {
             Ok(Commit {
                 root: r.get(0)?,
                 tx_hash: r.get(1)?,
+                swarm_ref: r.get(2)?,
+                arkiv_key: r.get(3)?,
             })
         })
         .optional()?)
@@ -484,7 +490,46 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
         "proof": proof(&leaves, index).iter().map(hex32).collect::<Vec<_>>(),
         "house_root": commit.root,
         "commit_tx": commit.tx_hash,
+        "epoch_entity": commit.arkiv_key,
+        "swarm_ref": commit.swarm_ref,
         "status": "committed",
+    })))
+}
+
+/// Everything needed to check epoch `n` without us: each round's fields, its
+/// leaf and its path to the committed root. `None` until the epoch is committed.
+pub async fn epoch_bundle(database: &Db, n: u64) -> ApiResult<Option<Value>> {
+    let (commit, rows) = database
+        .read(move |conn| Ok((read_commit(conn, n)?, read_epoch_rows(conn, n)?)))
+        .await?;
+    let Some(commit) = commit else {
+        return Ok(None);
+    };
+    let leaves = leaves_of(&rows.rounds)?;
+    let rounds: Vec<Value> = rows
+        .rounds
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            json!({
+                "round": round_fields(r),
+                "leaf": hex32(&leaves[i]),
+                "proof": proof(&leaves, i).iter().map(hex32).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let cfg = config();
+    let (start_ms, end_ms) = epoch_bounds(n);
+    Ok(Some(json!({
+        "epoch": n,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "root": commit.root,
+        "commit_tx": commit.tx_hash,
+        "treasury": cfg.treasury_address,
+        "chain_id": cfg.arc_chain_id,
+        "verify": "StrikeTreasury.verifyRound(epoch, leaf, proof) on Arc returns true for every round",
+        "rounds": rounds,
     })))
 }
 

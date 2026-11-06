@@ -23,6 +23,8 @@ use crate::eth::{
 pub const DEFAULT_RPC: &str = "https://rpc.rabdi.db-chain.testnet.arkiv.network";
 pub const CHAIN_ID: u64 = 7_794_095;
 const SCHEMA: &str = "strike.rounds";
+const EPOCH_SCHEMA: &str = "strike.epochs";
+const ARCHIVE_EVERY: Duration = Duration::from_secs(30);
 const ARKIV: &str = "0x4400000000000000000000000000000000000044";
 const EXECUTE: [u8; 4] = [0x49, 0x65, 0x00, 0x44];
 const OP_CREATE: u8 = 1;
@@ -199,34 +201,34 @@ impl Sealed {
     }
 
     fn create(&self, salt: u128) -> ApiResult<Abi> {
-        let attributes = self
-            .attributes()?
-            .into_iter()
-            .map(|a| {
-                let mut name = [0u8; 32];
-                name[..a.name.len()].copy_from_slice(a.name.as_bytes());
-                Abi::Tuple(vec![
-                    Abi::Word(name),
-                    Abi::Word(uint(a.type_id as u128)),
-                    Abi::Bytes(a.value),
-                ])
-            })
-            .collect();
-        let data = sequence(&[Abi::Tuple(vec![
-            Abi::Word(uint(salt)),
-            Abi::Word(uint(0)),
-            Abi::Word(uint(LIFETIME_BLOCKS as u128)),
-            Abi::Word(uint(FLAG_READONLY as u128)),
-            Abi::Array(attributes),
-        ])]);
-        Ok(Abi::Tuple(vec![
-            Abi::Word(uint(OP_CREATE as u128)),
-            Abi::Bytes(data),
-        ]))
+        Ok(create_op(self.attributes()?, salt))
     }
 }
 
-/// `execute(ops)` calldata creating one entity per round, in order.
+/// One readonly `create` op living [`LIFETIME_BLOCKS`].
+fn create_op(attributes: Vec<Attribute>, salt: u128) -> Abi {
+    let attributes = attributes
+        .into_iter()
+        .map(|a| {
+            let mut name = [0u8; 32];
+            name[..a.name.len()].copy_from_slice(a.name.as_bytes());
+            Abi::Tuple(vec![
+                Abi::Word(name),
+                Abi::Word(uint(a.type_id as u128)),
+                Abi::Bytes(a.value),
+            ])
+        })
+        .collect();
+    let data = sequence(&[Abi::Tuple(vec![
+        Abi::Word(uint(salt)),
+        Abi::Word(uint(0)),
+        Abi::Word(uint(LIFETIME_BLOCKS as u128)),
+        Abi::Word(uint(FLAG_READONLY as u128)),
+        Abi::Array(attributes),
+    ])]);
+    Abi::Tuple(vec![Abi::Word(uint(OP_CREATE as u128)), Abi::Bytes(data)])
+}
+
 /// The longest prefix of `rounds` whose calldata fits under [`MAX_CALLDATA`]; the rest wait a tick.
 fn fit(mut rounds: Vec<Sealed>, salt: impl Fn(usize) -> u128) -> ApiResult<(Vec<Sealed>, Vec<u8>)> {
     loop {
@@ -238,6 +240,7 @@ fn fit(mut rounds: Vec<Sealed>, salt: impl Fn(usize) -> u128) -> ApiResult<(Vec<
     }
 }
 
+/// `execute(ops)` calldata creating one entity per round, in order.
 fn calldata(rounds: &[Sealed], salt: impl Fn(usize) -> u128) -> ApiResult<Vec<u8>> {
     let ops = rounds
         .iter()
@@ -577,6 +580,197 @@ pub async fn run_sealer(arkiv: &'static Arkiv) {
             tracing::error!("[arkiv] {err}");
         }
         tokio::time::sleep(TICK).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// epoch archive: one `strike.epochs` entity per committed epoch, pointing at
+// the full bundle on Swarm when a Bee endpoint is configured
+// ---------------------------------------------------------------------------
+
+struct Unarchived {
+    epoch: u64,
+    root: String,
+    rounds: i64,
+    tx: String,
+    swarm: Option<String>,
+}
+
+impl Arkiv {
+    /// Archives the oldest committed epoch that has no Arkiv entity yet.
+    async fn archive_next(&self) -> ApiResult<()> {
+        let next = db()
+            .await?
+            .read(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT epoch, root, rounds, tx_hash, swarm_ref FROM round_commits \
+                         WHERE arkiv_key IS NULL ORDER BY epoch LIMIT 1",
+                        [],
+                        |r| {
+                            Ok(Unarchived {
+                                epoch: r.get::<_, i64>(0)? as u64,
+                                root: r.get(1)?,
+                                rounds: r.get(2)?,
+                                tx: r.get(3)?,
+                                swarm: r.get(4)?,
+                            })
+                        },
+                    )
+                    .optional()?)
+            })
+            .await?;
+        let Some(mut e) = next else { return Ok(()) };
+
+        if e.swarm.is_none() && config().swarm_bee_url.is_some() {
+            let bundle = crate::proofs::epoch_bundle(db().await?, e.epoch)
+                .await?
+                .ok_or_else(|| ApiError::Other(format!("epoch {} has no commit", e.epoch)))?;
+            let reference = swarm_upload(&serde_json::to_vec(&bundle)?).await?;
+            let (n, r) = (e.epoch as i64, reference.clone());
+            db().await?
+                .write(move |conn| {
+                    conn.execute(
+                        "UPDATE round_commits SET swarm_ref = ?1 WHERE epoch = ?2",
+                        params![r, n],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            e.swarm = Some(reference);
+        }
+
+        let text = |s: &str| s.as_bytes().to_vec();
+        let mut attrs = vec![
+            attr("arkiv.schema", STR | INDEXED, text(EPOCH_SCHEMA)),
+            attr("commitTx", STR, text(&e.tx)),
+            attr("epoch", U64 | INDEXED, uint(e.epoch as u128).to_vec()),
+            attr("root", STR | INDEXED, text(&e.root)),
+            attr("rounds", U64, uint(e.rounds as u128).to_vec()),
+        ];
+        if let Some(reference) = &e.swarm {
+            attrs.push(attr("swarm", STR, text(reference)));
+        }
+        attrs.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        let data = [
+            EXECUTE.to_vec(),
+            sequence(&[Abi::Array(vec![create_op(
+                attrs,
+                uuid::Uuid::new_v4().as_u128(),
+            )])]),
+        ]
+        .concat();
+
+        // ponytail: a crash between send and the UPDATE below writes the epoch twice; both copies agree.
+        let hash = self.send_raw(&data).await?;
+        let key = loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Some(receipt) = self.rpc.receipt(&hash).await? {
+                let topic = entity_created_topic();
+                break receipt["logs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|log| log["topics"][0].as_str() == Some(topic.as_str()))
+                    .and_then(|log| log["topics"][1].as_str().map(str::to_string))
+                    .ok_or_else(|| {
+                        ApiError::Other(format!("epoch tx {hash} created no entity"))
+                    })?;
+            }
+        };
+        let (n, k) = (e.epoch as i64, key.clone());
+        db().await?
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE round_commits SET arkiv_key = ?1 WHERE epoch = ?2",
+                    params![k, n],
+                )?;
+                Ok(())
+            })
+            .await?;
+        tracing::info!(
+            "[arkiv] archived epoch {} as {key}{}",
+            e.epoch,
+            e.swarm
+                .map(|r| format!(", bundle on swarm {r}"))
+                .unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    /// Signs and broadcasts one call to the Arkiv contract. Returns the tx hash.
+    async fn send_raw(&self, data: &[u8]) -> ApiResult<String> {
+        let _sending = self.sending.lock().await;
+        let data_hex = format!("0x{}", hex::encode(data));
+        let nonce = self
+            .rpc
+            .quantity("eth_getTransactionCount", json!([self.operator, "pending"]))
+            .await? as u64;
+        let gas_price = self.rpc.quantity("eth_gasPrice", json!([])).await?;
+        let gas = self
+            .rpc
+            .quantity(
+                "eth_estimateGas",
+                json!([{ "from": self.operator, "to": ARKIV, "data": data_hex }]),
+            )
+            .await? as u64;
+        let raw = build_eip1559_raw(
+            &self.signer,
+            CHAIN_ID,
+            nonce,
+            gas + gas / 5,
+            gas_price * 2,
+            gas_price / 10,
+            ARKIV,
+            0,
+            data,
+        )?;
+        match self.rpc.broadcast(&raw).await {
+            Broadcast::Accepted(hash) => Ok(hash),
+            Broadcast::Refused(reason) | Broadcast::Unknown(reason) => Err(ApiError::Other(
+                format!("arkiv refused epoch entity: {reason}"),
+            )),
+        }
+    }
+}
+
+/// `POST /bytes` to the configured Bee node or gateway. Returns the Swarm reference.
+async fn swarm_upload(body: &[u8]) -> ApiResult<String> {
+    let cfg = config();
+    let url = cfg
+        .swarm_bee_url
+        .as_deref()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    // The public gateway wants the header even when it stamps with its own batch.
+    let batch = cfg.swarm_batch_id.clone().unwrap_or_else(|| "0".repeat(64));
+    let res = reqwest::Client::new()
+        .post(format!("{url}/bytes"))
+        .header("swarm-postage-batch-id", batch)
+        .header("content-type", "application/json")
+        .timeout(Duration::from_secs(30))
+        .body(body.to_vec())
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        return Err(ApiError::Other(format!(
+            "swarm upload HTTP {}",
+            res.status()
+        )));
+    }
+    let reply: serde_json::Value = res.json().await?;
+    reply["reference"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| ApiError::Other("swarm reply has no reference".into()))
+}
+
+pub async fn run_archiver(arkiv: &'static Arkiv) {
+    loop {
+        tokio::time::sleep(ARCHIVE_EVERY).await;
+        if let Err(err) = arkiv.archive_next().await {
+            tracing::error!("[arkiv] epoch archive: {err}");
+        }
     }
 }
 

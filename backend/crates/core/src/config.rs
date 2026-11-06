@@ -92,6 +92,9 @@ pub struct Config {
     pub treasury_address: String,
     /// `ARKIV_PRIVATE_KEY`. Unset leaves settled bets unsealed.
     pub arkiv_secret_key: Option<String>,
+    /// Bee node or gateway that epoch bundles upload to. Unset: no Swarm archive.
+    pub swarm_bee_url: Option<String>,
+    pub swarm_batch_id: Option<String>,
     /// `ARKIV_RPC_URL`, with `ARKIV_ACCESS_KEY` appended as the path when set.
     pub arkiv_rpc: String,
     pub treasury_secret_key: Option<String>,
@@ -189,6 +192,8 @@ impl Config {
                 .unwrap_or_else(|| ARC_DEFAULT_EURC.to_string()),
             treasury_address: str_var("NEXT_PUBLIC_TREASURY_ADDRESS").unwrap_or_default(),
             arkiv_secret_key: str_var("ARKIV_PRIVATE_KEY"),
+            swarm_bee_url: str_var("SWARM_BEE_URL"),
+            swarm_batch_id: str_var("SWARM_BATCH_ID"),
             arkiv_rpc: {
                 let base = str_var("ARKIV_RPC_URL")
                     .unwrap_or_else(|| crate::arkiv::DEFAULT_RPC.to_string());
