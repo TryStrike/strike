@@ -154,6 +154,9 @@ pub struct Sealed {
     pub stake: i64,
     pub multiplier: i64,
     pub strike_price: i64,
+    /// The box a box round paid on; `None` for up/down rounds.
+    pub price_top: Option<i64>,
+    pub price_bottom: Option<i64>,
     pub end_price: Option<i64>,
     pub outcome: String,
     pub payout: i64,
@@ -186,6 +189,10 @@ impl Sealed {
         ];
         if let Some(end) = self.end_price {
             attrs.push(attr("endPrice", DEC, dec(end, PRICE_SCALE)));
+        }
+        if let (Some(top), Some(bottom)) = (self.price_top, self.price_bottom) {
+            attrs.push(attr("priceTop", DEC, dec(top, PRICE_SCALE)));
+            attrs.push(attr("priceBottom", DEC, dec(bottom, PRICE_SCALE)));
         }
         attrs.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
         Ok(attrs)
@@ -482,7 +489,7 @@ impl Arkiv {
 fn pending(conn: &rusqlite::Connection) -> ApiResult<Vec<Sealed>> {
     let mut st = conn.prepare_cached(
         "SELECT bet_id, user_address, currency, asset, mode, direction, stake, multiplier, \
-                strike_price, end_price, outcome, payout, settled_at \
+                strike_price, end_price, outcome, payout, settled_at, price_top, price_bottom \
          FROM bet_rounds r \
          WHERE outcome IS NOT NULL \
            AND NOT EXISTS (SELECT 1 FROM arkiv_seals s WHERE s.bet_id = r.bet_id) \
@@ -506,6 +513,8 @@ fn pending(conn: &rusqlite::Connection) -> ApiResult<Vec<Sealed>> {
                 outcome: r.get(10)?,
                 payout: r.get(11)?,
                 settled_at_us: r.get(12)?,
+                price_top: r.get(13)?,
+                price_bottom: r.get(14)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -619,6 +628,8 @@ mod tests {
             stake: 100_000,
             multiplier: 175,
             strike_price: 8_146_001_000_000,
+            price_top: Some(8_146_100_000_000),
+            price_bottom: Some(8_146_000_000_000),
             end_price: Some(8_146_002_000_000),
             outcome: "win".into(),
             payout: 175_000,

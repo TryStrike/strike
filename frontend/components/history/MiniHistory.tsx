@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ArrowUpRight, ChartLineUp, ShareNetwork } from '@phosphor-icons/react';
 import { shareWinUrl } from '@/components/game/WinBurst';
 import { formatMoney } from '@/components/ui/MoneyText';
@@ -9,6 +9,7 @@ import { isRealWin } from '@/lib/types/bet';
 import { MyBetEntityLink } from '@/components/arkiv/ArkivOwnBets';
 import { Badge, Label, cx } from '@/components/ui/kit';
 import { entityUrl, isWin, settledAtMs, useArkivTape } from '@/lib/arkiv';
+import { useBetsInPlay } from '@/lib/arkivBets';
 
 export function isDemoBetId(id: string | null | undefined): boolean {
   return String(id ?? '').toLowerCase().startsWith('demo-');
@@ -65,6 +66,7 @@ const EveryoneRounds: React.FC = () => {
   if (!tape) return <p className="font-jet text-xs text-faint">Reading Arkiv…</p>;
   return (
     <>
+      <InPlay asset={asset} me={me} />
       <p className="mb-1 font-jet text-[11px] text-faint">
         {rounds.length} {asset} round{rounds.length === 1 ? '' : 's'} in 24h
         {rounds.length > 0 && ` · ${Math.round((won / rounds.length) * 100)}% won`} · read from Arkiv
@@ -100,6 +102,51 @@ const EveryoneRounds: React.FC = () => {
         </ul>
       )}
     </>
+  );
+};
+
+/** Open bets on the asset, each written to Arkiv by the player's own key and checked against their wallet signature. */
+const InPlay: React.FC<{ asset: string; me?: string }> = ({ asset, me }) => {
+  const { bets } = useBetsInPlay(asset);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, []);
+  const open = (bets ?? []).filter((b) => b.endTime > now);
+  if (open.length === 0) return null;
+  return (
+    <div className="mb-3">
+      <p className="mb-1 font-jet text-[11px] text-faint">
+        {open.length} in play · signed by each player&apos;s wallet · read from Arkiv
+      </p>
+      <ul className="divide-y divide-line">
+        {open.slice(0, 5).map((b) => (
+          <li key={b.key} className="flex items-center justify-between py-2 text-sm">
+            <div className="min-w-0">
+              <div className="truncate font-medium text-ink">
+                {b.priceTop !== undefined && b.priceBottom !== undefined
+                  ? `Box ${b.priceBottom.toFixed(2)}–${b.priceTop.toFixed(2)}`
+                  : b.direction}{' '}
+                · {b.wallet === me ? 'you' : `${b.wallet.slice(0, 6)}…${b.wallet.slice(-4)}`}
+              </div>
+              <div className="font-jet text-xs text-faint">
+                {formatMoney(b.stake, 2)} × {b.multiplier.toFixed(2)} · ends in {Math.ceil((b.endTime - now) / 1000)}s
+              </div>
+            </div>
+            <a
+              href={entityUrl(b.key)}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Open this bet on Arkiv"
+              className="text-faint hover:text-ink"
+            >
+              <ArrowUpRight size={14} />
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 };
 

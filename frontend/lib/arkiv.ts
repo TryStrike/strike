@@ -38,19 +38,19 @@ export function matchesLedger(entity: ArkivEntity, ledgerPayout: number | string
   return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 1e-9;
 }
 
-interface RawEntity {
+export interface RawEntity {
   key: string;
   creator?: string;
   attributes?: Array<{ name: string; value: string }>;
 }
 
-function flatten(raw: RawEntity): ArkivEntity {
+export function flatten(raw: RawEntity): ArkivEntity {
   const row: Record<string, string> = { key: raw.key, creator: raw.creator ?? '' };
   for (const a of raw.attributes ?? []) row[a.name] = String(a.value);
   return row as unknown as ArkivEntity;
 }
 
-async function arkiv<T>(method: string, params: unknown[], signal?: AbortSignal): Promise<T> {
+export async function arkiv<T>(method: string, params: unknown[], signal?: AbortSignal): Promise<T> {
   const call = () =>
     fetch(ARKIV_RPC, {
       method: 'POST',

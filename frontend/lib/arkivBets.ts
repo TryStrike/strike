@@ -6,7 +6,7 @@
  * The entity is created by the player's key, not by Strike, and carries the
  * wallet's delegation signature, so anyone can check wallet -> key -> bet.
  */
-import { useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import {
   concat,
   createPublicClient,
@@ -16,12 +16,13 @@ import {
   http,
   keccak256,
   parseUnits,
+  recoverMessageAddress,
   stringToHex,
   toHex,
   type Hex,
 } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { ARKIV_RPC } from '@/lib/arkiv';
+import { ARKIV_RPC, arkiv, flatten, type RawEntity } from '@/lib/arkiv';
 
 export const BET_SCHEMA = 'strike.bets';
 const ARKIV_CONTRACT = '0x4400000000000000000000000000000000000044';
@@ -29,8 +30,11 @@ const EXECUTE: Hex = '0x49650044';
 const ENTITY_CREATED = keccak256(stringToHex('EntityCreated(bytes32,address,uint64,uint8)'));
 const OP_CREATE = BigInt(1);
 const FLAG_READONLY = BigInt(1);
-/** About one day of 2 s blocks: the bet is settled long before it expires. */
-const LIFETIME_BLOCKS = BigInt(43_200);
+const BLOCK_MS = 2_000;
+/** An open bet lives on Arkiv until its round ends, plus an hour to look it up afterwards. */
+const AFTER_END_MS = 60 * 60 * 1000;
+const lifetimeBlocks = (endTime?: number) =>
+  BigInt(Math.ceil((Math.max(0, (endTime ?? Date.now() + 86_400_000) - Date.now()) + AFTER_END_MS) / BLOCK_MS));
 const KEY_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 
 const STR = 8;
@@ -171,7 +175,7 @@ function createCalldata(wallet: string, bet: BetForArkiv, d: Delegation): Hex {
         ],
       },
     ],
-    [[salt, BigInt(0), LIFETIME_BLOCKS, FLAG_READONLY, attributes(wallet, bet, d)]],
+    [[salt, BigInt(0), lifetimeBlocks(bet.endTime), FLAG_READONLY, attributes(wallet, bet, d)]],
   );
   const ops = encodeAbiParameters(
     [{ type: 'tuple[]', components: [{ type: 'uint256' }, { type: 'bytes' }] }],
@@ -208,4 +212,85 @@ export function recordBetOnArkiv(wallet: string, bet: BetForArkiv): Promise<stri
   const next = queue.then(run, run);
   queue = next.catch(() => undefined);
   return next;
+}
+
+export interface OpenBet {
+  key: string;
+  wallet: string;
+  direction: string;
+  mode: string;
+  stake: number;
+  multiplier: number;
+  endTime: number;
+  priceTop?: number;
+  priceBottom?: number;
+}
+
+const ASSET = /^[A-Z0-9]{2,10}$/;
+const IN_PLAY_REFRESH_MS = 5_000;
+
+/** Anyone can write a `strike.bets` entity; it counts only if the wallet signed the key that wrote it. */
+async function signedByWallet(e: Record<string, string>): Promise<boolean> {
+  try {
+    const signer = await recoverMessageAddress({
+      message: delegationMessage(e.wallet, e.creator, Number(e.delegationExpires)),
+      signature: `${e.delegationR}${e.delegationSV.slice(2)}` as Hex,
+    });
+    return signer.toLowerCase() === e.wallet.toLowerCase() && Number(e.delegationExpires) >= Number(e.placedAt);
+  } catch {
+    return false;
+  }
+}
+
+/** Bets on `asset` whose round has not ended yet, read from Arkiv and checked against each wallet's signature. */
+export function useBetsInPlay(asset: string): { bets: OpenBet[] | null; error: string | null } {
+  const [bets, setBets] = useState<OpenBet[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const load = async () => {
+      if (!ASSET.test(asset)) throw new Error(`asset cannot be queried on Arkiv: ${asset}`);
+      const query = `arkiv.schema = str('${BET_SCHEMA}') AND asset = str('${asset}') AND endTime > u64(${Date.now()})`;
+      const result = await arkiv<{ data: RawEntity[] }>(
+        'arkiv_query',
+        [query, { select: { key: true, creator: true, attributes: true }, limit: '0x64' }],
+        ctrl.signal,
+      );
+      const rows = result.data.map((raw) => flatten(raw) as unknown as Record<string, string>);
+      const signed = await Promise.all(rows.map(signedByWallet));
+      const open = rows
+        .filter((_, i) => signed[i])
+        .map((e) => ({
+          key: e.key,
+          wallet: e.wallet.toLowerCase(),
+          direction: e.direction,
+          mode: e.mode,
+          stake: Number(e.stake),
+          multiplier: Number(e.multiplier),
+          endTime: Number(e.endTime),
+          priceTop: e.priceTop ? Number(e.priceTop) : undefined,
+          priceBottom: e.priceBottom ? Number(e.priceBottom) : undefined,
+        }))
+        .sort((a, b) => a.endTime - b.endTime);
+      if (!ctrl.signal.aborted) {
+        setBets(open);
+        setError(null);
+      }
+    };
+    const run = () =>
+      load().catch((err) => {
+        if (ctrl.signal.aborted) return;
+        console.error('[arkiv] in-play query failed', asset, err);
+        setError(String(err.message ?? err));
+      });
+    void run();
+    const timer = setInterval(run, IN_PLAY_REFRESH_MS);
+    return () => {
+      ctrl.abort();
+      clearInterval(timer);
+    };
+  }, [asset]);
+
+  return { bets, error };
 }
