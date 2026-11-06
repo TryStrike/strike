@@ -82,6 +82,9 @@ sudo install -m 644 backend/deploy/strike-backend.service backend/deploy/strike-
 sudo install -m 644 backend/deploy/litestream.yml /etc/strike/litestream.yml
 if [ -x "$BIN" ]; then sudo cp -p "$BIN" "$BIN.prev"; fi
 sudo install -m 755 "$CARGO_TARGET_DIR/release/strike-backend" "$BIN"
+# The cache only grows (old dependency versions stay behind), so past 4 GB it
+# starts over. The binary is already installed; the next deploy rebuilds it.
+if [ "$(du -sm "$CARGO_TARGET_DIR" | cut -f1)" -gt 4096 ]; then rm -rf "$CARGO_TARGET_DIR"; fi
 
 cd ~
 rm -rf ~/strike && mv ~/strike.new ~/strike
