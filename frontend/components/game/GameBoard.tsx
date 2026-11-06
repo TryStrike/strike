@@ -46,7 +46,6 @@ export const GameBoard: React.FC = () => {
     hasBlitzAccess,
     error,
     clearError,
-    isLoading: isLoadingBalance,
     refreshWalletBalance,
     selectedCurrency,
     setConnectModalOpen,
@@ -68,7 +67,6 @@ export const GameBoard: React.FC = () => {
       hasBlitzAccess: s.hasBlitzAccess,
       error: s.error,
       clearError: s.clearError,
-      isLoading: s.isLoading,
       refreshWalletBalance: s.refreshWalletBalance,
       selectedCurrency: s.selectedCurrency,
       setConnectModalOpen: s.setConnectModalOpen,
@@ -180,9 +178,6 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  const activeWalletBalance = walletBalance;
-  const formatBalance = (bal: number) =>
-    isNaN(bal) ? "0.0000" : bal.toFixed(4);
   const amountNum = Number(betAmount);
   const multiplier = getMultiplier(selectedDuration);
   const isBalanceError =
@@ -521,9 +516,7 @@ export const GameBoard: React.FC = () => {
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted">Wallet</span>
                   <span className="font-jet">
-                    {isLoadingBalance
-                      ? "…"
-                      : formatBalance(activeWalletBalance)}{" "}
+                    {walletBalance === null ? "—" : walletBalance.toFixed(4)}{" "}
                     {currencySymbol}
                   </span>
                 </div>

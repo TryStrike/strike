@@ -69,16 +69,3 @@ export async function readAssetBalance(
   });
   return Number(formatUnits(raw, cfg.decimals));
 }
-
-export async function getAssetBalance(
-  address: string,
-  asset: ArcAsset,
-): Promise<number> {
-  if (!address) return 0;
-  try {
-    return await readAssetBalance(address, asset);
-  } catch (error) {
-    console.error(`Failed to get ${asset} balance:`, error);
-    return 0;
-  }
-}

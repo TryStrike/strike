@@ -889,7 +889,9 @@ export const DepositModal: React.FC<DepositModalProps> = ({
           "Wallet",
           balanceState === "loading"
             ? `reading…`
-            : `${walletBalance.toFixed(4)} ${asset}`,
+            : balanceState === "error"
+              ? "unavailable"
+              : `${walletBalance.toFixed(4)} ${asset}`,
         )}
         {summaryRow(
           "Network fee (est.)",

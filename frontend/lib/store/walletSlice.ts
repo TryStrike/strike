@@ -17,7 +17,8 @@ export interface WalletLastError {
 
 export interface WalletState {
   address: string | null;
-  walletBalance: number;
+  /** Null until a read has succeeded for this address: unknown is not zero. */
+  walletBalance: number | null;
   isConnected: boolean;
   network: 'ARC' | null;
   selectedCurrency: string | null;
@@ -48,9 +49,13 @@ export interface WalletState {
   setSelectedCurrency: (currency: string | null) => void;
 }
 
+// Spaced out on purpose: each read already tries every RPC several times.
+const WALLET_READ_RETRY_MS = [3_000, 10_000];
+let walletRead = 0;
+
 export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set, get) => ({
   address: null,
-  walletBalance: 0,
+  walletBalance: null,
   isConnected: false,
   network: null,
   selectedCurrency: null,
@@ -113,7 +118,7 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
   disconnect: () => {
     set({
       address: null,
-      walletBalance: 0,
+      walletBalance: null,
       isConnected: false,
       network: null,
       selectedCurrency: null,
@@ -131,13 +136,24 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
       return;
     }
 
-    try {
-      // A failed read keeps the last balance instead of showing a false 0.
-      const { readAssetBalance } = await import('@/lib/arc/client');
-      const bal = await readAssetBalance(address, 'USDC');
-      set({ walletBalance: bal });
-    } catch (error) {
-      console.error("Error refreshing wallet balance:", error);
+    // A newer read replaces this one, and its retries with it.
+    const read = ++walletRead;
+    const { readAssetBalance } = await import('@/lib/arc/client');
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const bal = await readAssetBalance(address, 'USDC');
+        if (read === walletRead && get().address === address) set({ walletBalance: bal });
+        return;
+      } catch (error) {
+        // A failed read keeps the last balance instead of showing a false 0.
+        if (attempt === WALLET_READ_RETRY_MS.length) {
+          console.error("Error refreshing wallet balance:", error);
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, WALLET_READ_RETRY_MS[attempt]));
+      if (read !== walletRead || get().address !== address) return;
     }
   },
 
@@ -150,7 +166,7 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
   },
 
   setAddress: (address: string | null) => {
-    set({ address });
+    if (address !== get().address) set({ address, walletBalance: null });
   },
 
   setIsConnected: (connected: boolean) => {
