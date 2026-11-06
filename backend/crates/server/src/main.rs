@@ -42,7 +42,13 @@ async fn main() -> anyhow::Result<()> {
         strike_core::withdrawals::watch_stuck(),
     );
     supervise("price sampler", strike_core::prices::run_sampler());
+    if strike_core::prices::uses_live_binance() {
+        supervise("binance stream", strike_core::binance_ws::run());
+    }
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    if !strike_core::jev::enabled() {
+        tracing::warn!("OPENROUTER_API_KEY is unset: the jev gate is off, the rule decides alone");
+    }
     match strike_core::arkiv::init()? {
         Some(arkiv) => supervise("arkiv sealer", strike_core::arkiv::run_sealer(arkiv)),
         None => {

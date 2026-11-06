@@ -57,6 +57,7 @@ pub struct Config {
     pub withdrawal_stuck_secs: i64,
     /// Upstream quote URLs. Overridable so a test decides what the market did.
     pub binance_endpoint: String,
+    pub binance_ws_endpoint: String,
     pub yahoo_spark_endpoint: String,
     /// How long between samples of every tradable asset.
     pub price_sample_ms: u64,
@@ -89,6 +90,8 @@ pub struct Config {
     pub agent_max_minutes: i64,
     /// Backend only. The copilot answers 503 without it.
     pub anthropic_api_key: Option<String>,
+    pub openrouter_api_key: Option<String>,
+    pub jev_endpoint: String,
     /// Overridable so a test decides what the model says.
     pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
@@ -130,6 +133,8 @@ impl Config {
             withdrawal_stuck_secs: parse_num("WITHDRAWAL_STUCK_SECS").unwrap_or(600),
             binance_endpoint: str_var("BINANCE_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::BINANCE_ENDPOINT.to_string()),
+            binance_ws_endpoint: str_var("BINANCE_WS_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::BINANCE_WS_ENDPOINT.to_string()),
             yahoo_spark_endpoint: str_var("YAHOO_SPARK_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::SPARK_ENDPOINT.to_string()),
             price_sample_ms: parse_num("PRICE_SAMPLE_MS").unwrap_or(1_000),
@@ -171,6 +176,9 @@ impl Config {
                 .unwrap_or(rust_decimal::Decimal::from(100)),
             agent_max_minutes: parse_num("AGENT_MAX_MINUTES").unwrap_or(30),
             anthropic_api_key: str_var("ANTHROPIC_API_KEY"),
+            openrouter_api_key: str_var("OPENROUTER_API_KEY"),
+            jev_endpoint: str_var("JEV_ENDPOINT")
+                .unwrap_or_else(|| crate::jev::ENDPOINT.to_string()),
             anthropic_base_url: str_var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
