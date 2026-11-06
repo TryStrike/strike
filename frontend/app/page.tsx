@@ -8,7 +8,6 @@ import { BlurFade, CountdownRing, Marquee, SlidingNumber, WordRotate } from '@/c
 import { explorerAddressUrl, getArcConfig } from '@/lib/arc/config';
 import { BRAND } from '@/lib/brand';
 import { SiteNav } from '@/components/SiteNav';
-import { ArcProof } from '@/components/landing/ArcProof';
 import { Features, ProofLadder } from '@/components/landing/MoreSections';
 import { glassPrimary } from '@/components/ui/kit';
 import { useStore } from '@/lib/store';
@@ -280,8 +279,6 @@ export default function Landing() {
       <ProofLadder />
 
       <Features />
-
-      <ArcProof />
 
       <section className="border-t border-ink/[0.06]">
         <BlurFade className="mx-auto flex max-w-[720px] flex-col items-center px-5 py-28 text-center sm:px-8">
