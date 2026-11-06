@@ -127,6 +127,8 @@ const MIGRATIONS: &[&str] = &[
        created_at       INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
      ) STRICT;
      CREATE INDEX bet_rounds_by_end ON bet_rounds(end_time);",
+    // 6: a World ID check also resumes a YOLO agent paused for its human.
+    "ALTER TABLE world_attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'start' CHECK (kind IN ('start', 'checkpoint'));",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

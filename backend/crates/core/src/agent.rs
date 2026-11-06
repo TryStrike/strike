@@ -35,6 +35,10 @@ pub const BUDGET_SPENT: &str = "budget spent";
 pub const STOP_LOSS_REACHED: &str = "stop-loss reached";
 pub const HOUSE_LIMIT: &str = "House agent limit reached";
 pub const SERVER_RESTART: &str = "server restart";
+pub const WAITING_FOR_HUMAN: &str = "Waiting for a human";
+pub const HUMAN_CHECK_DENIED: &str = "human check denied";
+/// How long a paused YOLO agent waits for its human to step up.
+pub const HUMAN_WAIT_MS: i64 = 2 * 60 * 1000;
 
 fn stake_floor() -> Decimal {
     Decimal::new(10, 2)
@@ -268,6 +272,11 @@ pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> 
         return Err(LIMIT_REACHED);
     }
     Ok(stake)
+}
+
+/// A YOLO agent that has lost half its stop-loss pauses for its human.
+pub fn needs_human(session: &Session) -> bool {
+    session.mode == "yolo" && -session.realized_pnl * Decimal::TWO >= session.stop_loss
 }
 
 /// The body the manual bet route takes, with the strike from the server tick.
@@ -935,6 +944,29 @@ mod tests {
         ] {
             assert_eq!(parse_start(&forged).unwrap_err().0, 400, "{forged}");
         }
+    }
+
+    #[test]
+    fn half_the_stop_loss_lost_pauses_yolo_only() {
+        let session = |mode: &str, pnl: i64| Session {
+            id: "s".into(),
+            wallet: "w".into(),
+            asset: "BTC".into(),
+            mode: mode.into(),
+            budget: Decimal::from(20),
+            max_per_trade: Decimal::from(5),
+            stop_loss: Decimal::from(10),
+            starts_at_ms: 0,
+            ends_at_ms: 1,
+            status: "running".into(),
+            stopped_reason: None,
+            spent: Decimal::ZERO,
+            realized_pnl: Decimal::from(pnl),
+        };
+        assert!(!needs_human(&session("yolo", -4)));
+        assert!(needs_human(&session("yolo", -5)));
+        assert!(!needs_human(&session("yolo", 3)));
+        assert!(!needs_human(&session("normal", -9)));
     }
 
     #[test]

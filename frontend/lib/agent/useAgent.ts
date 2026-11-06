@@ -52,6 +52,7 @@ export interface WorldAttempt {
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'mismatch' | 'failed' | 'unknown';
   reason: string;
   acr: string | null;
+  kind?: 'start' | 'checkpoint';
 }
 
 const START_VALID_MS = 5 * 60_000;
@@ -77,6 +78,13 @@ function startMessage(wallet: string, limits: StartLimits, expires: number, nonc
 async function errorOf(res: Response): Promise<string> {
   const body = await res.json().catch(() => null);
   return body?.error ?? `Request failed with ${res.status}`;
+}
+
+/** Follows a 401 step-up challenge to World. `false` when the reply was anything else. */
+function toWorld(res: Response, body: { verifyUrl?: string } | null): boolean {
+  if (res.status !== 401 || !body?.verifyUrl) return false;
+  window.location.assign(body.verifyUrl);
+  return true;
 }
 
 /** The trader's agent session, live from the decisions feed. */
@@ -133,9 +141,8 @@ export function useAgent() {
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          if (res.status === 401 && body?.verifyUrl) {
+          if (toWorld(res, body)) {
             leaving = true;
-            window.location.assign(body.verifyUrl);
             return;
           }
           setError(body?.error ?? `Request failed with ${res.status}`);
@@ -165,6 +172,24 @@ export function useAgent() {
     }
   }, []);
 
+  /** A paused YOLO agent resumes only after the same human steps up in World App. */
+  const checkpoint = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    let leaving = false;
+    try {
+      const res = await fetch('/api/agent/checkpoint', { method: 'POST' });
+      const body = await res.json().catch(() => null);
+      if (toWorld(res, body)) {
+        leaving = true;
+        return;
+      }
+      setError(body?.error ?? `Request failed with ${res.status}`);
+    } finally {
+      if (!leaving) setBusy(false);
+    }
+  }, []);
+
   /** Approve or reject a proposal. The feed carries the result to every tab. */
   const answer = useCallback(async (id: string, action: 'approve' | 'reject') => {
     setError(null);
@@ -177,7 +202,7 @@ export function useAgent() {
     setDecisions((all) => all.map((d) => (d.id === decision.id ? decision : d)));
   }, []);
 
-  return { session, decisions, error, busy, start, stop, answer };
+  return { session, decisions, error, busy, start, stop, answer, checkpoint };
 }
 
 /** Outcome of the World ID check the callback redirected back with as `?world=<attempt>`. Read once, never polled. */

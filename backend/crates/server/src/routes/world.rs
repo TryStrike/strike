@@ -14,13 +14,15 @@ use serde_json::Value;
 
 use strike_core::agent;
 use strike_core::bets::now_ms;
+use strike_core::config::config;
 use strike_core::crypto::{self, AGENT_COOKIE};
 use strike_core::db::{self, Db};
 use strike_core::error::ApiError;
 use strike_core::world::{self, Attempt, WORLD_COOKIE};
 
+use crate::agent as live;
 use crate::http::{self, Cookie};
-use crate::routes::agent::started;
+use crate::routes::agent::{started, AGENTS_NOT_CONFIGURED};
 
 pub fn routes() -> Router {
     Router::new()
@@ -55,10 +57,23 @@ async fn callback(
         )),
         Err(Some((status, reason))) => {
             tracing::info!("[world] attempt {} {status}: {reason}", attempt.id);
-            world::deny(database, &attempt.id, status, &reason, now).await?;
+            if world::deny(database, &attempt.id, status, &reason, now).await? {
+                end_paused(database, &attempt, status).await;
+            }
             Ok(back(&attempt.id, &[]))
         }
         Err(None) => Ok(back(&attempt.id, &[])),
+    }
+}
+
+/// A paused agent whose human said no, or whose checkpoint another human
+/// answered, stops. A failed or expired check leaves it waiting out its pause.
+async fn end_paused(database: &Db, attempt: &Attempt, status: &str) {
+    if attempt.kind != world::CHECKPOINT || !matches!(status, "denied" | "mismatch") {
+        return;
+    }
+    if let Some(session_id) = &attempt.session_id {
+        live::stop(database, session_id, agent::HUMAN_CHECK_DENIED).await;
     }
 }
 
@@ -103,6 +118,9 @@ async fn decide(
     let Ok(client) = world::configured() else {
         return fail(world::NOT_CONFIGURED);
     };
+    if !config().is_settlement_signing_configured() {
+        return fail(AGENTS_NOT_CONFIGURED);
+    }
     if query.get("iss") != Some(&client.issuer) {
         return fail(world::WRONG_ISSUER);
     }
@@ -116,12 +134,17 @@ async fn decide(
     if attempt.expires_at_ms <= now {
         return Ok(Err(Some(("expired", world::EXPIRED.to_string()))));
     }
-    let Some(terms) = terms else {
-        return fail("Start message no longer parses");
+    let terms = if attempt.kind == world::CHECKPOINT {
+        None
+    } else {
+        let Some(terms) = terms else {
+            return fail("Start message no longer parses");
+        };
+        if let Err((_, body)) = agent::check_start(&terms, now) {
+            return fail(body["error"].as_str().unwrap_or("Start refused"));
+        }
+        Some(terms)
     };
-    if let Err((_, body)) = agent::check_start(&terms, now) {
-        return fail(body["error"].as_str().unwrap_or("Start refused"));
-    }
     let Some(code) = query.get("code") else {
         return fail("World ID could not finish: no code");
     };
@@ -131,6 +154,13 @@ async fn decide(
     let grant = match world::redeem(code, attempt, now).await {
         Ok(grant) => grant,
         Err(failure) => return Ok(Err(Some(("failed", failure.reason())))),
+    };
+    let Some(terms) = terms else {
+        match world::resume(database, grant, now_ms()).await? {
+            Ok(session_id) => live::resume(&session_id),
+            Err(status) => end_paused(database, attempt, status).await,
+        }
+        return Ok(Err(None));
     };
     match agent::create_session(database, terms, now, Some(grant)).await? {
         Ok(session) => Ok(Ok(started(session)?)),

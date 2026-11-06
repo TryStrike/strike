@@ -16,13 +16,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::address::canonical;
-use crate::agent::{self, refuse, StartTerms};
+use crate::agent::{self, refuse, Session, StartTerms};
 use crate::config::{config, WorldClient};
 use crate::db::{is_unique_violation, Db};
 use crate::error::{ApiError, ApiResult};
 use crate::ledger::Rejection;
 
 pub const WORLD_COOKIE: &str = "strike_world";
+/// An attempt that resumes a paused YOLO session instead of starting one.
+pub const CHECKPOINT: &str = "checkpoint";
 /// World's authorization codes live 5 minutes, so the attempt does too.
 pub const ATTEMPT_TTL_MS: i64 = 5 * 60 * 1000;
 pub const ACR_PREFIX: &str = "https://world.org/oidc/acr/";
@@ -45,6 +47,8 @@ pub const UNAVAILABLE: &str = "World ID unavailable, nothing started";
 pub const MISMATCH: &str = "A different human approved this";
 pub const BANNED_HUMAN: &str = "This human is banned";
 pub const ONE_PER_HUMAN: &str = "This human already runs a YOLO agent";
+pub const NOT_PAUSED: &str = "The agent is not waiting for a human";
+pub const AGENT_GONE: &str = "The agent already stopped";
 
 pub fn configured() -> ApiResult<&'static WorldClient> {
     config()
@@ -121,10 +125,15 @@ fn authorize_url(
     nonce: &str,
     verifier: &str,
     classes: &[&str],
+    sub: Option<&str>,
 ) -> String {
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let claims =
+    let mut claims =
         json!({ "id_token": { "acr": { "essential": true, "values": full_acr(classes) } } });
+    if let Some(sub) = sub {
+        // World answers access_denied when another human authenticates.
+        claims["id_token"]["sub"] = json!({ "value": sub });
+    }
     reqwest::Url::parse_with_params(
         &format!("{}/api/v1/authorize", client.issuer),
         [
@@ -182,56 +191,132 @@ pub async fn begin(
 ) -> ApiResult<Result<Challenge, Rejection>> {
     let client = configured()?;
     let classes = classes_for(terms.budget)?;
-    let id = uuid::Uuid::new_v4().to_string();
-    let (state, verifier, secret) = (random_b64(), random_b64(), random_b64());
-    let nonce = terms_nonce(&id, message);
-    let challenge = Challenge {
-        verify_url: authorize_url(client, &state, &nonce, &verifier, classes),
-        attempt_id: id.clone(),
-        expires_at_ms: (now_ms + ATTEMPT_TTL_MS).min(terms.expires_ms),
+    let expires_at_ms = (now_ms + ATTEMPT_TTL_MS).min(terms.expires_ms);
+    let draft = Draft::new(
+        client,
         classes,
-        browser_secret: secret,
-    };
-    let (wallet, start_nonce, message) = (
-        canonical(&terms.wallet),
-        terms.nonce.clone(),
-        message.to_string(),
+        expires_at_ms,
+        |_| message.to_string(),
+        None,
     );
+    let (wallet, start_nonce) = (canonical(&terms.wallet), terms.nonce.clone());
     db.write(move |conn| {
         if let Some(refused) = agent::start_blocked(conn, &start_nonce, &wallet)? {
             return Ok(Err(refused));
         }
+        match draft.save(conn, &wallet, "start", None, now_ms) {
+            Err(err) if is_unique_violation(&err) => {
+                Ok(Err(refuse(409, "Start message already used")))
+            }
+            Err(err) => Err(err.into()),
+            Ok(_) => Ok(Ok(draft.challenge)),
+        }
+    })
+    .await
+}
+
+/// Saves a checkpoint for a YOLO session paused until `until_ms`. World lets
+/// only the human linked to its wallet approve it.
+pub async fn begin_checkpoint(
+    db: &Db,
+    session: &Session,
+    until_ms: i64,
+    now_ms: i64,
+) -> ApiResult<Result<Challenge, Rejection>> {
+    let client = configured()?;
+    let classes = classes_for(session.budget)?;
+    let (session_id, wallet) = (session.id.clone(), session.wallet.clone());
+    db.write(move |conn| {
+        if until_ms <= now_ms || !running(conn, &session_id)? {
+            return Ok(Err(refuse(409, NOT_PAUSED)));
+        }
+        let Some((_, sub)) = link_of(conn, &wallet)? else {
+            return Ok(Err(refuse(409, "No human is linked to this wallet")));
+        };
+        let draft = Draft::new(
+            client,
+            classes,
+            (now_ms + ATTEMPT_TTL_MS).min(until_ms),
+            |id| format!("Strike checkpoint\nSession: {session_id}\nAttempt: {id}"),
+            Some(&sub),
+        );
+        draft.save(conn, &wallet, CHECKPOINT, Some(&session_id), now_ms)?;
+        Ok(Ok(draft.challenge))
+    })
+    .await
+}
+
+/// A pending attempt before it is saved.
+struct Draft {
+    challenge: Challenge,
+    message: String,
+    state: String,
+    nonce: String,
+    verifier: String,
+}
+
+impl Draft {
+    /// `message` is what the approval is for, given the attempt id.
+    fn new(
+        client: &WorldClient,
+        classes: &'static [&'static str],
+        expires_at_ms: i64,
+        message: impl FnOnce(&str) -> String,
+        sub: Option<&str>,
+    ) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (state, verifier) = (random_b64(), random_b64());
+        let message = message(&id);
+        let nonce = terms_nonce(&id, &message);
+        Draft {
+            challenge: Challenge {
+                verify_url: authorize_url(client, &state, &nonce, &verifier, classes, sub),
+                attempt_id: id,
+                expires_at_ms,
+                classes,
+                browser_secret: random_b64(),
+            },
+            message,
+            state,
+            nonce,
+            verifier,
+        }
+    }
+
+    /// Supersedes the wallet's pending attempt and saves this one.
+    fn save(
+        &self,
+        conn: &Connection,
+        wallet: &str,
+        kind: &str,
+        session_id: Option<&str>,
+        now_ms: i64,
+    ) -> rusqlite::Result<usize> {
         conn.execute(
             "UPDATE world_attempts SET status = 'expired', reason = ?2, done_at = ?3 \
              WHERE wallet = ?1 AND status = 'pending'",
             params![wallet, SUPERSEDED, now_ms * 1_000],
         )?;
-        let inserted = conn.execute(
+        conn.execute(
             "INSERT INTO world_attempts (id, wallet, message, state, nonce, verifier, browser, \
-             acr_allowed, status, expires_at, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)",
+             acr_allowed, status, expires_at, created_at, kind, session_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12)",
             params![
-                id,
+                self.challenge.attempt_id,
                 wallet,
-                message,
-                state,
-                nonce,
-                verifier,
-                browser_hash(&challenge.browser_secret),
-                full_acr(challenge.classes).join(" "),
-                challenge.expires_at_ms * 1_000,
-                now_ms * 1_000
+                self.message,
+                self.state,
+                self.nonce,
+                self.verifier,
+                browser_hash(&self.challenge.browser_secret),
+                full_acr(self.challenge.classes).join(" "),
+                self.challenge.expires_at_ms * 1_000,
+                now_ms * 1_000,
+                kind,
+                session_id
             ],
-        );
-        match inserted {
-            Err(err) if is_unique_violation(&err) => {
-                Ok(Err(refuse(409, "Start message already used")))
-            }
-            Err(err) => Err(err.into()),
-            Ok(_) => Ok(Ok(challenge)),
-        }
-    })
-    .await
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -249,10 +334,11 @@ pub struct Attempt {
     pub session_id: Option<String>,
     pub expires_at_ms: i64,
     pub created_at_ms: i64,
+    pub kind: String,
 }
 
 const ATTEMPT_COLUMNS: &str = "id, wallet, message, nonce, verifier, browser, acr_allowed, \
-     status, reason, acr, session_id, expires_at, created_at";
+     status, reason, acr, session_id, expires_at, created_at, kind";
 
 fn attempt_row(row: &rusqlite::Row) -> rusqlite::Result<Attempt> {
     Ok(Attempt {
@@ -273,6 +359,7 @@ fn attempt_row(row: &rusqlite::Row) -> rusqlite::Result<Attempt> {
         session_id: row.get(10)?,
         expires_at_ms: row.get::<_, i64>(11)? / 1_000,
         created_at_ms: row.get::<_, i64>(12)? / 1_000,
+        kind: row.get(13)?,
     })
 }
 
@@ -359,6 +446,7 @@ impl Attempt {
             "acr": self.acr.as_deref().map(|a| a.strip_prefix(ACR_PREFIX).unwrap_or(a)),
             "sessionId": self.session_id,
             "expiresAt": self.expires_at_ms,
+            "kind": self.kind,
         })
     }
 }
@@ -374,7 +462,7 @@ pub fn error_outcome(error: &str, budget: Option<Decimal>) -> (&'static str, Str
                     "Your World ID level can't back a {} USDC budget",
                     budget.normalize()
                 ),
-                None => "Your World ID level can't back this budget".to_string(),
+                None => "Your World ID level can't pass this check".to_string(),
             },
         ),
         other => ("failed", could_not_finish(other)),
@@ -661,6 +749,24 @@ fn check_claims(
 // Per-human rules, run inside the session's write
 // ---------------------------------------------------------------------------
 
+/// `(iss, sub)` of the human linked to a wallet.
+fn link_of(conn: &Connection, wallet: &str) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT iss, sub FROM world_links WHERE wallet = ?1",
+        [wallet],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
+fn running(conn: &Connection, session_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE id = ?1 AND status = 'running')",
+        [session_id],
+        |r| r.get(0),
+    )
+}
+
 fn wallets_of(conn: &Connection, iss: &str, sub: &str) -> rusqlite::Result<Vec<String>> {
     conn.prepare_cached(
         "SELECT wallet FROM world_links WHERE iss = ?1 AND sub = ?2 ORDER BY linked_at",
@@ -719,14 +825,7 @@ pub(crate) fn claim(
     if expires_at <= now_ms * 1_000 {
         return end("expired", 410, EXPIRED);
     }
-    let linked: Option<(String, String)> = conn
-        .query_row(
-            "SELECT iss, sub FROM world_links WHERE wallet = ?1",
-            [wallet],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if linked.is_some_and(|(iss, sub)| iss != grant.iss || sub != grant.sub) {
+    if link_of(conn, wallet)?.is_some_and(|(iss, sub)| iss != grant.iss || sub != grant.sub) {
         return end("mismatch", 403, MISMATCH);
     }
     let mut wallets = wallets_of(conn, &grant.iss, &grant.sub)?;
@@ -778,6 +877,82 @@ pub(crate) fn approve(
         ],
     )?;
     Ok(())
+}
+
+/// Spends an approved checkpoint on its paused session: the same human, not
+/// banned, before the pause runs out. `Err` is the status the attempt ended
+/// with, `"used"` when it had already ended.
+pub async fn resume(
+    db: &Db,
+    grant: HumanGrant,
+    now_ms: i64,
+) -> ApiResult<Result<String, &'static str>> {
+    db.write(move |conn| {
+        let row: Option<(String, i64, String, String)> = conn
+            .query_row(
+                "SELECT status, expires_at, session_id, wallet FROM world_attempts \
+                 WHERE id = ?1 AND kind = 'checkpoint'",
+                [&grant.attempt_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((status, expires_at, session_id, wallet)) = row else {
+            return Ok(Err("used"));
+        };
+        if status != "pending" {
+            return Ok(Err("used"));
+        }
+        let end = |status: &'static str, reason: &str| {
+            settle(conn, &grant.attempt_id, status, reason, now_ms).map(|_| Err(status))
+        };
+        if expires_at <= now_ms * 1_000 {
+            return Ok(end("expired", EXPIRED)?);
+        }
+        if !running(conn, &session_id)? {
+            return Ok(end("failed", AGENT_GONE)?);
+        }
+        if link_of(conn, &wallet)? != Some((grant.iss.clone(), grant.sub.clone())) {
+            return Ok(end("mismatch", MISMATCH)?);
+        }
+        if any_banned(conn, &wallets_of(conn, &grant.iss, &grant.sub)?)? {
+            return Ok(end("denied", BANNED_HUMAN)?);
+        }
+        conn.execute(
+            "UPDATE world_attempts SET status = 'approved', reason = ?2, acr = ?3, done_at = ?4 \
+             WHERE id = ?1 AND status = 'pending'",
+            params![grant.attempt_id, VERIFIED, grant.acr, now_ms * 1_000],
+        )?;
+        Ok(Ok(session_id))
+    })
+    .await
+}
+
+/// Whether the paused session's human approved its checkpoint. `give_up`
+/// expires one still out at World in the same write, so none lands later.
+pub async fn checkpoint_passed(
+    db: &Db,
+    session_id: &str,
+    give_up: bool,
+    now_ms: i64,
+) -> ApiResult<bool> {
+    let session_id = session_id.to_string();
+    db.write(move |conn| {
+        let passed: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM world_attempts \
+              WHERE session_id = ?1 AND kind = 'checkpoint' AND status = 'approved')",
+            [&session_id],
+            |r| r.get(0),
+        )?;
+        if !passed && give_up {
+            conn.execute(
+                "UPDATE world_attempts SET status = 'expired', reason = ?2, done_at = ?3 \
+                 WHERE session_id = ?1 AND kind = 'checkpoint' AND status = 'pending'",
+                params![session_id, EXPIRED, now_ms * 1_000],
+            )?;
+        }
+        Ok(passed)
+    })
+    .await
 }
 
 /// The human behind a wallet for the admin view: proof class, when it was
@@ -847,6 +1022,7 @@ mod tests {
             session_id: None,
             expires_at_ms: NOW_MS + ATTEMPT_TTL_MS,
             created_at_ms: NOW_MS - 20_000,
+            kind: "start".into(),
         }
     }
 
@@ -990,8 +1166,15 @@ mod tests {
 
     #[test]
     fn the_authorize_url_asks_for_a_fresh_proof_of_the_class() {
-        let url = reqwest::Url::parse(&authorize_url(&client(), "st", "no", "ver", &CLASSES[1..]))
-            .unwrap();
+        let url = reqwest::Url::parse(&authorize_url(
+            &client(),
+            "st",
+            "no",
+            "ver",
+            &CLASSES[1..],
+            Some("human-1"),
+        ))
+        .unwrap();
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(url.path(), "/api/v1/authorize");
         assert_eq!(q["max_age"], "0");
@@ -1003,6 +1186,7 @@ mod tests {
         assert_eq!(q["scope"], "openid");
         let claims: Value = serde_json::from_str(&q["claims"]).unwrap();
         assert_eq!(claims["id_token"]["acr"]["essential"], true);
+        assert_eq!(claims["id_token"]["sub"]["value"], "human-1");
         assert_eq!(
             claims["id_token"]["acr"]["values"][1],
             format!("{ACR_PREFIX}orb-face")

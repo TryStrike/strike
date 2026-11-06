@@ -15,6 +15,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use strike_core::agent;
 use strike_core::bets::now_ms;
+use strike_core::config::config;
 use strike_core::crypto::{self, AgentClaims, AGENT_COOKIE};
 use strike_core::db;
 use strike_core::error::ApiError;
@@ -34,11 +35,13 @@ const REPLAY: i64 = 50;
 /// The cookie outlives the session by an hour so the trader can still read
 /// how it ended.
 const COOKIE_GRACE_SECONDS: i64 = 3_600;
+pub(crate) const AGENTS_NOT_CONFIGURED: &str = "Agent sessions are not configured on this server";
 
 pub fn routes() -> Router {
     Router::new()
         .route("/api/agent/start", post(start))
         .route("/api/agent/stop", post(stop))
+        .route("/api/agent/checkpoint", post(checkpoint))
         .route("/api/agent/decisions", get(decisions))
         .route("/api/agent/decisions/{id}/approve", post(approve))
         .route("/api/agent/decisions/{id}/reject", post(reject_proposal))
@@ -87,6 +90,9 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
     if bans::is_globally_banned(&terms.wallet).await {
         return Err(ApiError::json(StatusCode::FORBIDDEN, "Wallet is banned"));
     }
+    if !config().is_settlement_signing_configured() {
+        return Err(ApiError::unavailable(AGENTS_NOT_CONFIGURED));
+    }
     let database = db::db().await?;
     if terms.mode == "yolo" {
         return Ok(match world::begin(database, &terms, message, now).await? {
@@ -125,11 +131,12 @@ fn human_check(challenge: &world::Challenge) -> Response {
 }
 
 /// Runs a created session and returns the cookie that reads and stops it.
+/// Both starts refuse before any write when the cookie can't be minted.
 pub(crate) fn started(session: agent::Session) -> Result<Cookie, ApiError> {
     let ttl = (session.ends_at_ms - session.starts_at_ms) / 1_000 + COOKIE_GRACE_SECONDS;
     let token = crypto::mint_agent_token(&session.id, &session.wallet, ttl).map_err(|err| {
         tracing::error!("[agent] token not minted: {err}");
-        ApiError::unavailable("Agent sessions are not configured on this server")
+        ApiError::unavailable(AGENTS_NOT_CONFIGURED)
     })?;
     live::spawn(session);
     Ok(Cookie {
@@ -155,6 +162,25 @@ async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
         .await?
         .ok_or_else(no_session)?;
     Ok(Json(json!({ "session": session.to_json() })))
+}
+
+/// The step-up that resumes a YOLO agent paused for its human, in the same
+/// 401 challenge shape as a YOLO start.
+async fn checkpoint(headers: HeaderMap) -> Result<Response, ApiError> {
+    let claims = claims(&headers)?;
+    let database = db::db().await?;
+    let session = agent::session_for(database, &claims.session_id, &claims.wallet)
+        .await?
+        .ok_or_else(no_session)?;
+    let Some(until) = live::paused_until(&session.id) else {
+        return Err(ApiError::conflict(world::NOT_PAUSED));
+    };
+    Ok(
+        match world::begin_checkpoint(database, &session, until, now_ms()).await? {
+            Ok(challenge) => human_check(&challenge),
+            Err(rejection) => reject(rejection),
+        },
+    )
 }
 
 fn no_session() -> ApiError {

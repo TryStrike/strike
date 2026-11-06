@@ -163,6 +163,7 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("world_attempts", "expires_at", TS),
     ("world_attempts", "done_at", TS),
     ("world_attempts", "created_at", TS),
+    ("world_attempts", "kind", "text"),
     ("world_links", "wallet", "text"),
     ("world_links", "iss", "text"),
     ("world_links", "sub", "text"),
