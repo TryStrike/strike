@@ -5,6 +5,7 @@ import { AssetType } from "@/lib/utils/priceFeed";
 import { playWinSound, playLoseSound } from "@/lib/utils/sounds";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 import { useToastStore } from "@/lib/hooks/useToast";
+import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
 
 export type GameMode = 'binomo' | 'box' | 'draw';
 
@@ -16,7 +17,6 @@ export interface ActiveBet {
   multiplier: number;
   direction: 'UP' | 'DOWN';
   timestamp: number;
-  status: 'active' | 'settled';
   network?: string;
   userAddress?: string;
   settlementToken?: string;
@@ -40,6 +40,7 @@ export interface GameState {
   assetHistories: Record<string, PricePoint[]>;
   rawAssetPrices: Record<string, number>;
   activeBets: ActiveBet[];
+  settlingBets: ActiveBet[];
   targetCells: TargetCell[];
   isPlacingBet: boolean;
   lastResult: {
@@ -75,7 +76,6 @@ export interface GameState {
 
 
   addActiveBet: (bet: ActiveBet) => void;
-  resolveBet: (betId: string, won: boolean, payout: number) => void;
   clearError: () => void;
 
 
@@ -90,18 +90,6 @@ export interface GameState {
 
 const MAX_PRICE_HISTORY = 200;
 
-const priceAtOrBefore = (
-  history: PricePoint[],
-  endTime: number,
-  fallback: number
-): number => {
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].timestamp <= endTime) return history[i].price;
-  }
-  return fallback;
-};
-
-
 const DEFAULT_TARGET_CELLS: TargetCell[] = [
   { id: '1', label: '+$5 in 30s', multiplier: 1.5, priceChange: 5, direction: 'UP' },
   { id: '2', label: '+$10 in 30s', multiplier: 2.0, priceChange: 10, direction: 'UP' },
@@ -114,65 +102,135 @@ const DEFAULT_TARGET_CELLS: TargetCell[] = [
 ];
 
 const ROUND_CLOCK_GRACE_MS = 400;
-const ROUND_CLOCK_MAX_REARMS = 60;
+const FAST_CLAIMS = 8;
+const CLAIM_RETRY_MS = 1000;
+const SLOW_CLAIMS = 24;
+const SLOW_CLAIM_RETRY_MS = 5000;
+
+const sameWallet = (a?: string | null, b?: string | null) => a?.toLowerCase() === b?.toLowerCase();
+
+/** Retries until the server answers, since the sweeper settles the round even if every claim fails. */
+async function claimRound(bet: ActiveBet, userAddress: string, currency: string, onSlow: () => void) {
+  let sessionRefreshed = false;
+  for (let attempt = 0; attempt < FAST_CLAIMS + SLOW_CLAIMS; attempt += 1) {
+    if (attempt === FAST_CLAIMS) onSlow();
+    try {
+      const res = await fetch('/api/balance/win', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userAddress,
+          winAmount: 0,
+          currency,
+          betId: bet.id,
+          settlementToken: bet.settlementToken,
+        }),
+      });
+      if (res.ok) return await res.json();
+      if (res.status === 401 && !sessionRefreshed) {
+        sessionRefreshed = true;
+        await ensureBalanceSession();
+        continue;
+      }
+      if (res.status >= 400 && res.status < 500 && res.status !== 409) {
+        console.error('[settle] claim refused', bet.id, res.status);
+        return null;
+      }
+    } catch (err) {
+      console.error('[settle] claim failed, retrying', bet.id, err);
+    }
+    await new Promise((resolve) => setTimeout(resolve, attempt < FAST_CLAIMS ? CLAIM_RETRY_MS : SLOW_CLAIM_RETRY_MS));
+  }
+  return null;
+}
 
 export const createGameSlice: StateCreator<any> = (set, get) => {
   const roundTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  const clearRoundTimer = (betId: string) => {
-    const t = roundTimers.get(betId);
-    if (t) {
-      clearTimeout(t);
-      roundTimers.delete(betId);
-    }
-  };
-
-  const settleByWallClock = (betId: string, rearmsLeft = ROUND_CLOCK_MAX_REARMS) => {
+  const settleRound = async (betId: string) => {
     roundTimers.delete(betId);
-    const state = get();
-    const bet: ActiveBet | undefined = state.activeBets.find((b: ActiveBet) => b.id === betId);
-    if (!bet || bet.status !== 'active' || !bet.endTime) return;
-    if (Date.now() < bet.endTime) return;
-    const endTime = bet.endTime;
+    const { activeBets, settlingBets, address, network, currentPrice } = get();
+    const bet: ActiveBet | undefined = activeBets.find((b: ActiveBet) => b.id === betId);
+    if (!bet) return;
 
-    const key = (bet.asset || 'BNB') as string;
-    const history: PricePoint[] = state.assetHistories?.[key] || [];
-    const knownPrice = state.assetPrices?.[key];
-    const usable =
-      history.some((p) => p.timestamp <= endTime) ||
-      (typeof knownPrice === 'number' && knownPrice > 0);
-    if (!usable) {
-      if (rearmsLeft > 0) {
-        roundTimers.set(betId, setTimeout(() => settleByWallClock(betId, rearmsLeft - 1), 1000));
-      }
+    set({
+      activeBets: activeBets.filter((b: ActiveBet) => b.id !== betId),
+      settlingBets: [...settlingBets, bet],
+    });
+
+    const wallet = bet.userAddress || address;
+    const currency = bet.network || network || 'USDC';
+    const warnSlow = () =>
+      useToastStore.getState().addToast(
+        'Your result is taking longer than usual. Your balance will update once this round settles.',
+        'error'
+      );
+    const result = wallet ? await claimRound(bet, wallet, currency, warnSlow) : null;
+
+    set((state: GameState) => ({ settlingBets: state.settlingBets.filter((b) => b.id !== betId) }));
+
+    if (!sameWallet(wallet, get().address)) return;
+    if (wallet) void get().fetchBalance?.(wallet);
+
+    if (!result) {
+      console.error('No server result for bet', bet.id);
       return;
     }
 
-    const settledPrice = priceAtOrBefore(history, endTime, knownPrice ?? 0);
-    if (settledPrice <= 0) return;
+    const won = result.won === true;
+    const payout = Number(result.payout) || 0;
+    const endPrice = result.endPrice ?? currentPrice;
+    const timestamp = Date.now();
 
-    if (bet.mode === 'binomo' && bet.strikePrice !== undefined) {
-      if (settledPrice === bet.strikePrice) {
-        get().resolveBet(bet.id, true, bet.amount);
-      } else {
-        const won = bet.direction === 'UP' ? settledPrice > bet.strikePrice : settledPrice < bet.strikePrice;
-        get().resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
-      }
-    } else if (
-      (bet.mode === 'box' || bet.mode === 'draw') &&
-      bet.priceTop !== undefined &&
-      bet.priceBottom !== undefined
-    ) {
-      const won = settledPrice <= bet.priceTop && settledPrice >= bet.priceBottom;
-      get().resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
-    }
+    if (won) playWinSound();
+    else playLoseSound();
+
+    get().addBet?.({
+      id: bet.id,
+      timestamp,
+      amount: bet.amount.toString(),
+      won,
+      payout: payout.toString(),
+      startPrice: bet.strikePrice || 0,
+      endPrice,
+      actualChange: endPrice - (bet.strikePrice || 0),
+      asset: bet.asset,
+      endTime: bet.endTime ?? null,
+      strikePrice: bet.strikePrice ?? null,
+      target: {
+        id: bet.mode === 'binomo' ? 'classic' : bet.mode === 'draw' ? 'draw' : 'box',
+        label:
+          bet.mode === 'binomo'
+            ? `${bet.direction} ${bet.multiplier}x`
+            : bet.mode === 'draw'
+              ? `Draw ${bet.multiplier}x`
+              : `Box ${bet.multiplier}x`,
+        multiplier: bet.multiplier,
+        priceChange: 0,
+        direction: bet.direction,
+      },
+    });
+
+    set({
+      lastResult: {
+        won,
+        amount: bet.amount,
+        payout,
+        timestamp,
+        asset: bet.asset,
+        cellId: bet.cellId,
+        currency,
+        betId: bet.id,
+      },
+    });
   };
 
   const armRoundClock = (bet: ActiveBet) => {
     if (!Number.isFinite(bet.endTime)) return;
-    clearRoundTimer(bet.id);
+    const pending = roundTimers.get(bet.id);
+    if (pending) clearTimeout(pending);
     const delay = Math.max(0, (bet.endTime as number) - Date.now()) + ROUND_CLOCK_GRACE_MS;
-    roundTimers.set(bet.id, setTimeout(() => settleByWallClock(bet.id), delay));
+    roundTimers.set(bet.id, setTimeout(() => void settleRound(bet.id), delay));
   };
 
   return {
@@ -188,6 +246,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
   rawAssetPrices: {},
 
   activeBets: [],
+  settlingBets: [],
   targetCells: DEFAULT_TARGET_CELLS,
   isPlacingBet: false,
   lastResult: null,
@@ -406,7 +465,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         multiplier: data.multiplier ?? multiplier,
         direction: direction,
         timestamp: clickTime,
-        status: 'active',
         network: currency,
         userAddress: userAddress,
         settlementToken: data.settlementToken,
@@ -471,7 +529,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
   updateAllPrices: (prices: Record<string, number>) => {
     const { 
-      selectedAsset, activeBets, resolveBet, assetPrices, 
+      selectedAsset, assetPrices, 
       assetHistories, rawAssetPrices
     } = get();
     const now = Date.now();
@@ -518,26 +576,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         nextCurrentHistory = updatedAssetHistories[assetKey] || [];
       }
 
-      if (activeBets && activeBets.length > 0) {
-        const settleHistory = updatedAssetHistories[assetKey] || [];
-        activeBets.forEach((bet: ActiveBet) => {
-          if ((bet.asset || 'BNB') !== assetKey || bet.status !== 'active') return;
-
-          if (bet.mode === 'binomo' && bet.endTime && bet.strikePrice !== undefined && now >= bet.endTime) {
-            const settledPrice = priceAtOrBefore(settleHistory, bet.endTime, finalPrice);
-            if (settledPrice === bet.strikePrice) {
-              resolveBet(bet.id, true, bet.amount);
-            } else {
-              const won = bet.direction === 'UP' ? settledPrice > bet.strikePrice : settledPrice < bet.strikePrice;
-              resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
-            }
-          } else if ((bet.mode === 'box' || bet.mode === 'draw') && bet.endTime && bet.priceTop !== undefined && bet.priceBottom !== undefined && now >= bet.endTime) {
-            const settledPrice = priceAtOrBefore(settleHistory, bet.endTime, finalPrice);
-            const won = settledPrice <= bet.priceTop && settledPrice >= bet.priceBottom;
-            resolveBet(bet.id, won, won ? bet.amount * bet.multiplier : 0);
-          }
-        });
-      }
     });
 
     const updateObj: any = {
@@ -562,120 +600,6 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
     const { activeBets } = get();
     set({ activeBets: [...activeBets, bet] });
     armRoundClock(bet);
-  },
-
-  resolveBet: (betId: string, won: boolean, payout: number) => {
-    const { activeBets, currentPrice, address, network, fetchBalance } = get();
-    const resolvedBet = activeBets.find((b: ActiveBet) => b.id === betId);
-
-    clearRoundTimer(betId);
-
-    if (resolvedBet) {
-      const now = Date.now();
-
-      if (won) playWinSound();
-      else playLoseSound();
-
-      set({
-        activeBets: activeBets.filter((b: ActiveBet) => b.id !== betId),
-        lastResult: {
-          won,
-          amount: resolvedBet.amount,
-          payout,
-          timestamp: now,
-          asset: resolvedBet.asset,
-          cellId: resolvedBet.cellId,
-          currency: resolvedBet.network || network || 'USDC',
-          betId: resolvedBet.id
-        }
-      });
-
-      const settlementAddress = resolvedBet.userAddress || address;
-      const settlementCurrency = resolvedBet.network || network || 'USDC';
-
-      const anyGet = get() as any;
-      const historyRecord = {
-          id: resolvedBet.id,
-          timestamp: now,
-          amount: resolvedBet.amount.toString(),
-          won: won,
-          payout: payout.toString(),
-          startPrice: resolvedBet.strikePrice || 0,
-          endPrice: currentPrice,
-          actualChange: currentPrice - (resolvedBet.strikePrice || 0),
-          asset: resolvedBet.asset,
-          endTime: resolvedBet.endTime ?? null,
-          strikePrice: resolvedBet.strikePrice ?? null,
-          target: {
-            id:
-              resolvedBet.mode === 'binomo'
-                ? 'classic'
-                : resolvedBet.mode === 'draw'
-                  ? 'draw'
-                  : 'box',
-            label:
-              resolvedBet.mode === 'binomo'
-                ? `${resolvedBet.direction} ${resolvedBet.multiplier}x`
-                : resolvedBet.mode === 'draw'
-                  ? `Draw ${resolvedBet.multiplier}x`
-                  : `Box ${resolvedBet.multiplier}x`,
-            multiplier: resolvedBet.multiplier,
-            priceChange: 0,
-            direction: resolvedBet.direction
-          }
-      };
-      anyGet.addBet?.(historyRecord);
-
-      const reconcileRound = async () => {
-        for (let attempt = 0; attempt < 8; attempt += 1) {
-          try {
-            const res = await fetch('/api/balance/win', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                userAddress: settlementAddress,
-                winAmount: payout,
-                currency: settlementCurrency,
-                betId: resolvedBet.id,
-                settlementToken: resolvedBet.settlementToken,
-              }),
-            });
-            if (res.ok) return await res.json();
-          } catch {}
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-        return null;
-      };
-
-      if (settlementAddress) {
-        void (async () => {
-          const result = await reconcileRound();
-          if (fetchBalance) fetchBalance(settlementAddress);
-          if (!result) {
-            console.error('No server result yet for bet', resolvedBet.id);
-            if (won) {
-              useToastStore.getState().addToast(
-                'Your result is taking longer than usual. Your balance will update once this round settles.',
-                'error'
-              );
-            }
-            return;
-          }
-          const serverPayout = Number(result.payout) || 0;
-          const serverWon = result.won === true;
-          const shown = get().lastResult;
-          if (shown?.betId === resolvedBet.id) {
-            set({ lastResult: { ...shown, won: serverWon, payout: serverPayout } });
-          }
-          anyGet.addBet?.({
-            ...historyRecord,
-            won: serverWon,
-            payout: serverPayout.toString(),
-            endPrice: result.endPrice ?? historyRecord.endPrice,
-          });
-        })();
-      }
-    }
   },
 
   clearError: () => {

@@ -208,3 +208,10 @@ button:disabled,
     transform: rotate(360deg);
   }
 }
+
+@keyframes result-float {
+  to {
+    opacity: 0;
+    transform: translateY(-150px);
+  }
+}

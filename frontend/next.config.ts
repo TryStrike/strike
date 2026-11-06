@@ -8,6 +8,7 @@ const backendUrl = process.env.BACKEND_URL?.trim().replace(/\/+$/, "");
 const DEV_BACKEND_URL = "http://127.0.0.1:8080";
 
 const config = (phase: string): NextConfig => ({
+  transpilePackages: ["tapgrid"],
   experimental: {
     proxyTimeout: 420_000,
     optimizePackageImports: [
