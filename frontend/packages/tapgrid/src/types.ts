@@ -58,6 +58,8 @@ export interface TapGridOptions {
   viewSpan: number;
   minRange: number;
   maxStep: number;
+  /** Keep the row height while placed boxes are on screen, so they stay one row tall. */
+  holdStep?: boolean;
   colors: Colors;
   fontFamily: string;
   reducedMotion: boolean;

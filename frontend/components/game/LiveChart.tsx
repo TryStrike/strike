@@ -914,6 +914,9 @@ export const LiveChart = React.memo(function LiveChart({
   const lastResult = useStore((state) => state.lastResult);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
+  const hasOpenBets = useStore(
+    (state) => state.activeBets.length + state.settlingBets.length > 0,
+  );
   const marketClosed = useStore((state) =>
     state.closedAssets.includes(state.selectedAsset),
   );
@@ -1305,6 +1308,7 @@ export const LiveChart = React.memo(function LiveChart({
               tickRange,
             )}
             maxStep={isBox ? maxBand : 0}
+            holdStep={isBox && hasOpenBets}
             colors={theme.palette}
             fontFamily={theme.fontFamily}
             reducedMotion={prefersReducedMotion}
