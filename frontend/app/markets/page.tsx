@@ -1,13 +1,12 @@
 'use client';
 
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { ArrowUpRight, CaretDown, MagnifyingGlass, Storefront } from '@phosphor-icons/react';
 import { SiteNav } from '@/components/SiteNav';
 import { WalletConnect } from '@/components/wallet';
-import { Label, cx } from '@/components/ui/kit';
-import { useStore } from '@/lib/store';
-import { PRICE_FEED_IDS, type AssetType } from '@/lib/utils/priceFeed';
+import { Label, cx, glassPrimary } from '@/components/ui/kit';
+import { PRICE_FEED_IDS } from '@/lib/utils/priceFeed';
 
 interface Venue {
   issuer: string;
@@ -62,7 +61,7 @@ function spread(a: Asset) {
   const prices = quoted(a).map((v) => v.price as number);
   return prices.length > 1 ? (Math.max(...prices) / Math.min(...prices) - 1) * 100 : 0;
 }
-const tradable = (t: string): t is AssetType => t in PRICE_FEED_IDS;
+const tradable = (t: string) => t in PRICE_FEED_IDS;
 
 export default function MarketsPage() {
   const [data, setData] = useState<Markets | null>(null);
@@ -71,8 +70,6 @@ export default function MarketsPage() {
   const [sort, setSort] = useState<SortKey>('volume');
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState<string | null>(null);
-  const router = useRouter();
-  const setSelectedAsset = useStore((s) => s.setSelectedAsset);
 
   useEffect(() => {
     let alive = true;
@@ -121,12 +118,6 @@ export default function MarketsPage() {
     );
   };
 
-  const predict = (ticker: string) => {
-    if (!tradable(ticker)) return;
-    setSelectedAsset(ticker);
-    router.push('/trade');
-  };
-
   return (
     <div className="min-h-full w-full bg-white font-tight text-ink">
       <SiteNav wide right={<WalletConnect />} />
@@ -160,41 +151,48 @@ export default function MarketsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            <section className="grid gap-4 overflow-hidden rounded-3xl bg-ink px-6 py-6 text-white md:grid-cols-[1.4fr_1fr] md:items-center sm:px-8">
-              <div>
-                <h2 className="text-[26px] font-semibold leading-[1.1] tracking-tight sm:text-[30px]">
-                  Same share.
-                  <br />
-                  Different price.
-                </h2>
-                <p className="mt-3 max-w-md text-sm leading-relaxed text-white/65">
-                  {hero
-                    ? `${hero.ticker} costs ${spread(hero).toFixed(2)}% less on ${hero.best} than on its dearest wrapper right now.`
-                    : 'Each stock trades as several wrapper tokens. We quote all of them and show the cheapest.'}{' '}
-                  {venueCount} live quotes across {assets.length} stocks.
-                </p>
-              </div>
-              {hero && (
-                <div className="grid grid-cols-3 gap-2">
-                  {hero.venues.map((v) => (
-                    <div
-                      key={v.symbol}
-                      className={cx(
-                        'min-w-0 rounded-2xl px-3 py-3 ring-1',
-                        v.issuer === hero.best ? 'bg-white/15 ring-white/30' : 'bg-white/5 ring-white/10'
-                      )}
-                    >
-                      <div className="truncate text-[13px] font-semibold">{v.symbol}</div>
-                      <div className="mt-1 font-jet text-sm tabular-nums">
-                        {v.price == null ? 'no quote' : usd(v.price)}
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-white/55">
-                        {v.issuer === hero.best ? 'Best price' : v.issuer}
-                      </div>
-                    </div>
-                  ))}
+            <section className="rounded-3xl p-2 ring-1 ring-ink/[0.08]">
+              <div className="grid gap-5 rounded-[18px] bg-surface px-6 py-6 md:grid-cols-[1.4fr_1fr] md:items-center sm:px-8">
+                <div>
+                  <h2 className="text-[26px] font-semibold leading-[1.1] tracking-tight sm:text-[30px]">
+                    Same share.
+                    <br />
+                    Different price.
+                  </h2>
+                  <p className="mt-3 max-w-md text-sm leading-relaxed text-muted">
+                    {hero
+                      ? `${hero.ticker} costs ${spread(hero).toFixed(2)}% less on ${hero.best} than on its dearest wrapper right now.`
+                      : 'Each stock trades as several wrapper tokens. We quote all of them and show the cheapest.'}{' '}
+                    {venueCount} live quotes across {assets.length} stocks.
+                  </p>
                 </div>
-              )}
+                {hero && (
+                  <div className="grid auto-cols-fr grid-flow-col gap-2">
+                    {hero.venues.map((v) => (
+                      <div
+                        key={v.symbol}
+                        className={cx(
+                          'min-w-0 rounded-2xl bg-white px-3 py-3 ring-1',
+                          v.issuer === hero.best ? 'ring-up/40' : 'ring-line'
+                        )}
+                      >
+                        <div className="truncate text-[13px] font-semibold">{v.symbol}</div>
+                        <div className="mt-1 font-jet text-sm tabular-nums">
+                          {v.price == null ? 'no quote' : usd(v.price)}
+                        </div>
+                        <div
+                          className={cx(
+                            'mt-0.5 text-[11px]',
+                            v.issuer === hero.best ? 'font-semibold text-up' : 'text-subtle'
+                          )}
+                        >
+                          {v.issuer === hero.best ? 'Best price' : v.issuer}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </section>
 
             <div className="grid gap-3 lg:grid-cols-3">
@@ -326,16 +324,13 @@ export default function MarketsPage() {
                             <td className="py-3 text-right">
                               <div className="flex items-center justify-end gap-2">
                                 {tradable(a.ticker) && (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      predict(a.ticker);
-                                    }}
-                                    className="rounded-full bg-up-soft px-3 py-1.5 text-xs font-semibold text-up transition-colors hover:bg-up hover:text-white"
+                                  <Link
+                                    href={`/trade?asset=${a.ticker}`}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={cx('rounded-full px-3.5 py-1.5 text-xs font-semibold', glassPrimary)}
                                   >
                                     Predict
-                                  </button>
+                                  </Link>
                                 )}
                                 <CaretDown
                                   size={14}

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { useModal } from 'connectkit';
 import { useConnect, useConnectors, useSwitchChain } from 'wagmi';
@@ -10,7 +10,7 @@ import { CaretRight, ClockCounterClockwise, Fingerprint, Wallet, WarningCircle, 
 import { PASSKEY_CONNECTOR_ID, passkeySignIn } from '@/lib/wallet/passkey';
 import { arcChainLabel, arcTargetChainId } from '@/lib/wallet/arcChain';
 import { classifyConnectError, safeConnectErrorMessage } from '@/lib/wallet/connectErrors';
-import { connectCopyForError, isConnectingPhase } from '@/lib/wallet/connectMachine';
+import { connectCopyForError } from '@/lib/wallet/connectMachine';
 import { truncateAddress } from '@/lib/wallet/addressDisplay';
 import { saveRecentWallets } from '@/lib/wallet/recentWallets';
 
@@ -26,8 +26,9 @@ function Spinner() {
   );
 }
 
-function OptionRow({ icon: Icon, title, description, onClick, busy, disabled }: {
+function OptionRow({ icon: Icon, image, title, description, onClick, busy, disabled }: {
     icon: IconType;
+    image?: string;
     title: string;
     description: React.ReactNode;
     onClick: () => void;
@@ -43,7 +44,14 @@ function OptionRow({ icon: Icon, title, description, onClick, busy, disabled }: 
             className="group flex w-full items-center gap-4 rounded-2xl bg-white p-4 text-left ring-1 ring-inset ring-line transition-shadow hover:ring-ink disabled:cursor-wait disabled:opacity-50 disabled:hover:ring-line"
         >
             <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-surface text-ink">
-                {busy ? <Spinner /> : <Icon size={20} />}
+                {busy ? (
+                    <Spinner />
+                ) : image ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={image} alt="" className="h-6 w-6" />
+                ) : (
+                    <Icon size={20} />
+                )}
             </span>
             <span className="min-w-0 flex-1">
                 <span className="block text-[15px] font-semibold">{title}</span>
@@ -106,7 +114,6 @@ function ErrorPanel() {
 
 function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string; address: string } }) {
     const toast = useToast();
-    const pending = useStore((s) => isConnectingPhase(s.connectPhase));
     const [busy, setBusy] = useState(false);
     const connectors = useConnectors();
     const { connectAsync } = useConnect();
@@ -118,7 +125,7 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
     const connector = connectors.find((c) => c.id === entry.connectorId);
 
     const handleReconnect = useCallback(async () => {
-        if (!connector || busy || pending) return;
+        if (!connector || busy) return;
         setBusy(true);
         dispatchConnectEvent({ type: 'START_RECONNECT' });
         try {
@@ -134,7 +141,7 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
         } finally {
             setBusy(false);
         }
-    }, [connector, busy, pending, dispatchConnectEvent, connectAsync, targetChainId, recordRecentWallet, setConnectModalOpen, entry.address, toast]);
+    }, [connector, busy, dispatchConnectEvent, connectAsync, targetChainId, recordRecentWallet, setConnectModalOpen, entry.address, toast]);
 
     if (!connector) return null;
 
@@ -144,7 +151,6 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
             title={`${entry.name || 'Wallet'} — reconnect`}
             description={<span className="font-jet">{truncateAddress(entry.address)}</span>}
             busy={busy}
-            disabled={pending && !busy}
             onClick={() => void handleReconnect()}
         />
     );
@@ -154,39 +160,70 @@ export const WalletConnectModal: React.FC = () => {
     const isOpen = useStore(state => state.isConnectModalOpen);
     const setOpen = useStore(state => state.setConnectModalOpen);
     const { setOpen: openConnectKit } = useModal();
-    const connectPhase = useStore((s) => s.connectPhase);
     const recentWallets = useStore((s) => s.recentWallets);
     const dispatchConnectEvent = useStore((s) => s.dispatchConnectEvent);
 
-    const pending = isConnectingPhase(connectPhase);
     const connectors = useConnectors();
     const { connectAsync } = useConnect();
     const toast = useToast();
-    const [passkeyBusy, setPasskeyBusy] = useState<'register' | 'login' | null>(null);
+    const [busy, setBusy] = useState<string | null>(null);
 
-    const handlePasskey = async (mode: 'register' | 'login') => {
-        const connector = connectors.find((c) => c.id === PASSKEY_CONNECTOR_ID);
-        if (pending || passkeyBusy || !connector) return;
-        setPasskeyBusy(mode);
+    // The extension's own EIP-6963 announcement wins: it has the right icon and
+    // the right provider when several wallets are installed.
+    const metaMask = connectors.find((c) => c.id === 'io.metamask') ?? connectors.find((c) => c.id === 'metaMask');
+    const coinbase =
+        connectors.find((c) => c.id === 'com.coinbase.wallet') ?? connectors.find((c) => c.id === 'coinbaseWalletSDK');
+
+    // Wallet SDKs do not always settle when their popup is closed, so nothing
+    // here waits on them: any click supersedes a hanging attempt, and a late
+    // result from a superseded attempt is dropped.
+    const attempt = useRef(0);
+    const run = async (key: string, failure: string, connect: () => Promise<unknown>) => {
+        const id = ++attempt.current;
+        setBusy(key);
+        dispatchConnectEvent({ type: 'RESET' });
         dispatchConnectEvent({ type: 'START_CONNECT' });
         try {
-            await passkeySignIn(mode);
-            await connectAsync({ connector, chainId: arcTargetChainId() });
+            await connect();
+            if (id !== attempt.current) return;
             dispatchConnectEvent({ type: 'CONNECT_SUCCESS' });
             setOpen(false);
         } catch (err) {
+            if (id !== attempt.current) return;
             const kind = classifyConnectError(err);
             dispatchConnectEvent({ type: 'CONNECT_FAILURE', error: kind, message: safeConnectErrorMessage(err) });
-            console.error('[passkey] sign-in failed', err);
-            toast.error(mode === 'register' ? 'Could not create the passkey.' : 'Could not sign in with your passkey.');
+            console.error(`[connect] ${key} failed`, err);
+            toast.error(connectCopyForError(kind)?.title ?? failure);
         } finally {
-            setPasskeyBusy(null);
+            if (id === attempt.current) setBusy(null);
         }
     };
 
+    const connectWith = (key: string, name: string, connector: (typeof connectors)[number] | undefined) =>
+        run(key, `Could not connect ${name}.`, async () => {
+            if (!connector) throw new Error(`${name} connector missing`);
+            if (key === 'metamask' && !(await connector.getProvider())) {
+                window.open('https://metamask.io/download/', '_blank', 'noopener,noreferrer');
+                throw new Error('MetaMask is not installed in this browser');
+            }
+            await connectAsync({ connector, chainId: arcTargetChainId() });
+        });
+
+    const handlePasskey = (mode: 'register' | 'login') =>
+        run(mode, mode === 'register' ? 'Could not create the passkey.' : 'Could not sign in with your passkey.', async () => {
+            const connector = connectors.find((c) => c.id === PASSKEY_CONNECTOR_ID);
+            if (!connector) throw new Error('passkey connector missing');
+            await passkeySignIn(mode);
+            await connectAsync({ connector, chainId: arcTargetChainId() });
+        });
+
+    // ConnectKit runs its own picker and never reports a close, so this flow
+    // must not enter `connecting`: a dismissed picker would leave every option
+    // disabled. Success still lands through wagmi's account sync.
     const handleArcConnect = () => {
-        if (pending) return;
-        dispatchConnectEvent({ type: 'START_CONNECT' });
+        attempt.current++;
+        setBusy(null);
+        dispatchConnectEvent({ type: 'RESET' });
         openConnectKit(true);
         setOpen(false);
     };
@@ -238,28 +275,45 @@ export const WalletConnectModal: React.FC = () => {
                             </>
                         ) : null}
                         <OptionRow
+                            icon={Wallet}
+                            image={metaMask?.icon}
+                            title="MetaMask"
+                            description={`Connect on ${arcChainLabel(arcTargetChainId())}. We add the network for you.`}
+                            busy={busy === 'metamask'}
+                            onClick={() => void connectWith('metamask', 'MetaMask', metaMask)}
+                        />
+                        <OptionRow
+                            icon={Wallet}
+                            image={coinbase?.icon}
+                            title="Coinbase Wallet"
+                            description="Extension or the Coinbase Wallet app."
+                            busy={busy === 'coinbase'}
+                            onClick={() => void connectWith('coinbase', 'Coinbase Wallet', coinbase)}
+                        />
+                        <OptionRow
+                            icon={Wallet}
+                            title="Other wallets"
+                            description="Rabby, Rainbow, WalletConnect and more."
+                            onClick={handleArcConnect}
+                        />
+                        <div className="flex items-center gap-3 pt-2 text-[12px] text-faint">
+                            <span className="h-px flex-1 bg-line" />
+                            No wallet? Use a passkey
+                            <span className="h-px flex-1 bg-line" />
+                        </div>
+                        <OptionRow
                             icon={Fingerprint}
                             title="Create passkey account"
                             description="Touch ID or Face ID. No wallet app, no gas."
-                            busy={passkeyBusy === 'register'}
-                            disabled={pending || passkeyBusy !== null}
+                            busy={busy === 'register'}
                             onClick={() => void handlePasskey('register')}
                         />
                         <OptionRow
                             icon={Fingerprint}
                             title="Use my passkey"
                             description="Sign back in on this device."
-                            busy={passkeyBusy === 'login'}
-                            disabled={pending || passkeyBusy !== null}
+                            busy={busy === 'login'}
                             onClick={() => void handlePasskey('login')}
-                        />
-                        <OptionRow
-                            icon={Wallet}
-                            title="Browser wallet"
-                            description="MetaMask, WalletConnect and others."
-                            busy={pending}
-                            disabled={pending}
-                            onClick={handleArcConnect}
                         />
                     </div>
 

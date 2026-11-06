@@ -5,7 +5,7 @@ import { baseSepolia } from 'viem/chains';
 import { getArcConfig } from './config';
 import { BRAND } from '@/lib/brand';
 import { passkeyConnector } from '@/lib/wallet/passkey';
-import { injected, walletConnect } from 'wagmi/connectors';
+import { coinbaseWallet, injected, walletConnect } from 'wagmi/connectors';
 
 const arcConfig = getArcConfig();
 
@@ -44,6 +44,9 @@ export const config = createConfig(
     appIcon: app.icons[0],
     connectors: [
       passkeyConnector,
+      injected({ target: 'metaMask' }),
+      // eoaOnly: Coinbase's smart wallet does not serve Arc, the extension and app do.
+      coinbaseWallet({ appName: app.name, appLogoUrl: app.icons[0], preference: { options: 'eoaOnly' } }),
       injected(),
       ...(walletConnectProjectId ? [walletConnect({ projectId: walletConnectProjectId, metadata: app, showQrModal: false })] : []),
     ],

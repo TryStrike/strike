@@ -14,7 +14,6 @@ import { copyTextToClipboard, displayNameForWallet, truncateAddress } from '@/li
 import { loadRecentWallets, saveRecentWallets } from '@/lib/wallet/recentWallets';
 
 const CONNECT_TIMEOUT_MS = 60_000;
-const STALE_CONNECT_MS = 8_000;
 
 function Spinner() {
   return (
@@ -104,7 +103,6 @@ export const WalletConnect: React.FC = () => {
 
   const isConnected = !!address;
   const pending = isConnectingPhase(connectPhase);
-  const stalePending = pending && connectingSince !== null && Date.now() - connectingSince > STALE_CONNECT_MS;
 
   const handleDisconnect = () => {
     wagmiDisconnect();
@@ -132,16 +130,15 @@ export const WalletConnect: React.FC = () => {
   }, [switchChainAsync, targetChainId, setLastError]);
 
   if (!isConnected) {
-    const disabled = pending && !stalePending;
     return (
       <div className="flex items-center gap-1">
         <button
           type="button"
           onClick={() => {
-            if (pending && !stalePending) return;
+            // Never a dead button: a flow that lost track of itself is reset here.
+            if (pending) dispatchConnectEvent({ type: 'RESET' });
             setConnectModalOpen(true);
           }}
-          disabled={disabled}
           data-tour="connect-button"
           aria-busy={pending}
           className={`inline-flex h-9 items-center gap-2 rounded-full px-4 font-tight text-sm font-semibold ${glassPrimary} disabled:cursor-wait disabled:opacity-70`}
