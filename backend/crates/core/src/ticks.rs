@@ -68,6 +68,9 @@ pub struct Tick {
 
 /// The ring's resolution. A settled price is this much older than the end at worst.
 pub const TICK_BUCKET_MS: i64 = 250;
+/// The longest history the price stream replays on connect, one point per second.
+pub const HISTORY_MS: i64 = 600_000;
+pub const HISTORY_MAX_POINTS: usize = 600;
 
 #[derive(Default)]
 struct Ring {
@@ -147,6 +150,21 @@ impl TickBuffer {
                 .copied()
                 .collect()
         })
+    }
+
+    /// `[at_ms, price]` since `since_ms`, one point per second (the first of each),
+    /// at most the newest [`HISTORY_MAX_POINTS`].
+    pub fn history(&self, asset: &str, since_ms: i64) -> Vec<(i64, f64)> {
+        let mut points: Vec<(i64, f64)> = Vec::new();
+        for tick in self.since(asset, since_ms) {
+            if points
+                .last()
+                .is_none_or(|(at, _)| at.div_euclid(1_000) != tick.at_ms.div_euclid(1_000))
+            {
+                points.push((tick.at_ms, tick.price));
+            }
+        }
+        points.split_off(points.len().saturating_sub(HISTORY_MAX_POINTS))
     }
 
     /// The oldest tick at or after `since_ms`.

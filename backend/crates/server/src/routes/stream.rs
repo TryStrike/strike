@@ -18,15 +18,20 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
+use strike_core::blitz;
 use strike_core::prices;
 use strike_core::stream;
+use strike_core::ticks;
 
 const SSE_CONTENT_TYPE: &str = "text/event-stream; charset=utf-8";
 const SSE_CACHE_CONTROL: &str = "no-cache, no-transform";
 const SSE_CONNECTION: &str = "keep-alive";
+/// How often the `market` event goes out.
+const MARKET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const SSE_ACCEL_BUFFERING: &str = "no";
 
 #[derive(Deserialize)]
@@ -52,7 +57,19 @@ async fn get_stream(Query(query): Query<StreamQuery>) -> Response {
     stream::ensure_pump_running();
     stream::prime(subscription.id(), &assets);
 
-    let body = axum::body::Body::from_stream(render_stream(subscription, receiver));
+    let now = prices::now_millis();
+    // The market event leads so the client learns the server clock before the history.
+    let history: Vec<Result<String, Infallible>> =
+        std::iter::once(blitz::market_frame(ticks::buffer(), now))
+            .chain(
+                assets
+                    .iter()
+                    .map(|asset| blitz::history_frame(ticks::buffer(), asset, now)),
+            )
+            .map(Ok)
+            .collect();
+    let live = futures::stream::iter(history).chain(render_stream(subscription, receiver));
+    let body = axum::body::Body::from_stream(live);
     (StatusCode::OK, sse_headers(), body).into_response()
 }
 
@@ -77,10 +94,18 @@ fn render_stream(
     receiver: stream::FrameRx,
 ) -> impl futures::Stream<Item = Result<String, Infallible>> + Send + 'static {
     let first_heartbeat = tokio::time::Instant::now() + stream::heartbeat_interval();
+    let market = tokio::time::interval_at(
+        tokio::time::Instant::now() + MARKET_INTERVAL,
+        MARKET_INTERVAL,
+    );
     futures::stream::unfold(
-        (subscription, receiver, first_heartbeat),
-        move |(subscription, mut receiver, next_heartbeat)| async move {
+        (subscription, receiver, first_heartbeat, market),
+        move |(subscription, mut receiver, next_heartbeat, mut market)| async move {
             let (frame, next_heartbeat) = tokio::select! {
+                _ = market.tick() => (
+                    blitz::market_frame(ticks::buffer(), prices::now_millis()),
+                    next_heartbeat,
+                ),
                 maybe = receiver.recv() => match maybe {
                     Some(frame) => (frame, next_heartbeat),
                     // Every sender is gone, so this connection has been
@@ -94,7 +119,7 @@ fn render_stream(
             };
             // The deadline is absolute, so a busy market cannot postpone the
             // heartbeat the proxy is waiting for.
-            Some((Ok(frame), (subscription, receiver, next_heartbeat)))
+            Some((Ok(frame), (subscription, receiver, next_heartbeat, market)))
         },
     )
 }
