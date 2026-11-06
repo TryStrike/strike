@@ -125,7 +125,6 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
       if (opened.readyState !== EventSource.CLOSED) return;
       opened.close();
       if (source === opened) source = null;
-      localStorage.removeItem(LIVE_UNTIL);
     };
   },
   connectIfLive: () => {
