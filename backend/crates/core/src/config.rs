@@ -89,6 +89,19 @@ pub struct Config {
     pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
     pub agent_max_open_stake: rust_decimal::Decimal,
+    /// World ID step-up for YOLO starts. `None` until id, secret and redirect
+    /// are all set, and YOLO starts answer 503 until then.
+    pub world: Option<WorldClient>,
+    /// Budgets up to this take a selfie check, up to `world_orb_max` an Orb,
+    /// anything above an Orb plus a live face.
+    pub world_selfie_max: rust_decimal::Decimal,
+    pub world_orb_max: rust_decimal::Decimal,
+    /// `WORLD_ACR_FLOOR`: the weakest class any budget accepts.
+    pub world_acr_floor: Option<String>,
+    /// First epoch the round committer commits, so it never backfills history.
+    pub proofs_start_epoch: Option<u64>,
+    /// `RoundAttestor`, where Chainlink CRE writes its verdicts.
+    pub round_attestor_address: Option<String>,
     /// `NODE_ENV === 'production'` equivalent: strict guard behaviour.
     pub production: bool,
     pub bind_addr: String,
@@ -162,6 +175,13 @@ impl Config {
                 .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
                 .unwrap_or(rust_decimal::Decimal::from(200)),
+            world: WorldClient::from_env(),
+            world_selfie_max: parse_num("WORLD_SELFIE_MAX")
+                .unwrap_or(rust_decimal::Decimal::from(10)),
+            world_orb_max: parse_num("WORLD_ORB_MAX").unwrap_or(rust_decimal::Decimal::from(50)),
+            world_acr_floor: str_var("WORLD_ACR_FLOOR"),
+            proofs_start_epoch: parse_num("PROOFS_START_EPOCH"),
+            round_attestor_address: str_var("NEXT_PUBLIC_ROUND_ATTESTOR_ADDRESS"),
             production,
             bind_addr: str_var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
         }
@@ -169,6 +189,29 @@ impl Config {
 
     pub fn is_settlement_signing_configured(&self) -> bool {
         self.balance_settlement_secret.is_some()
+    }
+}
+
+/// A World IdP OIDC client registered in the World developer portal.
+#[derive(Debug, Clone)]
+pub struct WorldClient {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+}
+
+impl WorldClient {
+    fn from_env() -> Option<Self> {
+        Some(Self {
+            issuer: str_var("WORLD_ISSUER")
+                .unwrap_or_else(|| "https://auth.world.org".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            client_id: str_var("WORLD_CLIENT_ID")?,
+            client_secret: str_var("WORLD_CLIENT_SECRET")?,
+            redirect_uri: str_var("WORLD_REDIRECT_URI")?,
+        })
     }
 }
 

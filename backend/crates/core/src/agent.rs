@@ -14,6 +14,7 @@ use crate::money::{from_fixed, to_fixed, MONEY_SCALE};
 use crate::prices;
 use crate::settlement::binomo_multiplier;
 use crate::ticks::TickBuffer;
+use crate::world::{self, HumanGrant};
 
 pub const CHECK_EVERY_MS: u64 = 5_000;
 /// How long a normal mode proposal waits for the trader's tap.
@@ -76,7 +77,7 @@ fn malformed() -> Rejection {
     refuse(400, "Malformed start message")
 }
 
-fn refuse(status: u16, message: &str) -> Rejection {
+pub(crate) fn refuse(status: u16, message: &str) -> Rejection {
     (status, json!({ "error": message }))
 }
 
@@ -435,12 +436,42 @@ fn load_decision(conn: &Connection, id: &str) -> ApiResult<Decision> {
     )?)
 }
 
+/// Why the rows that exist refuse a start, or `None`.
+pub(crate) fn start_blocked(
+    conn: &Connection,
+    nonce: &str,
+    wallet: &str,
+) -> rusqlite::Result<Option<Rejection>> {
+    let used: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE nonce = ?1)",
+        [nonce],
+        |r| r.get(0),
+    )?;
+    if used {
+        return Ok(Some(refuse(409, "Start message already used")));
+    }
+    let active: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE wallet = ?1 AND status = 'running')",
+        [wallet],
+        |r| r.get(0),
+    )?;
+    if active {
+        return Ok(Some(refuse(
+            409,
+            "This wallet already has an active agent session",
+        )));
+    }
+    Ok(None)
+}
+
 /// Creates the session, or says why it can't. The checks and the insert share
-/// the single writer, so two starts can't both pass them.
+/// the single writer, so two starts can't both pass them. A YOLO session
+/// carries the human that approved it, whose attempt is spent in the same write.
 pub async fn create_session(
     db: &Db,
     t: StartTerms,
     now_ms: i64,
+    human: Option<HumanGrant>,
 ) -> ApiResult<Result<Session, Rejection>> {
     let id = uuid::Uuid::new_v4().to_string();
     let wallet = crate::address::canonical(&t.wallet);
@@ -449,26 +480,19 @@ pub async fn create_session(
         fixed(t.max_per_trade)?,
         fixed(t.stop_loss)?,
     );
+    if t.mode == "yolo" && human.is_none() {
+        return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
+    }
     db.write(move |conn| {
-        let used: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE nonce = ?1)",
-            [&t.nonce],
-            |r| r.get(0),
-        )?;
-        if used {
-            return Ok(Err(refuse(409, "Start message already used")));
-        }
-        let active: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE wallet = ?1 AND status = 'running')",
-            [&wallet],
-            |r| r.get(0),
-        )?;
-        if active {
-            return Ok(Err(refuse(409, "This wallet already has an active agent session")));
+        let refused = match &human {
+            Some(grant) => world::claim(conn, grant, &wallet, &t.nonce, now_ms)?,
+            None => start_blocked(conn, &t.nonce, &wallet)?,
+        };
+        if let Some(refused) = refused {
+            return Ok(Err(refused));
         }
         conn.execute(
-            "INSERT INTO agent_sessions (id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
-             starts_at, ends_at, nonce, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')",
+            "INSERT INTO agent_sessions (id, wallet, asset, mode, budget, max_per_trade, stop_loss,              starts_at, ends_at, nonce, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')",
             params![
                 id,
                 wallet,
@@ -482,6 +506,9 @@ pub async fn create_session(
                 t.nonce
             ],
         )?;
+        if let Some(grant) = &human {
+            world::approve(conn, grant, &wallet, &id, now_ms)?;
+        }
         Ok(Ok(load_session(conn, &id)?))
     })
     .await

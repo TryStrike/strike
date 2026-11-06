@@ -18,6 +18,7 @@ pub mod referral;
 pub mod session;
 pub mod stream;
 pub mod withdrawals;
+pub mod world;
 
 use axum::routing::get;
 use axum::{Json, Router};
@@ -45,6 +46,7 @@ pub fn router() -> Router {
         .merge(session::routes())
         .merge(stream::routes())
         .merge(withdrawals::routes())
+        .merge(world::routes())
 }
 
 /// Liveness for the container orchestrator and the migration cutover check.

@@ -5,7 +5,8 @@ use std::convert::Infallible;
 
 use axum::body::Bytes;
 use axum::extract::Path;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::WWW_AUTHENTICATE;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,8 +22,10 @@ use strike_core::eth;
 use strike_core::ledger::Rejection;
 use strike_core::prices;
 use strike_core::stream;
+use strike_core::world;
 
 use crate::agent as live;
+use crate::bans;
 use crate::http::{self, Cookie};
 use crate::routes::stream::sse_headers;
 
@@ -81,26 +84,61 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
     if let Err(rejection) = agent::check_start(&terms, now) {
         return Ok(reject(rejection));
     }
-    let ttl = terms.minutes * 60 + COOKIE_GRACE_SECONDS;
-    let session = match agent::create_session(db::db().await?, terms, now).await? {
+    if bans::is_globally_banned(&terms.wallet).await {
+        return Err(ApiError::json(StatusCode::FORBIDDEN, "Wallet is banned"));
+    }
+    let database = db::db().await?;
+    if terms.mode == "yolo" {
+        return Ok(match world::begin(database, &terms, message, now).await? {
+            Ok(challenge) => human_check(&challenge),
+            Err(rejection) => reject(rejection),
+        });
+    }
+    let session = match agent::create_session(database, terms, now, None).await? {
         Ok(session) => session,
         Err(rejection) => return Ok(reject(rejection)),
     };
+    Ok(http::json_with_cookie(
+        json!({ "session": session.to_json() }),
+        started(session)?,
+    ))
+}
+
+/// RFC 9470 step-up: the browser goes to `verifyUrl`, and only this browser,
+/// holding the `strike_world` cookie, can finish the attempt.
+fn human_check(challenge: &world::Challenge) -> Response {
+    let mut response = http::json_with_cookie(
+        challenge.to_json(),
+        Cookie {
+            name: world::WORLD_COOKIE,
+            value: challenge.browser_secret.clone(),
+            max_age: world::ATTEMPT_TTL_MS / 1_000,
+            same_site: "Lax",
+            http_only: true,
+        },
+    );
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    if let Ok(value) = HeaderValue::from_str(&challenge.www_authenticate()) {
+        response.headers_mut().insert(WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+/// Runs a created session and returns the cookie that reads and stops it.
+pub(crate) fn started(session: agent::Session) -> Result<Cookie, ApiError> {
+    let ttl = (session.ends_at_ms - session.starts_at_ms) / 1_000 + COOKIE_GRACE_SECONDS;
     let token = crypto::mint_agent_token(&session.id, &session.wallet, ttl).map_err(|err| {
         tracing::error!("[agent] token not minted: {err}");
         ApiError::unavailable("Agent sessions are not configured on this server")
     })?;
-    live::spawn(session.clone());
-    Ok(http::json_with_cookie(
-        json!({ "session": session.to_json() }),
-        Cookie {
-            name: AGENT_COOKIE,
-            value: token,
-            max_age: ttl,
-            same_site: "Lax",
-            http_only: true,
-        },
-    ))
+    live::spawn(session);
+    Ok(Cookie {
+        name: AGENT_COOKIE,
+        value: token,
+        max_age: ttl,
+        same_site: "Lax",
+        http_only: true,
+    })
 }
 
 async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {

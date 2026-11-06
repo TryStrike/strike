@@ -75,6 +75,20 @@ pub fn json_with_cookie(body: Value, cookie: Cookie) -> Response {
     (headers, axum::Json(body)).into_response()
 }
 
+/// A 302 to a path on this app that sets these cookies.
+pub fn redirect_with_cookies(location: &str, cookies: &[Cookie]) -> Response {
+    let mut headers = HeaderMap::new();
+    for cookie in cookies {
+        if let Ok(value) = HeaderValue::from_str(&cookie.render()) {
+            headers.append(HeaderName::from_static("set-cookie"), value);
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str(location) {
+        headers.insert(header::LOCATION, value);
+    }
+    (StatusCode::FOUND, headers).into_response()
+}
+
 /// The cookie value that clears a session cookie (Max-Age=0).
 pub fn cleared_cookie(name: &'static str, same_site: &'static str) -> Cookie {
     Cookie {

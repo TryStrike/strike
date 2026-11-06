@@ -25,6 +25,7 @@ pub mod stream;
 pub mod ticks;
 pub mod treasury_view;
 pub mod withdrawals;
+pub mod world;
 
 pub use config::config;
 pub use error::{ApiError, ApiResult};

@@ -32,6 +32,7 @@ dotenvy = "0.15"
 once_cell = "1"
 futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
+ring = "0.17"
 
 strike-core = { path = "crates/core" }
 
