@@ -16,7 +16,6 @@ import { WinBurst } from './WinBurst';
 import { SettlementProof, matchSettledRound, type SettlementProofInput } from './SettlementProof';
 import { explorerAddressUrl } from '@/lib/arc/config';
 import { ArrowUpRight } from '@phosphor-icons/react';
-import { useCopilotView } from '@/lib/copilot/actions';
 
 
 export const GameBoard: React.FC = () => {
@@ -48,15 +47,6 @@ export const GameBoard: React.FC = () => {
 
   const [betAmount, setBetAmount] = useState<string>('0.1');
   const [selectedDuration, setSelectedDuration] = useState<number>(5);
-  const ticket = useCopilotView((s) => s.ticket);
-  const clearTicket = useCopilotView((s) => s.clearTicket);
-  const [filledFrom, setFilledFrom] = useState<typeof ticket>(null);
-  if (ticket && ticket !== filledFrom) {
-    setFilledFrom(ticket);
-    setBetAmount(String(ticket.amount));
-    setSelectedDuration(ticket.seconds);
-  }
-
   const [blitzCountdown, setBlitzCountdown] = useState<string>('');
   const [blitzTimeRemaining, setBlitzTimeRemaining] = useState<string>('');
   const [isActivatingBlitz, setIsActivatingBlitz] = useState(false);
@@ -180,13 +170,12 @@ export const GameBoard: React.FC = () => {
     try {
       const multiplier = getMultiplier(selectedDuration);
 
-      const placed = await placeBetFromHouseBalance(
+      await placeBetFromHouseBalance(
         betAmount,
         `${direction}-${multiplier}-${selectedDuration}`,
         address,
         undefined,
       );
-      if (placed) clearTicket();
     } catch (err) {
       if (process.env.NODE_ENV === 'development') {
         console.error("Failed to place bet:", err instanceof Error ? err.message : err);
@@ -378,18 +367,6 @@ export const GameBoard: React.FC = () => {
               { value: 'box', label: 'Box', tour: 'box-mode' },
             ]}
           />
-
-          {ticket && gameMode === 'binomo' && (
-            <div role="status" className="flex items-start justify-between gap-2 rounded-2xl bg-surface px-3 py-2 text-sm">
-              <span>
-                Copilot filled {ticket.direction === 'UP' ? 'Higher' : 'Lower'} · {ticket.amount} {currencySymbol} · {ticket.seconds}s.
-                Tap {ticket.direction === 'UP' ? 'Higher' : 'Lower'} to place.
-              </span>
-              <button type="button" aria-label="Dismiss the copilot ticket" onClick={clearTicket} className="text-muted">
-                <X size={16} />
-              </button>
-            </div>
-          )}
 
           <div>
             <Label>Amount</Label>

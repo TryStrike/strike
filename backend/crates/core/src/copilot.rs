@@ -28,11 +28,10 @@ const TOP_MOVERS: usize = 10;
 pub const TOO_MANY_TOOL_TURNS: &str = "The copilot stopped after 4 tool calls without an answer";
 pub const RATE_LIMITED: &str = "Copilot limit is 10 questions a minute. Try again shortly.";
 
-const SYSTEM: &str = "You are the Strike copilot, inside a binary options app on Arc. \
+const SYSTEM: &str = "You are the Strike copilot, inside a live agent session of a binary options app on Arc. \
 Answer in two or three short sentences. Use only numbers your tools return, never guess a price. \
 Movers cover the last 15 minutes of live ticks, so always say \"last 15 minutes\" when you rank them. \
 To show movers as a table, call show_table with source market_movers. \
-fill_trade_ticket only fills the ticket: tell the trader to tap Higher or Lower to place it. \
 When you explain a decision, use only its trace and result. If a decision has no trace, say the full trace wasn't recorded for it. \
 Your earlier answers were true when you gave them. The tool calls behind them are not repeated in the history, so never correct them for that. \
 Only if the trader asks you to place a bet, change a limit or move funds, say you can't.";
@@ -50,32 +49,13 @@ const WATCH_TOOLS: [&str; 4] = [
 ];
 
 /// The request for one turn. Strict schemas, so tool inputs always validate.
-/// What can change between questions. Told fresh each time instead of left for
-/// the model to remember from earlier answers.
-#[derive(Clone, Copy)]
-pub struct Context {
-    pub ticket_open: bool,
-    /// The request carries a valid agent token.
-    pub has_session: bool,
-}
-
-pub fn request(messages: &[Value], context: Context) -> Value {
-    let ticket = if context.ticket_open {
-        "Right now the trader has a filled trade ticket open, so open_page and open_market will refuse."
-    } else {
-        "Right now no trade ticket is open."
-    };
-    let session = if context.has_session {
-        "The trader is signed in with an agent session, so the personal tools read their own data."
-    } else {
-        "The trader has no agent session, so the personal tools will refuse. Suggest starting one on the Agent page."
-    };
+pub fn request(messages: &[Value]) -> Value {
     json!({
         "model": MODEL,
         "max_tokens": 4_000,
         "stream": true,
         "output_config": { "effort": "low" },
-        "system": format!("{SYSTEM} {ticket} {session}"),
+        "system": SYSTEM,
         "tools": tools(),
         "messages": messages,
     })
@@ -111,8 +91,6 @@ pub const PAGES: [&str; 6] = [
     "/referrals",
     "/withdrawals",
 ];
-const TICKET_SECONDS: [i64; 5] = [5, 10, 15, 30, 60];
-const MAX_TICKET_AMOUNT: f64 = 1_000.0;
 const CHART_POINTS: usize = 120;
 /// Tools that read the trader's own data. They need the agent token.
 pub const PERSONAL: [&str; 4] = [
@@ -123,8 +101,8 @@ pub const PERSONAL: [&str; 4] = [
 ];
 pub const NO_SESSION: &str =
     "The trader has no agent session. Tell them to start one on the Agent page first.";
-pub const NAVIGATION_BLOCKED: &str =
-    "The trader has a trade ticket open, so the copilot can't navigate away";
+pub const NEEDS_SESSION: &str =
+    "The copilot works inside an agent session. Start one on the Agent page.";
 
 /// The step the trader sees for a tool call. Fixed text, so tool input and model
 /// text never reach the client this way.
@@ -139,8 +117,6 @@ pub fn step_label(tool: &str) -> &'static str {
         "show_table" => "Opened a table",
         "show_chart" => "Opened a chart",
         "open_page" => "Opened a page",
-        "open_market" => "Opened a market",
-        "fill_trade_ticket" => "Filled a ticket",
         _ => "Used a tool",
     }
 }
@@ -224,21 +200,6 @@ fn tools() -> Value {
             "Navigate to one of the app's pages.",
             json!({ "page": { "type": "string", "enum": PAGES } }),
         ),
-        tool(
-            "open_market",
-            "Open the trade screen on one asset.",
-            json!({ "symbol": symbol }),
-        ),
-        tool(
-            "fill_trade_ticket",
-            "Fill the trade ticket on the trade screen. It never places the bet: the trader still taps Higher or Lower. Amount is in USDC.",
-            json!({
-                "symbol": symbol,
-                "direction": { "type": "string", "enum": ["UP", "DOWN"] },
-                "amount": { "type": "number" },
-                "seconds": { "type": "integer", "enum": TICKET_SECONDS },
-            }),
-        ),
     ])
 }
 
@@ -296,12 +257,10 @@ pub fn movers(ring: &TickBuffer, now_ms: i64) -> Vec<Value> {
         .collect()
 }
 
-/// What one question's tools share: the market as it stood when asked, and
-/// whether the trader has a ticket open.
+/// What one question's tools share: the market as it stood when asked.
 pub struct Desk<'a> {
     pub ring: &'a TickBuffer,
     pub now_ms: i64,
-    pub ticket_open: bool,
     movers: Option<Vec<Value>>,
 }
 
@@ -314,11 +273,10 @@ pub struct Ran {
 }
 
 impl<'a> Desk<'a> {
-    pub fn new(ring: &'a TickBuffer, now_ms: i64, ticket_open: bool) -> Self {
+    pub fn new(ring: &'a TickBuffer, now_ms: i64) -> Self {
         Self {
             ring,
             now_ms,
-            ticket_open,
             movers: None,
         }
     }
@@ -342,23 +300,10 @@ impl<'a> Desk<'a> {
             "show_chart" => symbol(&tool.input)
                 .and_then(|s| chart_action(self.ring, &s, self.now_ms))
                 .map(|a| ("The chart is open for the trader".to_string(), Some(a))),
-            "open_page" | "open_market" if self.ticket_open => Err(NAVIGATION_BLOCKED.to_string()),
             "open_page" => page(&tool.input).map(|p| {
                 (
                     format!("Opened {p}"),
                     Some(json!({ "type": "open_page", "page": p })),
-                )
-            }),
-            "open_market" => symbol(&tool.input).map(|s| {
-                (
-                    format!("Opened the {s} market"),
-                    Some(json!({ "type": "open_market", "symbol": s })),
-                )
-            }),
-            "fill_trade_ticket" => ticket_action(&tool.input).map(|a| {
-                (
-                    "The ticket is filled. The trader still has to tap to place it".to_string(),
-                    Some(a),
                 )
             }),
             other => Err(format!("There is no tool called {other}")),
@@ -443,32 +388,6 @@ fn chart_action(ring: &TickBuffer, symbol: &str, now_ms: i64) -> Result<Value, S
         points.push(json!({ "at": last.at_ms, "price": last.price }));
     }
     Ok(json!({ "type": "show_chart", "symbol": symbol, "points": points }))
-}
-
-fn ticket_action(input: &Value) -> Result<Value, String> {
-    let symbol = symbol(input)?;
-    let direction = input
-        .get("direction")
-        .and_then(Value::as_str)
-        .filter(|d| matches!(*d, "UP" | "DOWN"))
-        .ok_or("The direction must be UP or DOWN")?;
-    let amount = input
-        .get("amount")
-        .and_then(Value::as_f64)
-        .filter(|a| *a > 0.0 && *a <= MAX_TICKET_AMOUNT && (a * 1e6).fract() == 0.0)
-        .ok_or("The amount must be more than 0 and at most 1000 USDC, with at most 6 decimals")?;
-    let seconds = input
-        .get("seconds")
-        .and_then(Value::as_i64)
-        .filter(|s| TICKET_SECONDS.contains(s))
-        .ok_or("The round must be 5, 10, 15, 30 or 60 seconds")?;
-    Ok(json!({
-        "type": "fill_trade_ticket",
-        "symbol": symbol,
-        "direction": direction,
-        "amount": amount,
-        "seconds": seconds,
-    }))
 }
 
 /// The typed UI action `show_table` becomes. Rows come from the server.

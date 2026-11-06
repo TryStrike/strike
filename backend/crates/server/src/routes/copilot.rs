@@ -2,10 +2,8 @@
 //! answer deltas, `action` frames carry typed UI actions, then `done` or `error`.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
 
 use axum::body::Bytes;
-use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -32,14 +30,14 @@ pub fn routes() -> Router {
     Router::new().route("/api/copilot", post(ask))
 }
 
-async fn ask(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    raw: Bytes,
-) -> Response {
+async fn ask(headers: HeaderMap, raw: Bytes) -> Response {
     let Some(key) = config().anthropic_api_key.clone() else {
         return ApiError::unavailable("The copilot is not configured on this server")
             .into_response();
+    };
+    let Some(claims) = crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref())
+    else {
+        return ApiError::unauthorized(copilot::NEEDS_SESSION).into_response();
     };
     let Ok(body) = serde_json::from_slice::<Value>(&raw) else {
         return ApiError::bad_request("Body must be JSON with messages").into_response();
@@ -48,21 +46,12 @@ async fn ask(
         Ok(messages) => messages,
         Err(why) => return ApiError::bad_request(why).into_response(),
     };
-    let claims = crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref());
-    let asker = match &claims {
-        Some(claims) => format!("wallet:{}", claims.wallet),
-        None => format!("ip:{}", http::client_ip(&headers, peer.ip())),
-    };
-    if !copilot::take_question(&asker, now_ms()) {
+    if !copilot::take_question(&claims.wallet, now_ms()) {
         return http::too_many(copilot::RATE_LIMITED, 60);
     }
 
-    let ticket_open = body
-        .get("ticketOpen")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(answer(key, messages, ticket_open, claims, tx));
+    tokio::spawn(answer(key, messages, claims, tx));
     let frames = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
@@ -84,32 +73,12 @@ fn send(tx: &Frames, event: &str, data: Value) -> Result<(), String> {
         .map_err(|_| "client disconnected".to_string())
 }
 
-async fn answer(
-    key: String,
-    mut messages: Vec<Value>,
-    ticket_open: bool,
-    claims: Option<AgentClaims>,
-    tx: Frames,
-) {
-    let context = copilot::Context {
-        ticket_open,
-        has_session: claims.is_some(),
-    };
-    let build = |messages: &[Value]| copilot::request(messages, context);
+async fn answer(key: String, mut messages: Vec<Value>, claims: AgentClaims, tx: Frames) {
     let sink = |event: &str, data: Value| match event {
         "thinking" => Ok(()),
         event => send(&tx, event, data),
     };
-    let (event, data) = match converse(
-        &key,
-        &mut messages,
-        ticket_open,
-        claims.as_ref(),
-        build,
-        sink,
-    )
-    .await
-    {
+    let (event, data) = match converse(&key, &mut messages, &claims, copilot::request, sink).await {
         Ok(()) => ("done", json!({})),
         Err(why) => {
             tracing::warn!("[copilot] {why}");
@@ -125,12 +94,11 @@ async fn answer(
 pub async fn converse(
     key: &str,
     messages: &mut Vec<Value>,
-    ticket_open: bool,
-    claims: Option<&AgentClaims>,
+    claims: &AgentClaims,
     build: impl Fn(&[Value]) -> Value,
     sink: impl Fn(&str, Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut desk = copilot::Desk::new(ticks::buffer(), now_ms(), ticket_open);
+    let mut desk = copilot::Desk::new(ticks::buffer(), now_ms());
     for turn_number in 0..=copilot::MAX_TOOL_TURNS {
         let turn = copilot::stream_turn(key, &build(messages), |delta| match delta {
             copilot::Delta::Text(text) => sink("text", json!({ "text": text })),
@@ -184,10 +152,7 @@ const HISTORY_READ: i64 = 20;
 
 /// A personal tool, scoped to the token's own wallet and session. The model
 /// never names a wallet or a session: both come from the cookie.
-async fn personal(tool: &ToolUse, claims: Option<&AgentClaims>) -> Ran {
-    let Some(claims) = claims else {
-        return refused(copilot::NO_SESSION);
-    };
+async fn personal(tool: &ToolUse, claims: &AgentClaims) -> Ran {
     match read_personal(tool, claims).await {
         Ok(value) => Ran {
             content: value.to_string(),

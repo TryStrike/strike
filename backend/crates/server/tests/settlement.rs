@@ -1333,9 +1333,6 @@ fn script(question: &str) -> Vec<(&'static str, Value)> {
     if question.contains("trend") {
         return vec![("get_market_trend", json!({ "symbol": "BTC" }))];
     }
-    if question.contains("stop") {
-        return vec![("get_agent_decisions", json!({}))];
-    }
     if let Some(bet_id) = question.split_whitespace().find(|w| w.starts_with("bet_")) {
         return vec![
             ("get_agent_decisions", json!({})),
@@ -1346,13 +1343,8 @@ fn script(question: &str) -> Vec<(&'static str, Value)> {
     }
     if question.contains("screen") {
         return vec![
-            ("open_market", json!({ "symbol": "ETH" })),
             ("show_chart", json!({ "symbol": "BTC" })),
             ("open_page", json!({ "page": "/history" })),
-            (
-                "fill_trade_ticket",
-                json!({ "symbol": "BTC", "direction": "UP", "amount": 2.5, "seconds": 30 }),
-            ),
         ];
     }
     vec![
@@ -1426,23 +1418,24 @@ async fn copilot_server(btc: f64) -> (Server, Feed, Claude) {
 }
 
 impl Server {
-    /// `(status, frames)`: the whole SSE answer, or a JSON error as one frame.
-    async fn ask(&self, question: &str) -> (StatusCode, Vec<(String, Value)>) {
-        self.ask_with(question, false, None).await
+    /// The agent cookie of a normal session, which has no watcher calling Claude.
+    async fn asker(&self) -> String {
+        let trader = key(90);
+        self.fund(&address_of(&trader), 100);
+        let terms = StartTerms {
+            mode: "normal".into(),
+            ..yolo(&trader)
+        };
+        self.start_agent(&trader, &terms).await.2.unwrap()
     }
 
-    async fn ask_with(
-        &self,
-        question: &str,
-        ticket_open: bool,
-        cookie: Option<&str>,
-    ) -> (StatusCode, Vec<(String, Value)>) {
-        let mut req = self.http.post(format!("{}/api/copilot", self.url));
-        if let Some(cookie) = cookie {
-            req = req.header("cookie", cookie);
-        }
-        let res = req
-            .json(&json!({ "messages": [{ "role": "user", "content": question }], "ticketOpen": ticket_open }))
+    /// `(status, frames)`: the whole SSE answer, or a JSON error as one frame.
+    async fn ask(&self, cookie: &str, question: &str) -> (StatusCode, Vec<(String, Value)>) {
+        let res = self
+            .http
+            .post(format!("{}/api/copilot", self.url))
+            .header("cookie", cookie)
+            .json(&json!({ "messages": [{ "role": "user", "content": question }] }))
             .send()
             .await
             .unwrap();
@@ -1473,11 +1466,12 @@ fn of<'a>(frames: &'a [(String, Value)], event: &str) -> Vec<&'a Value> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn whats_moving_streams_an_answer_and_opens_a_table_of_real_movers() {
     let (s, feed, claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
     tokio::time::sleep(Duration::from_millis(6_000)).await;
     set_price(&feed, 101.0);
     after_the_next_sample().await;
 
-    let (status, frames) = s.ask("what's moving?").await;
+    let (status, frames) = s.ask(&cookie, "what's moving?").await;
 
     assert_eq!(status, StatusCode::OK);
     let text: String = of(&frames, "text")
@@ -1623,8 +1617,9 @@ async fn a_failing_watcher_never_touches_a_trade() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_tool_call_streams_a_plain_step() {
     let (s, _feed, _claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
 
-    let (_, frames) = s.ask("what's moving?").await;
+    let (_, frames) = s.ask(&cookie, "what's moving?").await;
 
     assert_eq!(
         of(&frames, "tool"),
@@ -1641,16 +1636,17 @@ async fn each_tool_call_streams_a_plain_step() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_tool_step_carries_its_real_error() {
     let (s, _feed, _claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
 
-    let (_, frames) = s.ask("why did my agent stop?").await;
+    let (_, frames) = s.ask(&cookie, "proof for bet_nope!").await;
 
     assert_eq!(
-        of(&frames, "tool"),
-        [&json!({
-            "label": "Read your decisions",
+        of(&frames, "tool")[3],
+        &json!({
+            "label": "Read a round proof",
             "ok": false,
-            "error": "The trader has no agent session. Tell them to start one on the Agent page first.",
-        })],
+            "error": "That is not a bet id",
+        }),
         "{frames:?}"
     );
 }
@@ -1658,8 +1654,9 @@ async fn a_failed_tool_step_carries_its_real_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_copilot_stops_after_four_tool_turns() {
     let (s, _feed, claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
 
-    let (status, frames) = s.ask("loop on movers").await;
+    let (status, frames) = s.ask(&cookie, "loop on movers").await;
 
     assert_eq!(status, StatusCode::OK);
     let errors = of(&frames, "error");
@@ -1678,10 +1675,12 @@ async fn the_copilot_stops_after_four_tool_turns() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_copilot_takes_ten_questions_a_minute() {
     let (s, _feed, _claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
 
     let res = s
         .http
         .post(format!("{}/api/copilot", s.url))
+        .header("cookie", &cookie)
         .json(&json!({ "messages": [] }))
         .send()
         .await
@@ -1689,10 +1688,10 @@ async fn the_copilot_takes_ten_questions_a_minute() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     for _ in 0..10 {
-        let (status, _) = s.ask("what's moving?").await;
+        let (status, _) = s.ask(&cookie, "what's moving?").await;
         assert_eq!(status, StatusCode::OK);
     }
-    let (status, frames) = s.ask("what's moving?").await;
+    let (status, frames) = s.ask(&cookie, "what's moving?").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         frames[0].1["error"],
@@ -1727,11 +1726,12 @@ fn results_of(claude: &Claude) -> HashMap<String, Value> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_market_trend_is_read_from_the_tick_buffer() {
     let (s, feed, claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
     tokio::time::sleep(Duration::from_millis(3_000)).await;
     set_price(&feed, 101.0);
     after_the_next_sample().await;
 
-    let (status, _) = s.ask("trend for btc?").await;
+    let (status, _) = s.ask(&cookie, "trend for btc?").await;
 
     assert_eq!(status, StatusCode::OK);
     let result = &results_of(&claude)["get_market_trend"];
@@ -1748,9 +1748,10 @@ async fn a_market_trend_is_read_from_the_tick_buffer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_tools_become_typed_actions_and_none_touches_money() {
     let (s, _feed, claude) = copilot_server(100.0).await;
+    let cookie = s.asker().await;
     tokio::time::sleep(Duration::from_millis(3_000)).await;
 
-    let (status, frames) = s.ask("put it on my screen").await;
+    let (status, frames) = s.ask(&cookie, "put it on my screen").await;
 
     assert_eq!(status, StatusCode::OK);
     let actions = of(&frames, "action");
@@ -1758,32 +1759,18 @@ async fn ui_tools_become_typed_actions_and_none_touches_money() {
         .iter()
         .map(|a| a["type"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        types,
-        [
-            "open_market",
-            "show_chart",
-            "open_page",
-            "fill_trade_ticket"
-        ],
-        "{frames:?}"
-    );
-    assert_eq!(actions[0]["symbol"], "ETH");
-    assert_eq!(actions[1]["symbol"], "BTC");
-    let points = actions[1]["points"].as_array().unwrap();
+    assert_eq!(types, ["show_chart", "open_page"], "{frames:?}");
+    assert_eq!(actions[0]["symbol"], "BTC");
+    let points = actions[0]["points"].as_array().unwrap();
     assert!(
         points.len() >= 2,
         "the server fills the chart: {}",
-        actions[1]
+        actions[0]
     );
     assert!(points
         .iter()
         .all(|p| p["price"] == json!(100.0) && p["at"].is_i64()));
-    assert_eq!(actions[2]["page"], "/history");
-    assert_eq!(
-        *actions[3],
-        json!({ "type": "fill_trade_ticket", "symbol": "BTC", "direction": "UP", "amount": 2.5, "seconds": 30 })
-    );
+    assert_eq!(actions[1]["page"], "/history");
 
     let tools: Vec<String> = claude.lock().unwrap()[0]["tools"]
         .as_array()
@@ -1803,40 +1790,20 @@ async fn ui_tools_become_typed_actions_and_none_touches_money() {
             "show_table",
             "show_chart",
             "open_page",
-            "open_market",
-            "fill_trade_ticket"
         ],
         "a fixed list, and nothing that bets, changes a limit or moves funds"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_open_ticket_blocks_navigation() {
-    let (s, _feed, claude) = copilot_server(100.0).await;
-
-    let (status, frames) = s.ask_with("put it on my screen", true, None).await;
-
-    assert_eq!(status, StatusCode::OK);
-    let types: Vec<&str> = of(&frames, "action")
-        .iter()
-        .map(|a| a["type"].as_str().unwrap())
-        .collect();
-    assert_eq!(types, ["show_chart", "fill_trade_ticket"], "{frames:?}");
-    let results = results_of(&claude);
-    for tool in ["open_market", "open_page"] {
-        assert_eq!(results[tool]["is_error"], true, "{tool}: {}", results[tool]);
-        assert_eq!(
-            results[tool]["content"],
-            "The trader has a trade ticket open, so the copilot can't navigate away"
-        );
-    }
 }
 
 /// A trader whose agent session has stopped, with one settled manual bet.
 async fn trader_with_history(s: &Server, feed: &Feed, signer: &SigningKey) -> (String, Value) {
     let wallet = address_of(signer);
     s.fund(&wallet, 100);
-    let (_, _, cookie) = s.start_agent(signer, &yolo(signer)).await;
+    let terms = StartTerms {
+        mode: "normal".into(),
+        ..yolo(signer)
+    };
+    let (_, _, cookie) = s.start_agent(signer, &terms).await;
     let cookie = cookie.unwrap();
     s.agent_post("/api/agent/stop", Some(&cookie)).await;
     let mut body = classic("UP", 100.0);
@@ -1856,10 +1823,9 @@ async fn personal_tools_answer_from_the_tokens_own_data() {
     let bet_id = bet["betId"].as_str().unwrap();
 
     let (status, _) = s
-        .ask_with(
+        .ask(
+            &cookie,
             &format!("why did my agent stop, and proof for {bet_id}"),
-            false,
-            Some(&cookie),
         )
         .await;
 
@@ -1897,19 +1863,22 @@ async fn personal_tools_need_the_token_and_never_read_another_wallet() {
     let (_, alice_bet) = trader_with_history(&s, &feed, &alice).await;
     let question = format!("proof for {}", alice_bet["betId"].as_str().unwrap());
 
-    let (status, _) = s.ask_with(&question, false, None).await;
-    assert_eq!(status, StatusCode::OK);
-    for (tool, result) in results_of(&claude) {
-        assert_eq!(result["is_error"], true, "{tool}: {result}");
-        assert_eq!(
-            result["content"],
-            "The trader has no agent session. Tell them to start one on the Agent page first."
-        );
-    }
+    let refused = s
+        .http
+        .post(format!("{}/api/copilot", s.url))
+        .json(&json!({ "messages": [{ "role": "user", "content": question }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert!(claude.lock().unwrap().is_empty(), "no Claude call");
 
-    claude.lock().unwrap().clear();
-    let (_, _, bob_cookie) = s.start_agent(&bob, &yolo(&bob)).await;
-    let (status, _) = s.ask_with(&question, false, bob_cookie.as_deref()).await;
+    let terms = StartTerms {
+        mode: "normal".into(),
+        ..yolo(&bob)
+    };
+    let (_, _, bob_cookie) = s.start_agent(&bob, &terms).await;
+    let (status, _) = s.ask(&bob_cookie.unwrap(), &question).await;
     assert_eq!(status, StatusCode::OK);
     let proof = &results_of(&claude)["get_round_proof"];
     assert_eq!(proof["is_error"], true, "{proof}");

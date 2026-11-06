@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { ToolStep } from '@/lib/agent/agentFeed';
-import { dispatch, useCopilotView } from './actions';
+import { dispatch } from './actions';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -44,7 +44,7 @@ export const useCopilot = create<CopilotChat>((set, get) => {
         const res = await fetch('/api/copilot', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ messages: history(asked), ticketOpen: useCopilotView.getState().ticket !== null }),
+          body: JSON.stringify({ messages: history(asked) }),
         });
         if (!res.ok || !res.body) {
           const body = await res.json().catch(() => null);

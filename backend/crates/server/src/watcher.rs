@@ -133,13 +133,5 @@ async fn think(
         Ok(())
     };
     let mut messages = vec![json!({ "role": "user", "content": format!("Latest event: {event}") })];
-    converse(
-        key,
-        &mut messages,
-        false,
-        Some(claims),
-        copilot::watch_request,
-        sink,
-    )
-    .await
+    converse(key, &mut messages, claims, copilot::watch_request, sink).await
 }

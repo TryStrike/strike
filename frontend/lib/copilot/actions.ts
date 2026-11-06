@@ -1,6 +1,4 @@
 import { create } from 'zustand';
-import { useStore } from '@/lib/store';
-import type { AssetType } from '@/lib/utils/priceFeed';
 
 export interface TableAction {
   type: 'show_table';
@@ -15,30 +13,18 @@ export interface ChartAction {
   points: { at: number; price: number }[];
 }
 
-export interface Ticket {
-  symbol: AssetType;
-  direction: 'UP' | 'DOWN';
-  amount: number;
-  seconds: number;
-}
-
 interface CopilotView {
   table: TableAction | null;
   chart: ChartAction | null;
-  /** A ticket the copilot filled. Open until the trader places a bet or dismisses it. */
-  ticket: Ticket | null;
   closeTable: () => void;
   closeChart: () => void;
-  clearTicket: () => void;
 }
 
 export const useCopilotView = create<CopilotView>((set) => ({
   table: null,
   chart: null,
-  ticket: null,
   closeTable: () => set({ table: null }),
   closeChart: () => set({ chart: null }),
-  clearTicket: () => set({ ticket: null }),
 }));
 
 let navigate: ((path: string) => void) | null = null;
@@ -49,7 +35,6 @@ export function setNavigator(push: (path: string) => void): void {
 }
 
 function go(path: string): void {
-  if (useCopilotView.getState().ticket) throw new Error('A trade ticket is open, so the copilot did not navigate away');
   if (!navigate) throw new Error('Copilot navigation is not ready');
   navigate(path);
 }
@@ -73,22 +58,6 @@ const HANDLERS: Record<string, (action: Action) => void> = {
     useCopilotView.setState({ chart: { ...(action as unknown as ChartAction), symbol: text(action, 'symbol') } });
   },
   open_page: (action) => go(text(action, 'page')),
-  open_market: (action) => {
-    const symbol = text(action, 'symbol') as AssetType;
-    go('/trade');
-    useStore.getState().setSelectedAsset(symbol);
-  },
-  fill_trade_ticket: (action) => {
-    const direction = text(action, 'direction');
-    if (direction !== 'UP' && direction !== 'DOWN') throw new Error('Ticket direction must be UP or DOWN');
-    if (typeof action.amount !== 'number' || typeof action.seconds !== 'number') throw new Error('Ticket is malformed');
-    const ticket: Ticket = { symbol: text(action, 'symbol') as AssetType, direction, amount: action.amount, seconds: action.seconds };
-    const store = useStore.getState();
-    store.setGameMode('binomo');
-    store.setSelectedAsset(ticket.symbol);
-    useCopilotView.setState({ ticket });
-    navigate?.('/trade');
-  },
 };
 
 export function dispatch(action: unknown): void {
