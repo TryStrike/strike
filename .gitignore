@@ -17,3 +17,4 @@ AGENTS.md
 
 # docs, managed outside the repo for now
 /docs/
+*.tsbuildinfo
