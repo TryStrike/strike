@@ -4,7 +4,7 @@ House treasury settling in **USDC** (`0x3600…0000`) and **EURC** (`0x89B5…D7
 both 6 decimals on Arc. Tested with Foundry (`contracts/test`, run `forge test` from the root) and deployed in
 [Arc Studio](https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd).
 
-Arc Testnet: `0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871` (see `deployments/`).
+Arc Testnet: `0x8726144B6a122862B9F1184752d8ebA0AcD662B6` (see `deployments/`).
 
 - **Deposits** are plain token transfers to the treasury. The backend credits them
   from the Transfer log, so there is no deposit function and no approval step.

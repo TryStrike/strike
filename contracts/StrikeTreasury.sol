@@ -21,7 +21,7 @@ interface ITokenMessengerV2 {
 
 /**
  * @title StrikeTreasury
- * @notice House treasury for Strike binary options on Arc, settling in USDC or EURC.
+ * @notice House treasury for Strike binary rounds on Arc, settling in USDC or EURC.
  *
  * Deposits are plain token transfers to this address. The backend credits them
  * from the Transfer log, so there is no deposit function and no approval step.

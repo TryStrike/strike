@@ -7,7 +7,7 @@
 | **Live (Arc Testnet)** | https://ethglobalmumbai.vercel.app/ |
 | **Trade** | https://ethglobalmumbai.vercel.app/trade |
 | **Arc Studio** | https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd |
-| **Treasury (testnet)** | [`0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871`](https://explorer.testnet.arc.io/address/0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871) |
+| **Treasury (testnet)** | [`0x8726144B6a122862B9F1184752d8ebA0AcD662B6`](https://explorer.testnet.arc.io/address/0x8726144B6a122862B9F1184752d8ebA0AcD662B6) |
 | **Deck** | [Google Slides](https://docs.google.com/presentation/d/1gPwWqA6F5mqtdAjCApLNCzE-zLr99AYG1fzq4zLuQyY/edit?usp=sharing) |
 | **GitHub** | https://example.com/strike |
 

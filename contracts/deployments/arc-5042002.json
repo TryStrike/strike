@@ -1,13 +1,30 @@
 {
   "chainId": 5042002,
   "network": "Arc Testnet",
-  "strikeTreasury": "0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871",
+  "strikeTreasury": "0x8726144B6a122862B9F1184752d8ebA0AcD662B6",
   "usdc": "0x3600000000000000000000000000000000000000",
   "eurc": "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
   "tokenMessenger": "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
   "owner": "0xc0368D6Ec4586B9F96b379a9584ae05E0d31fD28",
   "operator": "0xc0368D6Ec4586B9F96b379a9584ae05E0d31fD28",
-  "txHash": "0x4175fd886d39000d8d2e1bf25cfcc4e092d2cae2c204717a1f6744d6c4b1b4e2",
-  "builtIn": "https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd",
-  "explorer": "https://explorer.testnet.arc.io/address/0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871"
+  "txHash": "0x749c4719ac51f88c9ac43dea2c800712b1fb26e9e149835d3aad792fe7700c9a",
+  "gasUsed": "1345690",
+  "deployedAt": "2026-11-06T07:48:03.422Z",
+  "explorer": "https://explorer.testnet.arc.io/address/0x8726144B6a122862B9F1184752d8ebA0AcD662B6",
+  "replaces": {
+    "address": "0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871",
+    "name": "StrikeTreasury",
+    "sweptTx": "0x62b7d4663ca2b10341abcb0005a338324920b005b369a0761318d92e35526ec6",
+    "pausedTx": "0xe44834c25602f6796eed4b0f0dccf68593d07b1b2d8890448cefd882d1040d63"
+  },
+  "caps": {
+    "USDC": {
+      "perTx": "1000",
+      "perDay": "10000"
+    },
+    "EURC": {
+      "perTx": "1000",
+      "perDay": "10000"
+    }
+  }
 }
