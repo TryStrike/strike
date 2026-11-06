@@ -12,6 +12,7 @@ pub mod balance;
 pub mod balance_mutations;
 pub mod bets;
 pub mod copilot;
+pub mod markets;
 pub mod precheck;
 pub mod prices;
 pub mod proofs;
@@ -42,6 +43,7 @@ pub fn router() -> Router {
         .merge(balance_mutations::routes())
         .merge(bets::routes())
         .merge(copilot::routes())
+        .merge(markets::routes())
         .merge(precheck::routes())
         .merge(prices::routes())
         .merge(proofs::routes())
