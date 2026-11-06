@@ -236,7 +236,7 @@ fn jev_proposal(
         range_2m_pct,
         stake_usdc: usdc(stake),
         budget_left_usdc: usdc(session.budget - session.spent),
-        stop_loss_headroom_usdc: usdc(session.stop_loss + session.realized_pnl),
+        stop_loss_headroom_usdc: usdc(agent::stop_loss_headroom(session, Decimal::ZERO)),
         payout_multiplier: binomo_multiplier(agent::ROUND_SECONDS)
             .and_then(|multiplier| multiplier.to_f64())
             .expect("the payout table offers the agent's round length"),
@@ -278,7 +278,7 @@ async fn check(
                 jev_proposal(session, direction, stake, move_pct, range_share, range_pct),
             ),
         };
-    if jev::enabled() && session.ends_at_ms - now < jev::CLOSING_MS {
+    if session.ends_at_ms - now < agent::CLOSING_MS {
         return note(database, session, "skipped", "Session is closing").await;
     }
     let confidence = match jev::review(&proposal).await {

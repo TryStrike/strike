@@ -22,8 +22,6 @@ const TIMEOUT: Duration = Duration::from_millis(800);
 /// Real scores topped out near 0.65, so the PRD's 0.8 for normal mode would
 /// block every trade. Normal mode has a person approving each trade anyway.
 pub const THRESHOLD: f64 = 0.6;
-/// No new review once a 30 s round could outlive the session.
-pub const CLOSING_MS: i64 = 35_000;
 const INSTRUCTIONS: &str = "Does this proposed trade follow a 15 second momentum strategy, \
      and is the size safe, given the numbers in the state? Answer yes only if both hold.";
 pub const BLOCKED: &str = "jev confidence was too low";

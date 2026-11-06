@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
     if !strike_core::world::enabled() {
         tracing::warn!(
-            "NEXT_PUBLIC_WORLD_APP_ID, WORLD_RP_ID or WORLD_RP_SIGNING_KEY is unset: YOLO agents start without a World ID check"
+            "NEXT_PUBLIC_WORLD_APP_ID, WORLD_RP_ID or WORLD_RP_SIGNING_KEY is unset: YOLO agents are refused in production, and start unchecked elsewhere"
         );
     }
     if !strike_core::jev::enabled() {

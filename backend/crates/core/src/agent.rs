@@ -21,6 +21,8 @@ pub const CHECK_EVERY_MS: u64 = 5_000;
 pub const PROPOSAL_MS: i64 = 5_000;
 pub const PROPOSAL_EXPIRED: &str = "Proposal expired";
 pub const ROUND_SECONDS: i64 = 30;
+/// No new trade once a 30 s round could outlive the session.
+pub const CLOSING_MS: i64 = 35_000;
 const LOOKBACK_MS: i64 = 15_000;
 const RANGE_MS: i64 = 120_000;
 /// The 15 s move has to be at least this share of the 2 minute range.
@@ -252,6 +254,12 @@ pub fn signal(ring: &TickBuffer, asset: &str, now_ms: i64) -> Signal {
     }
 }
 
+/// Stop-loss minus realized net loss minus open stakes. Profit never widens it.
+pub fn stop_loss_headroom(session: &Session, open: Decimal) -> Decimal {
+    let realized_loss = (-session.realized_pnl).max(Decimal::ZERO);
+    session.stop_loss - realized_loss - open
+}
+
 /// The smallest of mode size, budget left and stop-loss headroom, floored to
 /// USDC's 6 decimals. `Err` carries the reason the session has to stop.
 /// Headroom counts open stakes, so a loss in flight can't overshoot it.
@@ -265,8 +273,7 @@ pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> 
     if left <= Decimal::ZERO {
         return Err(BUDGET_SPENT);
     }
-    let realized_loss = (-session.realized_pnl).max(Decimal::ZERO);
-    let headroom = session.stop_loss - realized_loss - open;
+    let headroom = stop_loss_headroom(session, open);
     if headroom <= Decimal::ZERO {
         return Err(STOP_LOSS_REACHED);
     }
@@ -507,8 +514,13 @@ pub async fn create_session(
         fixed(t.max_per_trade)?,
         fixed(t.stop_loss)?,
     );
-    if t.mode == "yolo" && human.is_none() && world::enabled() {
-        return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
+    if t.mode == "yolo" && human.is_none() {
+        if world::enabled() {
+            return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
+        }
+        if config().production {
+            return Ok(Err(refuse(503, world::NOT_CONFIGURED)));
+        }
     }
     db.write(move |conn| {
         let refused = match &human {
@@ -730,6 +742,9 @@ pub async fn reserve(
     let cap = config().agent_max_open_stake;
     db.write(move |conn| {
         let session = load_session(conn, &session_id)?;
+        if now_ms >= session.ends_at_ms {
+            return Ok(Reserve::Stop(TIME_UP));
+        }
         let stake = match stake(&session, open_stake(conn, Some(&session_id))?) {
             Ok(stake) => stake,
             Err(reason) => return Ok(Reserve::Stop(reason)),
