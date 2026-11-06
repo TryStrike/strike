@@ -4,10 +4,11 @@ import { useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useAccount } from "wagmi";
 import { CaretRight, MagnifyingGlass, Storefront } from "@phosphor-icons/react";
 import { SiteNav } from "@/components/SiteNav";
 import { WalletConnect } from "@/components/wallet";
-import { Label, cx, glassPrimary } from "@/components/ui/kit";
+import { Badge, Label, cx, glassPrimary } from "@/components/ui/kit";
 import { isAsset } from "@/lib/utils/priceFeed";
 import { SessionPill, StockLogo } from "@/components/markets/MarketBits";
 import {
@@ -20,10 +21,12 @@ import {
   preloadStock,
   quoted,
   spread,
+  positionsOf,
   stockMarketEnabled,
   tone,
   usd,
   useMarkets,
+  useStockTrades,
   type Asset,
 } from "@/lib/markets/marketData";
 
@@ -54,6 +57,13 @@ const tradable = isAsset;
 export default function MarketsPage() {
   const router = useRouter();
   const { data, failed } = useMarkets();
+  const { address } = useAccount();
+  const { trades } = useStockTrades(address);
+  const holdings = useMemo(() => positionsOf(trades ?? []), [trades]);
+  const owned = useMemo(
+    () => new Set(holdings.map((p) => p.symbol)),
+    [holdings],
+  );
   const [filter, setFilter] = useState<FilterKey>("all");
   const [sort, setSort] = useState<SortKey>("volume");
   const [query, setQuery] = useState("");
@@ -75,8 +85,12 @@ export default function MarketsPage() {
       spread: (a, b) => spread(b) - spread(a),
       name: (a, b) => a.ticker.localeCompare(b.ticker),
     };
-    return [...list].sort(by[sort]);
-  }, [assets, filter, sort, query]);
+    return [...list]
+      .sort(by[sort])
+      .sort(
+        (a, b) => Number(owned.has(b.ticker)) - Number(owned.has(a.ticker)),
+      );
+  }, [assets, filter, sort, query, owned]);
 
   const byChange = useMemo(
     () => [...assets].sort((a, b) => (b.changePct ?? 0) - (a.changePct ?? 0)),
@@ -126,6 +140,47 @@ export default function MarketsPage() {
           </div>
         ) : (
           <div className="space-y-4">
+            {holdings.length > 0 && (
+              <section className="rounded-3xl bg-white/70 p-5 ring-1 ring-ink/[0.06]">
+                <Label>Your holdings</Label>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {holdings.map((p) => {
+                    const price = assets.find(
+                      (a) => a.ticker === p.symbol,
+                    )?.price;
+                    const value = price == null ? null : p.shares * price;
+                    const gain =
+                      value == null || p.cost == null ? null : value - p.cost;
+                    return (
+                      <Link
+                        key={p.symbol}
+                        href={`/markets/${p.symbol}`}
+                        className="flex items-center gap-3 rounded-2xl bg-surface px-4 py-3"
+                      >
+                        <StockLogo ticker={p.symbol} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-semibold">
+                            {p.symbol}
+                          </span>
+                          <span className="block font-jet text-xs text-subtle">
+                            {p.shares} shares
+                          </span>
+                        </span>
+                        <span className="text-right font-jet tabular-nums">
+                          <span className="block text-sm">{usd(value)}</span>
+                          <span className={cx("block text-xs", tone(gain))}>
+                            {gain == null
+                              ? "–"
+                              : `${gain >= 0 ? "+" : "−"}${usd(Math.abs(gain))}`}
+                          </span>
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
             <section className="rounded-3xl p-2 ring-1 ring-ink/[0.08]">
               <div className="grid gap-5 rounded-[18px] bg-surface px-6 py-6 md:grid-cols-[1.4fr_1fr] md:items-center sm:px-8">
                 <div>
@@ -280,9 +335,12 @@ export default function MarketsPage() {
                                 <Link
                                   href={`/markets/${a.ticker}`}
                                   onClick={(e) => e.stopPropagation()}
-                                  className="block font-semibold"
+                                  className="flex items-center gap-1.5 font-semibold"
                                 >
                                   {a.ticker}
+                                  {owned.has(a.ticker) && (
+                                    <Badge tone="up">Owned</Badge>
+                                  )}
                                 </Link>
                                 <div className="truncate text-xs text-subtle">
                                   {a.name ?? "–"}

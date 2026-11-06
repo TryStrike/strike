@@ -201,6 +201,26 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE agent_sessions ADD COLUMN pause_stepup_id TEXT;
      ALTER TABLE agent_sessions ADD COLUMN checks_passed INTEGER NOT NULL DEFAULT 0;
      CREATE INDEX bet_rounds_settled_by_wallet ON bet_rounds(user_address, settled_at) WHERE outcome IS NOT NULL;",
+    // TestStockMarket trades, indexed from chain events. `cursor` is one row.
+    "CREATE TABLE stock_trades (
+       tx_hash   TEXT NOT NULL,
+       log_index INTEGER NOT NULL,
+       block     INTEGER NOT NULL,
+       traded_at INTEGER NOT NULL,
+       wallet    TEXT NOT NULL,
+       side      TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+       symbol    TEXT NOT NULL,
+       currency  TEXT NOT NULL,
+       total     INTEGER NOT NULL,
+       shares    INTEGER NOT NULL,
+       quote     INTEGER NOT NULL,
+       PRIMARY KEY (tx_hash, log_index)
+     ) STRICT;
+     CREATE INDEX stock_trades_by_wallet ON stock_trades(wallet, block DESC);
+     CREATE TABLE stock_trade_cursor (
+       id    INTEGER PRIMARY KEY CHECK (id = 1),
+       block INTEGER NOT NULL
+     ) STRICT;",
 ];
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 

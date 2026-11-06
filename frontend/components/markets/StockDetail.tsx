@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { ArrowLeft } from "@phosphor-icons/react";
+import { useAccount } from "wagmi";
+import { StockTradesTable } from "@/components/history/StockTrades";
 import { SiteNav } from "@/components/SiteNav";
 import { WalletConnect } from "@/components/wallet";
 import { Button, Segmented, cx } from "@/components/ui/kit";
@@ -24,10 +26,12 @@ import {
   historyUrl,
   mainnetRoute,
   pct,
+  positionsOf,
   stockMarketEnabled,
   tone,
   usd,
   useMarkets,
+  useStockTrades,
 } from "@/lib/markets/marketData";
 
 const StockTrade = dynamic(
@@ -92,7 +96,9 @@ export function StockDetail({ ticker }: { ticker: string }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [hover, setHover] = useState<number | null>(null);
-  const [trading, setTrading] = useState(false);
+  const [trading, setTrading] = useState<"buy" | "sell" | null>(null);
+  const { address } = useAccount();
+  const { trades, error: tradesError } = useStockTrades(address);
 
   useEffect(() => {
     let alive = true;
@@ -120,6 +126,22 @@ export function StockDetail({ ticker }: { ticker: string }) {
   }, [ticker]);
 
   const asset = markets?.assets.find((a) => a.ticker === ticker) ?? null;
+  const mine = trades?.filter((t) => t.symbol === ticker) ?? [];
+  const position = positionsOf(mine)[0] ?? null;
+  const sum = (side: "buy" | "sell") =>
+    mine
+      .filter((t) => t.side === side)
+      .reduce((total, t) => total + t.total / 1e6, 0);
+  const closed =
+    mine.length > 0 && mine.every((t) => t.currency === "USDC")
+      ? { bought: sum("buy"), sold: sum("sell") }
+      : null;
+  const marketValue =
+    position && asset?.price != null ? position.shares * asset.price : null;
+  const gain =
+    position?.cost != null && marketValue != null
+      ? marketValue - position.cost
+      : null;
   const unknown = !!markets && !asset;
   const loading = !!history && history.range !== range && !historyError;
   const point = hover != null ? history?.points[hover] : undefined;
@@ -184,7 +206,7 @@ export function StockDetail({ ticker }: { ticker: string }) {
           <div className="flex items-center gap-2">
             {markets && <SessionPill session={markets.session} />}
             {asset && stockMarketEnabled() && (
-              <Button onClick={() => setTrading(true)}>Buy or sell</Button>
+              <Button onClick={() => setTrading("buy")}>Buy or sell</Button>
             )}
             {isAsset(ticker) && (
               <Link
@@ -196,6 +218,79 @@ export function StockDetail({ ticker }: { ticker: string }) {
             )}
           </div>
         </header>
+
+        {address && !trades && (
+          <div className="mt-5 h-[116px] animate-pulse rounded-3xl bg-surface" />
+        )}
+        {!position && closed && (
+          <section className="mt-5 rounded-3xl bg-surface px-5 py-4">
+            <h2 className="text-[15px] font-semibold">
+              You no longer own {ticker}
+            </h2>
+            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3">
+              <Stat label="Total bought" value={usd(closed.bought)} />
+              <Stat label="Total sold" value={usd(closed.sold)} />
+              <div>
+                <dt className="text-xs text-subtle">Realized profit or loss</dt>
+                <dd
+                  className={cx(
+                    "mt-1 font-jet text-[14px] tabular-nums",
+                    tone(closed.sold - closed.bought),
+                  )}
+                >
+                  {closed.sold >= closed.bought ? "+" : "−"}
+                  {usd(Math.abs(closed.sold - closed.bought))}
+                </dd>
+              </div>
+            </dl>
+          </section>
+        )}
+        {position && (
+          <section className="mt-5 rounded-3xl bg-surface px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-[15px] font-semibold">Your position</h2>
+              {stockMarketEnabled() && asset && (
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => setTrading("buy")}>
+                    Buy more
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setTrading("sell")}
+                  >
+                    Sell
+                  </Button>
+                </div>
+              )}
+            </div>
+            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-4">
+              <Stat label="Shares" value={String(position.shares)} />
+              <Stat label="Value now" value={usd(marketValue)} />
+              <Stat
+                label="Average cost"
+                value={
+                  position.cost == null
+                    ? "–"
+                    : usd(position.cost / position.shares)
+                }
+              />
+              <div>
+                <dt className="text-xs text-subtle">Profit or loss</dt>
+                <dd
+                  className={cx(
+                    "mt-1 font-jet text-[14px] tabular-nums",
+                    tone(gain),
+                  )}
+                >
+                  {gain == null
+                    ? "–"
+                    : `${gain >= 0 ? "+" : "−"}${usd(Math.abs(gain))} (${pct(((gain as number) / (position.cost as number)) * 100)})`}
+                </dd>
+              </div>
+            </dl>
+          </section>
+        )}
 
         <section className="mt-5">
           <Segmented
@@ -307,6 +402,13 @@ export function StockDetail({ ticker }: { ticker: string }) {
           </div>
         </section>
 
+        {address && (mine.length > 0 || tradesError) && (
+          <section className="mt-8">
+            <h2 className="mb-3 text-[15px] font-semibold">Your trades</h2>
+            <StockTradesTable trades={mine} error={tradesError} />
+          </section>
+        )}
+
         <p className="mt-6 font-jet text-[11px] text-faint">
           Prices from Yahoo Finance. Company stats from Nasdaq. Wrapper quotes
           from the KyberSwap aggregator on BNB Chain.
@@ -319,7 +421,9 @@ export function StockDetail({ ticker }: { ticker: string }) {
           name={asset.name}
           price={asset.price}
           mainnetRoute={mainnetRoute(asset)}
-          onClose={() => setTrading(false)}
+          startSide={trading}
+          ownedShares={trades ? (position?.shares ?? 0) : null}
+          onClose={() => setTrading(null)}
         />
       )}
     </div>

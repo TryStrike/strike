@@ -10,8 +10,13 @@ import {
   type Chain,
   type EIP1193Provider,
   type PublicClient,
-} from 'viem';
-import { arcRpcUrls, getArcConfig, getAssetConfig, type ArcAsset } from './config';
+} from "viem";
+import {
+  arcRpcUrls,
+  getArcConfig,
+  getAssetConfig,
+  type ArcAsset,
+} from "./config";
 
 let chain: Chain | null = null;
 let client: PublicClient | null = null;
@@ -22,7 +27,7 @@ function arcChain(): Chain {
     chain = defineChain({
       id: config.chainId,
       name: config.name,
-      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
+      nativeCurrency: { name: "USD Coin", symbol: "USDC", decimals: 18 },
       rpcUrls: { default: { http: [config.rpcEndpoint] } },
     });
   }
@@ -30,26 +35,45 @@ function arcChain(): Chain {
 }
 
 export function arcPublicClient(): PublicClient {
-  client ??= createPublicClient({ chain: arcChain(), transport: fallback(arcRpcUrls().map((url) => http(url))) });
+  client ??= createPublicClient({
+    chain: arcChain(),
+    pollingInterval: 2_000,
+    transport: fallback(
+      arcRpcUrls().map((url) => http(url, { retryCount: 0 })),
+    ),
+  });
   return client;
 }
 
-export function arcWalletClient(provider: EIP1193Provider, account: `0x${string}`) {
-  return createWalletClient({ account, chain: arcChain(), transport: custom(provider) });
+export function arcWalletClient(
+  provider: EIP1193Provider,
+  account: `0x${string}`,
+) {
+  return createWalletClient({
+    account,
+    chain: arcChain(),
+    transport: custom(provider),
+  });
 }
 
-export async function readAssetBalance(address: string, asset: ArcAsset): Promise<number> {
+export async function readAssetBalance(
+  address: string,
+  asset: ArcAsset,
+): Promise<number> {
   const cfg = getAssetConfig(asset);
   const raw = await arcPublicClient().readContract({
     address: cfg.address,
     abi: erc20Abi,
-    functionName: 'balanceOf',
+    functionName: "balanceOf",
     args: [address as `0x${string}`],
   });
   return Number(formatUnits(raw, cfg.decimals));
 }
 
-export async function getAssetBalance(address: string, asset: ArcAsset): Promise<number> {
+export async function getAssetBalance(
+  address: string,
+  asset: ArcAsset,
+): Promise<number> {
   if (!address) return 0;
   try {
     return await readAssetBalance(address, asset);

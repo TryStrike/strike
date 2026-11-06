@@ -120,7 +120,6 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
     const dispatchConnectEvent = useStore((s) => s.dispatchConnectEvent);
     const recordRecentWallet = useStore((s) => s.recordRecentWallet);
     const setConnectModalOpen = useStore((s) => s.setConnectModalOpen);
-    const targetChainId = arcTargetChainId();
 
     const connector = connectors.find((c) => c.id === entry.connectorId);
 
@@ -129,7 +128,7 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
         setBusy(true);
         dispatchConnectEvent({ type: 'START_RECONNECT' });
         try {
-            await connectAsync({ connector, chainId: targetChainId });
+            await connectAsync({ connector });
             dispatchConnectEvent({ type: 'CONNECT_SUCCESS' });
             recordRecentWallet({ connectorId: connector.id, name: connector.name, address: entry.address });
             saveRecentWallets(useStore.getState().recentWallets);
@@ -141,7 +140,7 @@ function RecentWalletRow({ entry }: { entry: { connectorId: string; name: string
         } finally {
             setBusy(false);
         }
-    }, [connector, busy, dispatchConnectEvent, connectAsync, targetChainId, recordRecentWallet, setConnectModalOpen, entry.address, toast]);
+    }, [connector, busy, dispatchConnectEvent, connectAsync, recordRecentWallet, setConnectModalOpen, entry.address, toast]);
 
     if (!connector) return null;
 
@@ -201,13 +200,13 @@ export const WalletConnectModal: React.FC = () => {
                 // No MetaMask, but Brave Wallet, Rabby and the like inject window.ethereum: use that.
                 const browserWallet = connectors.find((c) => c.id === 'injected');
                 if (browserWallet && (await browserWallet.getProvider())) {
-                    await connectAsync({ connector: browserWallet, chainId: arcTargetChainId() });
+                    await connectAsync({ connector: browserWallet });
                     return;
                 }
                 window.open('https://metamask.io/download/', '_blank', 'noopener,noreferrer');
                 throw new Error('MetaMask is not installed in this browser');
             }
-            await connectAsync({ connector, chainId: arcTargetChainId() });
+            await connectAsync({ connector });
         });
 
     const handlePasskey = (mode: 'register' | 'login') =>
@@ -215,7 +214,7 @@ export const WalletConnectModal: React.FC = () => {
             const connector = connectors.find((c) => c.id === PASSKEY_CONNECTOR_ID);
             if (!connector) throw new Error('passkey connector missing');
             await passkeySignIn(mode);
-            await connectAsync({ connector, chainId: arcTargetChainId() });
+            await connectAsync({ connector });
         });
 
     const handleArcConnect = () => {
