@@ -1171,18 +1171,69 @@ pub async fn attestation(rpc: &Rpc, attestor: &str, epoch: u64) -> ApiResult<Opt
     }))
 }
 
+/// Arc answers `eth_getLogs` over at most 10,000 blocks (measured on testnet:
+/// a wider span is refused with -32012, a `toBlock` past the head with -32014).
+const LOG_SPAN: u64 = 10_000;
+
+/// `(number, timestamp)` of a block number or tag.
+async fn block_header(rpc: &Rpc, block: Value) -> ApiResult<(u64, u64)> {
+    let header = rpc
+        .call("eth_getBlockByNumber", json!([block, false]))
+        .await?;
+    let field = |name: &str| {
+        header
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(parse_quantity)
+            .map(|v| v as u64)
+            .ok_or_else(|| ApiError::Other(format!("eth_getBlockByNumber has no {name}")))
+    };
+    Ok((field("number")?, field("timestamp")?))
+}
+
+/// A block within a quarter log window of the one mined at unix second `at`,
+/// and the head. Arc makes about two blocks a second, and each step corrects
+/// the guess by the timestamp of the block it landed on.
+async fn block_near(rpc: &Rpc, at: u64) -> ApiResult<(u64, u64)> {
+    let (head, head_ts) = block_header(rpc, json!("latest")).await?;
+    let (mut n, mut ts) = (head, head_ts);
+    for _ in 0..4 {
+        let off = ts.abs_diff(at) * 2;
+        if off < LOG_SPAN / 4 {
+            break;
+        }
+        n = if ts > at {
+            n.saturating_sub(off)
+        } else {
+            (n + off).min(head)
+        };
+        (n, ts) = block_header(rpc, json!(format!("0x{n:x}"))).await?;
+    }
+    Ok((n, head))
+}
+
 /// The transaction that emitted `event` with `epoch` as its first indexed topic.
-///
-/// ponytail: Arc caps `eth_getLogs` at 5,000 blocks, so only about the last hour
-/// is searched. Index by block from `attestedAt` if older lookups matter.
+/// `near` is the unix second the event was mined, when the contract recorded
+/// it: the search then centres on that block, however old. Without it only the
+/// newest log window, about 84 minutes, is searched.
 pub async fn epoch_event_tx(
     rpc: &Rpc,
     contract: &str,
     event: &str,
     epoch: u64,
+    near: Option<u64>,
 ) -> ApiResult<Option<String>> {
-    let head = rpc.latest_block_number().await?;
-    let (from, to) = crate::treasury_view::block_range(head);
+    let (from, to) = match near {
+        Some(at) => {
+            let (n, head) = block_near(rpc, at).await?;
+            let from = n.saturating_sub(LOG_SPAN / 2);
+            (from, (from + LOG_SPAN - 1).min(head))
+        }
+        None => {
+            let head = rpc.latest_block_number().await?;
+            (head.saturating_sub(LOG_SPAN - 1), head)
+        }
+    };
     let logs = rpc
         .get_logs(json!({
             "address": to_checksum(contract),

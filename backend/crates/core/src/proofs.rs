@@ -432,7 +432,7 @@ async fn commit_next(treasury: &Treasury, from: u64) -> ApiResult<u64> {
     let tx = if onchain == [0; 32] {
         treasury.commit_rounds(n, ours, count as u64).await?
     } else if onchain == ours {
-        match eth::epoch_event_tx(&rpc, &cfg.treasury_address, ROUNDS_COMMITTED, n).await? {
+        match eth::epoch_event_tx(&rpc, &cfg.treasury_address, ROUNDS_COMMITTED, n, None).await? {
             Some(tx) => tx,
             None => {
                 tracing::error!(
@@ -563,7 +563,8 @@ pub async fn verdict(n: u64) -> ApiResult<Option<Verdict>> {
         .map_err(unavailable)?
     {
         Some(attestation) => {
-            let tx = eth::epoch_event_tx(&rpc, &attestor, EPOCH_ATTESTED, n)
+            let at = Some(attestation.attested_at);
+            let tx = eth::epoch_event_tx(&rpc, &attestor, EPOCH_ATTESTED, n, at)
                 .await
                 .map_err(unavailable)?;
             Some((attestation, tx))

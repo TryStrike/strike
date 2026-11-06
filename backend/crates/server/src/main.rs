@@ -54,7 +54,14 @@ async fn main() -> anyhow::Result<()> {
     let app = http::with_api_headers(routes::router(), config().app_url.as_deref())
         .layer(middleware::from_fn(log_server_errors))
         .layer(CatchPanicLayer::new())
-        .layer(TraceLayer::new_for_http().on_failure(()));
+        .layer(
+            TraceLayer::new_for_http()
+                // The path only: a query can carry a World ID code or state.
+                .make_span_with(|req: &Request| {
+                    tracing::debug_span!("request", method = %req.method(), path = %req.uri().path())
+                })
+                .on_failure(()),
+        );
 
     axum::serve(
         listener,
