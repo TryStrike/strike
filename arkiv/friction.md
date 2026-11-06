@@ -4,7 +4,7 @@ what got in our way building Strike on Arkiv, and what would have helped. everyt
 
 ## what we'd improve first
 
-1. **a Rust SDK, or a documented `execute` encoding.** our backend is Rust, and there's only a TypeScript SDK. we read the SDK's source to rebuild the calldata by hand: the op tuple, the attribute type codes, the indexed bit, the read only flag. one page with the exact ABI would have saved us most of a day
+1. **a Rust SDK, or a documented `execute` encoding.** our backend is Rust, and there's only a TypeScript SDK. we read the SDK's source to rebuild the calldata by hand: the op tuple, the attribute type codes, the indexed bit, the read only flag. one page with the exact ABI would have saved us most of a day. so we built it: [arkiv-rs-sdk](https://github.com/TryStrike/arkiv-rs-sdk), MIT, tested byte for byte against the official TypeScript SDK
 2. **paging that works on the public node.** see the repro below. today a query that returns more than one page can't be read to the end
 3. **the write limits, written down.** how big a batch can be, how many queries a second, and the largest `limit` a query takes. we found all three by hitting them
 
