@@ -1169,7 +1169,7 @@ export const LiveChart = React.memo(function LiveChart({
         };
       });
     if (markers.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- marker position comes from the chart instance's scales, an external system
+     
     setBetResults((prev) => [...prev, ...markers]);
   }, [chart, settledResults, selectedAsset, currentPrice]);
 
