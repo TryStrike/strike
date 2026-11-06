@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight } from '@phosphor-icons/react';
 import { concat, keccak256, type Hex } from 'viem';
 import { explorerTxUrl } from '@/lib/arc/config';
 import { Badge } from '@/components/ui/kit';
 
-const CLOSE_GRACE_MS = 60_000;
+const RETRY_MIN_MS = 5_000;
+const RETRY_MAX_MS = 60_000;
 
 interface BetProof {
   epoch: number;
@@ -18,7 +19,7 @@ interface BetProof {
   status: 'pending' | 'committed';
 }
 
-type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; data: BetProof };
+type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; data: BetProof; at: number };
 
 const foldsToRoot = (leaf: Hex, proof: Hex[], root: Hex): boolean =>
   proof.reduce<Hex>((node, sib) => {
@@ -51,23 +52,39 @@ const Countdown: React.FC<{ target: number }> = ({ target }) => {
 
 export default function OnchainProof({ betId }: { betId: string }) {
   const [state, setState] = useState<State>({ kind: 'loading' });
+  const [reload, setReload] = useState(0);
+  const pendingReplies = useRef(0);
+
+  useEffect(() => {
+    pendingReplies.current = 0;
+  }, [betId]);
 
   useEffect(() => {
     let cancelled = false;
+    let timer: number | undefined;
     fetch(`/api/proofs/bet/${encodeURIComponent(betId)}`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`);
         return (await res.json()) as BetProof;
       })
-      .then((data) => !cancelled && setState({ kind: 'ready', data }))
+      .then((data) => {
+        if (cancelled) return;
+        const at = Date.now();
+        setState({ kind: 'ready', data, at });
+        if (data.status !== 'pending') return;
+        const backoff = Math.min(RETRY_MAX_MS, RETRY_MIN_MS * 2 ** pendingReplies.current);
+        if (at >= data.end_ms) pendingReplies.current += 1;
+        timer = window.setTimeout(() => setReload((n) => n + 1), Math.max(data.end_ms - at, backoff));
+      })
       .catch((err: Error) => {
         console.error('[proof] onchain proof fetch failed', betId, err);
         if (!cancelled) setState({ kind: 'error', reason: err.message });
       });
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [betId]);
+  }, [betId, reload]);
 
   return (
     <div data-testid="onchain-proof" className="mt-3 rounded-3xl border border-line px-4 py-3">
@@ -79,18 +96,16 @@ export default function OnchainProof({ betId }: { betId: string }) {
       {state.kind === 'error' && (
         <p className="mt-1.5 text-[11px] text-down">Onchain proof unavailable: {state.reason}</p>
       )}
-      {state.kind === 'ready' && <ProofBody data={state.data} />}
+      {state.kind === 'ready' && <ProofBody data={state.data} at={state.at} />}
     </div>
   );
 }
 
-const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
+const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
   const { epoch, status, commit_tx, house_root } = data;
-  const [now] = useState(Date.now);
   const epochLine = <span className="font-jet text-subtle">epoch {epoch}</span>;
-  const closeAt = data.end_ms + CLOSE_GRACE_MS;
 
-  if (status === 'pending' && now > closeAt) {
+  if (status === 'pending' && at >= data.end_ms) {
     return <p className="mt-1.5 text-[11px] leading-relaxed text-muted">Not committed onchain yet for {epochLine}.</p>;
   }
 
@@ -98,7 +113,7 @@ const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
     return (
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
         Committed onchain after the epoch closes, about 10 min. {epochLine} closes in{' '}
-        <Countdown target={closeAt} />.
+        <Countdown target={data.end_ms} />.
       </p>
     );
   }
