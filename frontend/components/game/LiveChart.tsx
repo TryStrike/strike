@@ -338,6 +338,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   interface BetResult {
     id: string;
     won: boolean;
+    refunded: boolean;
     amount: number;
     payout: number;
     multiplier: number;
@@ -499,6 +500,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
       {
         id: `result-${lastResult.betId ?? lastResult.timestamp}`,
         won: lastResult.won,
+        refunded: lastResult.refunded,
         amount: lastResult.amount,
         payout: lastResult.payout,
         multiplier: Number((lastResult.amount > 0 ? lastResult.payout / lastResult.amount : 0).toFixed(2)),
@@ -770,15 +772,17 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             >
               <div className={`${OVERLAY} px-4 py-3`}>
                 <div className="flex items-baseline justify-between gap-4">
-                  <p className="text-[12px] text-subtle">{result.won ? 'Won' : 'Lost'}</p>
-                  {result.won && (
+                  <p className="text-[12px] text-subtle">{result.refunded ? 'Refunded' : result.won ? 'Won' : 'Lost'}</p>
+                  {result.won && !result.refunded && (
                     <span className="font-jet text-[11px] text-faint">{result.multiplier}x</span>
                   )}
                 </div>
-                <p className={`font-jet text-lg leading-tight ${result.won ? 'text-up' : 'text-down'}`}>
-                  {result.won
-                    ? `+${result.payout.toFixed(4)}`
-                    : `-${result.amount.toFixed(4)}`
+                <p className={`font-jet text-lg leading-tight ${result.refunded ? 'text-subtle' : result.won ? 'text-up' : 'text-down'}`}>
+                  {result.refunded
+                    ? result.amount.toFixed(4)
+                    : result.won
+                      ? `+${result.payout.toFixed(4)}`
+                      : `-${result.amount.toFixed(4)}`
                   }
                   <span className="text-xs ml-1 text-faint">{currencySymbol}</span>
                 </p>

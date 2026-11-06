@@ -46,6 +46,7 @@ export interface GameState {
   isPlacingBet: boolean;
   lastResult: {
     won: boolean;
+    refunded: boolean;
     amount: number;
     payout: number;
     timestamp: number;
@@ -104,10 +105,14 @@ const DEFAULT_TARGET_CELLS: TargetCell[] = [
 ];
 
 const ROUND_CLOCK_GRACE_MS = 400;
+/** Bets answer in milliseconds, so this is a hung request, not a slow one. */
+const BET_TIMEOUT_MS = 6_000;
 const FAST_CLAIMS = 8;
 const CLAIM_RETRY_MS = 1000;
 const SLOW_CLAIMS = 24;
 const SLOW_CLAIM_RETRY_MS = 5000;
+
+const BET_TIMED_OUT = 'The server did not answer. Check your balance before betting again.';
 
 const sameWallet = (a?: string | null, b?: string | null) => a?.toLowerCase() === b?.toLowerCase();
 
@@ -151,7 +156,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
   const settleRound = async (betId: string) => {
     roundTimers.delete(betId);
-    const { activeBets, settlingBets, address, network, currentPrice } = get();
+    const { activeBets, settlingBets, address, network } = get();
     const bet: ActiveBet | undefined = activeBets.find((b: ActiveBet) => b.id === betId);
     if (!bet) return;
 
@@ -181,11 +186,14 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
     const won = result.won === true;
     const payout = Number(result.payout) || 0;
-    const endPrice = result.endPrice ?? currentPrice;
+    const refunded = result.outcome === 'tie' || result.outcome === 'refund_no_price';
+    const endPrice = Number(result.endPrice) || 0;
     const timestamp = Date.now();
 
-    if (won) playWinSound();
-    else playLoseSound();
+    if (!refunded) {
+      if (won) playWinSound();
+      else playLoseSound();
+    }
 
     get().addBet?.({
       id: bet.id,
@@ -195,7 +203,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
       payout: payout.toString(),
       startPrice: bet.strikePrice || 0,
       endPrice,
-      actualChange: endPrice - (bet.strikePrice || 0),
+      actualChange: endPrice ? endPrice - (bet.strikePrice || 0) : 0,
       asset: bet.asset,
       endTime: bet.endTime ?? null,
       strikePrice: bet.strikePrice ?? null,
@@ -211,6 +219,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
     set({
       lastResult: {
         won,
+        refunded,
         amount: bet.amount,
         payout,
         timestamp,
@@ -355,7 +364,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
       }
 
       if (currentPrice <= 0 || !assetHistories?.[selectedAsset]?.length) {
-        throw new Error("Price feed is not ready yet — try again in a moment");
+        throw new Error("Price feed is not ready yet, try again in a moment");
       }
 
 
@@ -399,9 +408,10 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
         selectedCurrency,
       });
 
-      // Same betRequestId, so a resend after re-signing can never place it twice.
+      // Same betRequestId, so a resend can never place it twice.
       const send = () => fetch('/api/balance/bet', {
         method: 'POST',
+        signal: AbortSignal.timeout(BET_TIMEOUT_MS),
         headers: {
           'Content-Type': 'application/json',
         },
@@ -428,16 +438,20 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
           },
         }),
       });
-      let response = await send();
+      const sendOrRetry = () =>
+        send().catch((err) => {
+          if (err?.name === 'TimeoutError') return send();
+          throw err;
+        });
+      let response = await sendOrRetry();
       if (response.status === 401) {
-        const { ensureBalanceSession } = await import('@/lib/balance/balanceClientHeaders');
         await ensureBalanceSession();
-        response = await send();
+        response = await sendOrRetry();
       }
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to place bet');
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.error || 'Failed to place bet');
       }
 
       const data = await response.json();
@@ -500,11 +514,13 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
       };
     } catch (error) {
       console.error("Error placing bet from house balance:", error);
-      set({
-        isPlacingBet: false,
-        error: error instanceof Error ? error.message : "Failed to place bet"
-      });
-      throw error;
+      const timedOut = error instanceof Error && error.name === 'TimeoutError';
+      if (timedOut) void (get() as any).fetchBalance?.(userAddress);
+      const message = timedOut
+        ? BET_TIMED_OUT
+        : error instanceof Error ? error.message : "Failed to place bet";
+      set({ isPlacingBet: false, error: message });
+      throw new Error(message);
     }
   },
 
@@ -590,8 +606,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
     const updateObj: any = {
       assetPrices: updatedAssetPrices,
       assetHistories: updatedAssetHistories,
-      rawAssetPrices: updatedRawPrices,
-      error: null
+      rawAssetPrices: updatedRawPrices
     };
 
     if (currentAssetUpdated) {

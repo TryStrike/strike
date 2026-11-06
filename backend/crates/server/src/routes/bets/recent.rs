@@ -17,7 +17,7 @@ use crate::sql;
 use super::json_cached;
 
 const RECENT_SQL: &str = "SELECT id, wallet_address, asset, payout, created_at \
-     FROM bet_history WHERE won IS TRUE ORDER BY created_at DESC LIMIT 60";
+     FROM bet_history WHERE won IS TRUE AND payout > amount ORDER BY created_at DESC LIMIT 60";
 
 pub fn routes() -> Router {
     Router::new().route("/api/bets/recent", get(handle))

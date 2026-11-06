@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '@/lib/store';
+import { isRealWin } from '@/lib/types/bet';
 import { useShallow } from 'zustand/react/shallow';
 import { LiveChart } from './LiveChart';
 import { BalanceDisplay } from '@/components/balance';
@@ -177,10 +178,7 @@ export const GameBoard: React.FC = () => {
         undefined,
       );
     } catch (err) {
-      if (process.env.NODE_ENV === 'development') {
-        console.error("Failed to place bet:", err instanceof Error ? err.message : err);
-      }
-      
+      toast.error(err instanceof Error ? err.message : 'Failed to place bet');
     }
   };
 
@@ -199,7 +197,7 @@ export const GameBoard: React.FC = () => {
   const sessionBets = bets.filter((b) => b.timestamp >= sessionStart);
   const sessionPnl = sessionBets.reduce((sum, b) => sum + (b.won ? parseFloat(b.payout) - parseFloat(b.amount) : -parseFloat(b.amount)), 0);
   let streak = 0;
-  while (streak < sessionBets.length && sessionBets[streak].won) streak++;
+  while (streak < sessionBets.length && isRealWin(sessionBets[streak])) streak++;
 
   const lastResult = useStore((s) => s.lastResult);
   const [feedDelayed, setFeedDelayed] = useState(false);
@@ -217,11 +215,11 @@ export const GameBoard: React.FC = () => {
   useEffect(() => {
     if (!lastResult) return;
     const cur = lastResult.currency || 'USDC';
-    const outcome = lastResult.won
-      ? lastResult.payout === lastResult.amount
-        ? `Round draw. Stake ${lastResult.amount.toFixed(2)} ${cur} refunded.`
-        : `Round won. Payout ${lastResult.payout.toFixed(2)} ${cur}.`
-      : `Round lost. Stake ${lastResult.amount.toFixed(2)} ${cur} forfeited.`;
+    const outcome = lastResult.refunded
+      ? `Round draw. Stake ${lastResult.amount.toFixed(2)} ${cur} refunded.`
+      : lastResult.won
+        ? `Round won. Payout ${lastResult.payout.toFixed(2)} ${cur}.`
+        : `Round lost. Stake ${lastResult.amount.toFixed(2)} ${cur} forfeited.`;
     setSrMessage(outcome);
   }, [lastResult]);
   useEffect(() => {

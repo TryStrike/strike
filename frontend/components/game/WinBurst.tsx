@@ -5,6 +5,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { ShareNetwork } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
 import { BRAND } from '@/lib/brand';
+import { isRealWin } from '@/lib/types/bet';
 
 const CANNON_MS = 1500;
 const GRAVITY = 0.35;
@@ -88,7 +89,7 @@ export function WinBurst() {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unsubscribe = useStore.subscribe((state, prev) => {
       const latest = state.bets[0];
-      if (!latest || latest.id === prev.bets[0]?.id || !latest.won) return;
+      if (!latest || latest.id === prev.bets[0]?.id || !isRealWin(latest)) return;
       setWin({ id: latest.id, payout: parseFloat(latest.payout) || 0 });
       clearTimeout(timer);
       timer = setTimeout(() => setWin(null), 2600);
