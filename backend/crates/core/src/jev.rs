@@ -86,8 +86,12 @@ fn confidence_of(response: &Value) -> Option<f64> {
 }
 
 /// The score has to clear the threshold and the payout's breakeven.
+pub fn needed(payout_multiplier: f64) -> f64 {
+    THRESHOLD.max(1.0 / payout_multiplier)
+}
+
 fn verdict(confidence: f64, payout_multiplier: f64) -> Gate {
-    if confidence >= THRESHOLD.max(1.0 / payout_multiplier) {
+    if confidence >= needed(payout_multiplier) {
         Gate::Pass(confidence)
     } else {
         Gate::Block(confidence)

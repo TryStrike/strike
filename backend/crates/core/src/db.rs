@@ -137,6 +137,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE world_attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'start' CHECK (kind IN ('start', 'checkpoint'));",
     // 8: one wallet's open stake, read on every bet.
     "CREATE INDEX bet_rounds_open_by_wallet ON bet_rounds(user_address) WHERE outcome IS NULL;",
+    // 9: the numbers behind a decision, snapshotted when it was made.
+    "ALTER TABLE agent_decisions ADD COLUMN trace TEXT;",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

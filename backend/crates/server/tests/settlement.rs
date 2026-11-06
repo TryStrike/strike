@@ -983,6 +983,66 @@ async fn first_verdict(decisions: &mut SseFeed, verdicts: &[&str], secs: u64) ->
         .await
 }
 
+/// A fake jev that gives every proposal `score`.
+async fn jev_server(btc: f64, score: f64) -> (Server, Feed) {
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move || async move {
+            Json(json!({ "answers": { "pass": { "type": "noul", "noul": score } } }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let env = [
+        ("OPENROUTER_API_KEY", "test-jev-key"),
+        ("JEV_ENDPOINT", &*Box::leak(url.into_boxed_str())),
+    ];
+    let (s, feed, _) = Server::start_with(btc, &env).await;
+    (s, feed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jev_block_keeps_its_direction_stake_and_trace() {
+    let (s, feed) = jev_server(100.0, 0.4).await;
+    let trader = key(40);
+    s.fund(&address_of(&trader), 100);
+    let (_, _, cookie) = s.start_agent(&trader, &yolo(&trader)).await;
+    let mut decisions = s.feed(&cookie.unwrap()).await;
+
+    jump_after_history(&feed).await;
+    let blocked = first_verdict(&mut decisions, &["blocked"], 15).await;
+
+    assert_eq!(blocked["direction"], "UP", "{blocked}");
+    assert_eq!(blocked["stake"], json!(5.0), "{blocked}");
+    assert_eq!(blocked["confidence"], json!(0.4), "{blocked}");
+    let trace = &blocked["trace"];
+    assert!(
+        trace["signal"].as_str().unwrap().starts_with("up "),
+        "{trace}"
+    );
+    assert_eq!(trace["jevNeeded"], json!(0.6), "{trace}");
+    assert_eq!(trace["budgetLeft"], json!(5.0), "{trace}");
+    assert_eq!(trace["stopLossRoom"], json!(5.0), "{trace}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_placed_decision_carries_its_trace_and_a_skip_has_none() {
+    let (s, feed) = jev_server(100.0, 0.9).await;
+    let trader = key(41);
+    s.fund(&address_of(&trader), 100);
+    let (_, _, cookie) = s.start_agent(&trader, &yolo(&trader)).await;
+    let mut decisions = s.feed(&cookie.unwrap()).await;
+
+    let skip = first_verdict(&mut decisions, &["skipped"], 15).await;
+    assert_eq!(skip["trace"], Value::Null, "{skip}");
+
+    jump_after_history(&feed).await;
+    let placed = first_verdict(&mut decisions, &["placed"], 15).await;
+    assert_eq!(placed["trace"]["jevNeeded"], json!(0.6), "{placed}");
+    assert_eq!(placed["trace"]["budgetLeft"], json!(5.0), "{placed}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_loss_stops_the_agent_at_the_stop_loss_with_one_bet_open_at_a_time() {
     let (s, feed, _) = Server::start(100.0).await;

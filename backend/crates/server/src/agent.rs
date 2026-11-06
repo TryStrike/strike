@@ -8,7 +8,9 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, watch, Notify};
 
-use strike_core::agent::{self, Decision, Release, Reservation, Reserve, Session, Signal};
+use strike_core::agent::{
+    self, Decision, Proposed, Release, Reservation, Reserve, Session, Signal,
+};
 use strike_core::bets::now_ms;
 use strike_core::db::{self, Db};
 use strike_core::error::ApiResult;
@@ -17,6 +19,7 @@ use strike_core::ledger::BetOutcome;
 use strike_core::settlement::binomo_multiplier;
 use strike_core::ticks;
 use strike_core::world;
+use serde_json::Value;
 
 use crate::routes::balance_mutations::place_bet;
 
@@ -281,11 +284,26 @@ async fn check(
     if session.ends_at_ms - now < agent::CLOSING_MS {
         return note(database, session, "skipped", "Session is closing").await;
     }
+    let needed = jev::enabled().then(|| jev::needed(proposal.payout_multiplier));
+    let trace = agent::trace(session, &reason, needed);
     let confidence = match jev::review(&proposal).await {
         Gate::Off => None,
         Gate::Pass(confidence) => Some(confidence),
         Gate::Block(confidence) => {
-            return note_scored(database, session, "blocked", jev::BLOCKED, Some(confidence)).await
+            let proposed = Proposed {
+                direction,
+                stake,
+                trace,
+            };
+            return note_scored(
+                database,
+                session,
+                "blocked",
+                jev::BLOCKED,
+                Some(confidence),
+                Some(proposed),
+            )
+            .await;
         }
         Gate::Failed(why) => return note(database, session, "skipped", why).await,
     };
@@ -300,6 +318,7 @@ async fn check(
             stake,
             &reason,
             confidence,
+            &trace,
             now,
         )
         .await?;
@@ -318,6 +337,7 @@ async fn check(
         reason: &reason,
         proposal: false,
         confidence,
+        trace: Some(&trace),
     };
     place(database, session, trade).await
 }
@@ -411,6 +431,7 @@ pub struct Trade<'a> {
     /// Placing an approved proposal rather than a new yolo trade.
     pub proposal: bool,
     pub confidence: Option<f64>,
+    pub trace: Option<&'a Value>,
 }
 
 /// Holds the stake under every limit, runs the locked bet path, and records
@@ -426,6 +447,7 @@ pub async fn place(database: &Db, session: &mut Session, trade: Trade<'_>) -> Ap
             reason: trade.reason,
             proposal: trade.proposal,
             confidence: trade.confidence,
+            trace: trade.trace,
         },
         now_ms(),
     )
@@ -492,7 +514,7 @@ async fn note(
     verdict: &'static str,
     why: &str,
 ) -> ApiResult<Placement> {
-    note_scored(database, session, verdict, why, None).await
+    note_scored(database, session, verdict, why, None, None).await
 }
 
 async fn note_scored(
@@ -501,9 +523,18 @@ async fn note_scored(
     verdict: &'static str,
     why: &str,
     confidence: Option<f64>,
+    proposed: Option<Proposed>,
 ) -> ApiResult<Placement> {
-    let decision =
-        agent::record_note(database, &session.id, verdict, why, confidence, now_ms()).await?;
+    let decision = agent::record_note(
+        database,
+        &session.id,
+        verdict,
+        why,
+        confidence,
+        proposed,
+        now_ms(),
+    )
+    .await?;
     publish(&session.id, decision_frame(&decision));
     Ok(Placement::Noted)
 }

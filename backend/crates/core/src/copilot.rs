@@ -33,6 +33,7 @@ Answer in two or three short sentences. Use only numbers your tools return, neve
 Movers cover the last 15 minutes of live ticks, so always say \"last 15 minutes\" when you rank them. \
 To show movers as a table, call show_table with source market_movers. \
 fill_trade_ticket only fills the ticket: tell the trader to tap Higher or Lower to place it. \
+When you explain a decision, use only its trace and result. If a decision has no trace, say the full trace wasn't recorded for it. \
 Your earlier answers were true when you gave them. The tool calls behind them are not repeated in the history, so never correct them for that. \
 Only if the trader asks you to place a bet, change a limit or move funds, say you can't.";
 
@@ -154,7 +155,7 @@ fn tools() -> Value {
         ),
         tool(
             "get_agent_decisions",
-            "The trader's own agent session and its latest decisions: verdict, reason, stake, result and stop reason.",
+            "The trader's own agent session and its latest decisions: verdict, reason, stake, trace, result and stop reason.",
             json!({}),
         ),
         tool(
