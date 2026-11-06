@@ -1,3 +1,5 @@
+# Ships the frontend and the Rust backend to the EC2 VM with backend/deploy/vm.sh.
+# Needs repo secrets VM_HOST (ubuntu@<ip>), VM_SSH_KEY and ENV_LOCAL; without them it skips.
 name: Deploy
 
 on:
@@ -21,10 +23,26 @@ jobs:
       contents: read
 
     steps:
+      - name: Check EC2 deploy secrets
+        id: ready
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          ENV_LOCAL: ${{ secrets.ENV_LOCAL }}
+        run: |
+          if [ -n "$VM_HOST" ] && [ -n "$VM_SSH_KEY" ] && [ -n "$ENV_LOCAL" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::EC2 deploy skipped: set the VM_HOST, VM_SSH_KEY and ENV_LOCAL repo secrets to deploy."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
+        if: steps.ready.outputs.ok == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Write deploy credentials
+        if: steps.ready.outputs.ok == 'true'
         env:
           VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
           ENV_LOCAL: ${{ secrets.ENV_LOCAL }}
@@ -34,12 +52,14 @@ jobs:
           install -m 600 /dev/null .env.local
           printf '%s\n' "$ENV_LOCAL" > .env.local
 
-      - name: Deploy with vm.sh
+      - name: Deploy to EC2 with vm.sh
+        if: steps.ready.outputs.ok == 'true'
         env:
           DOMAIN: ${{ vars.DOMAIN }}
         run: backend/deploy/vm.sh "${{ secrets.VM_HOST }}" ~/vm_key
 
       - name: Health check through Caddy
+        if: steps.ready.outputs.ok == 'true'
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           DOMAIN: ${{ vars.DOMAIN }}
