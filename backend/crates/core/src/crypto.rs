@@ -15,7 +15,7 @@ use sha2::Sha256;
 
 use crate::config::config;
 
-const SESSION_VERSION: u8 = 1;
+const SESSION_VERSION: u8 = 2;
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 12;
 const DEFAULT_SETTLEMENT_TTL_SECONDS: i64 = 5 * 60;
 const MIN_SETTLEMENT_TTL_SECONDS: i64 = 60;
@@ -33,6 +33,7 @@ struct SessionPayload {
     v: u8,
     exp: i64,
     n: String,
+    w: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -100,11 +101,17 @@ fn constant_eq(a: &str, b: &str) -> bool {
 
 /// `mintBalanceSessionCookieValue()` — returns None when the secret is unset,
 /// exactly as the TS version does.
-pub fn mint_balance_session() -> Option<String> {
-    mint_balance_session_with(config().balance_internal_secret.as_deref())
+/// What a wallet signs to open a balance session.
+pub fn balance_session_message(address: &str, issued_at_ms: i64) -> String {
+    format!("Sign in to Strike\nWallet: {address}\nIssued: {issued_at_ms}")
 }
 
-pub fn mint_balance_session_with(secret: Option<&str>) -> Option<String> {
+/// A session bound to `wallet`, which the caller has already proven it controls.
+pub fn mint_balance_session(wallet: &str) -> Option<String> {
+    mint_balance_session_with(config().balance_internal_secret.as_deref(), wallet)
+}
+
+pub fn mint_balance_session_with(secret: Option<&str>, wallet: &str) -> Option<String> {
     // An empty secret is falsy in the TS code, which mints nothing.
     let secret = secret.filter(|s| !s.is_empty())?;
     let exp = now_seconds() + SESSION_TTL_SECONDS;
@@ -116,6 +123,7 @@ pub fn mint_balance_session_with(secret: Option<&str>) -> Option<String> {
             v: SESSION_VERSION,
             exp,
             n,
+            w: wallet.to_string(),
         })
         .ok()?,
     );
@@ -123,37 +131,25 @@ pub fn mint_balance_session_with(secret: Option<&str>) -> Option<String> {
     Some(format!("{payload}.{sig}"))
 }
 
-/// `verifyBalanceSessionCookieValue()` — signature first, then expiry.
-pub fn verify_balance_session(raw: Option<&str>) -> bool {
-    verify_balance_session_with(config().balance_internal_secret.as_deref(), raw)
+/// The wallet a valid, unexpired session cookie was minted for.
+pub fn balance_session_wallet(raw: Option<&str>) -> Option<String> {
+    balance_session_wallet_with(config().balance_internal_secret.as_deref(), raw)
 }
 
-pub fn verify_balance_session_with(secret: Option<&str>, raw: Option<&str>) -> bool {
-    let Some(secret) = secret.filter(|s| !s.is_empty()) else {
-        return false;
-    };
-    let Some(value) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
-        return false;
-    };
-
+pub fn balance_session_wallet_with(secret: Option<&str>, raw: Option<&str>) -> Option<String> {
+    let secret = secret.filter(|s| !s.is_empty())?;
+    let value = raw.map(str::trim).filter(|v| !v.is_empty())?;
     let mut parts = value.split('.');
     let (Some(payload), Some(sig), None) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
+        return None;
     };
-    if payload.is_empty() || sig.is_empty() {
-        return false;
+    if payload.is_empty() || sig.is_empty() || !constant_eq(sig, &hmac_b64url(secret, payload)) {
+        return None;
     }
-    if !constant_eq(sig, &hmac_b64url(secret, payload)) {
-        return false;
-    }
-
-    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload) else {
-        return false;
-    };
-    let Ok(decoded) = serde_json::from_slice::<SessionPayload>(&bytes) else {
-        return false;
-    };
-    decoded.v == SESSION_VERSION && decoded.exp >= now_seconds()
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let decoded = serde_json::from_slice::<SessionPayload>(&bytes).ok()?;
+    (decoded.v == SESSION_VERSION && decoded.exp >= now_seconds() && !decoded.w.is_empty())
+        .then_some(decoded.w)
 }
 
 // ---------------------------------------------------------------------------
@@ -403,24 +399,28 @@ mod tests {
 
     #[test]
     fn session_payload_round_trips() {
-        let minted = mint_balance_session_with(Some(SECRET)).expect("mint");
-        assert!(verify_balance_session_with(Some(SECRET), Some(&minted)));
+        let minted = mint_balance_session_with(Some(SECRET), "0xabc").expect("mint");
+        assert_eq!(
+            balance_session_wallet_with(Some(SECRET), Some(&minted)).as_deref(),
+            Some("0xabc")
+        );
         // Flipping one byte of the signature must fail.
         let (payload, sig) = minted.rsplit_once('.').unwrap();
         let mut bad = sig.chars().collect::<Vec<_>>();
         let last = bad.len() - 1;
         bad[last] = if bad[last] == 'A' { 'B' } else { 'A' };
-        assert!(!verify_balance_session_with(
+        assert!(balance_session_wallet_with(
             Some(SECRET),
             Some(&format!("{payload}.{}", bad.iter().collect::<String>()))
-        ));
+        )
+        .is_none());
     }
 
     #[test]
     fn malformed_session_values_are_rejected() {
         for case in ["", "no-dot", "a.b.c", ".", "YXlb.YQ", "###.###"] {
             assert!(
-                !verify_balance_session_with(Some(SECRET), Some(case)),
+                balance_session_wallet_with(Some(SECRET), Some(case)).is_none(),
                 "accepted {case:?}"
             );
         }
@@ -531,9 +531,9 @@ mod tests {
 
     #[test]
     fn missing_secrets_disable_verification_not_panic() {
-        assert_eq!(mint_balance_session_with(None), None);
-        assert_eq!(mint_balance_session_with(Some("")), None);
-        assert!(!verify_balance_session_with(Some(""), Some("a.b")));
+        assert_eq!(mint_balance_session_with(None, "0xabc"), None);
+        assert_eq!(mint_balance_session_with(Some(""), "0xabc"), None);
+        assert!(balance_session_wallet_with(Some(""), Some("a.b")).is_none());
         assert!(verify_settlement_token_with(Some(""), Some("a.b")).is_none());
         assert!(create_settlement_token_with(None, "b", "0xA", "USDC", 1.0, 300).is_err());
         assert!(!verify_admin_token_with(Some(""), ADMIN_TTL, Some("YWJj")));

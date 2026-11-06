@@ -19,7 +19,7 @@ use strike_core::bets::{
 };
 use strike_core::error::ApiError;
 
-use crate::http::{json_status, require_balance_session};
+use crate::http::{json_status, require_wallet_session};
 use crate::sql;
 
 use super::{column_type, Binds};
@@ -34,7 +34,8 @@ pub fn routes() -> Router {
 
 async fn handle(headers: HeaderMap, Query(raw): Query<HashMap<String, String>>) -> Response {
     // `assertBalanceApiAuthorized` runs before anything else and answers directly.
-    if let Err(err) = require_balance_session(&headers) {
+    let wallet = raw.get("wallet").cloned().unwrap_or_default();
+    if let Err(err) = require_wallet_session(&headers, &wallet) {
         return err.into_response();
     }
 

@@ -46,7 +46,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::bans::is_globally_banned;
-use crate::http::require_balance_session;
+use crate::http::{require_balance_session, require_wallet_session};
 use crate::routes::bets::{column_type, Binds};
 use crate::sql;
 
@@ -235,6 +235,11 @@ async fn bet(headers: HeaderMap, raw: Bytes) -> Response {
         Ok(body) => body,
         Err(response) => return response,
     };
+    if let Err(err) =
+        require_wallet_session(&headers, body["userAddress"].as_str().unwrap_or_default())
+    {
+        return err.into_response();
+    }
     match bet_run(&body).await {
         Ok(body) => Json(body).into_response(),
         Err(rejection) => reject(rejection),

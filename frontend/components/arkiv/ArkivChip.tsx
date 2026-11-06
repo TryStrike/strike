@@ -23,7 +23,7 @@ export function ArkivChip({
   const ok = matchesLedger(entity, ledgerPayout);
   return (
     <a
-      href={entityUrl(seals.explorer, entity.key)}
+      href={entityUrl(entity.key)}
       target="_blank"
       rel="noopener noreferrer"
       title={ok ? 'Sealed on Arkiv, matches the ledger' : `Arkiv says ${entity.payout}, the ledger disagrees`}

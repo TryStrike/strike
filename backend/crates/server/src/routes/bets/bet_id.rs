@@ -21,7 +21,7 @@ use strike_core::bets::{
 };
 use strike_core::error::ApiError;
 
-use crate::http::require_balance_session;
+use crate::http::{require_balance_session, require_wallet_session};
 use crate::sql;
 
 use super::{column_type, Binds};
@@ -58,6 +58,9 @@ async fn handle(
         return error_json(400, "Invalid bet id");
     }
     let address = canonical_address(wallet);
+    if let Err(err) = require_wallet_session(&headers, &address) {
+        return err.into_response();
+    }
 
     match run(&bet_id, &address).await {
         Ok(body) => axum::Json(body).into_response(),
@@ -324,7 +327,6 @@ fn string_or_empty(value: Option<&Value>) -> String {
 }
 
 /// `BET_ID = /^[A-Za-z0-9_.:-]{1,120}$/`.
-/// Never a quote, so an id is safe inside an Arkiv `str('…')`.
 pub(crate) fn bet_id_ok(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     (1..=120).contains(&bytes.len())

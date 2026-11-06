@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { matchesLedger, type ArkivSeals } from '@/lib/arkiv';
+import { ARKIV_RPC, matchesLedger, type ArkivSeals } from '@/lib/arkiv';
 
 export function ArkivSummary({
   seals,
@@ -27,7 +27,7 @@ export function ArkivSummary({
         {sealed.length > 0 ? (mismatched === 0 ? ', all match the ledger' : `, ${mismatched} ${mismatched === 1 ? 'does' : 'do'} not match the ledger`) : ''}.
         Verify yourself
       </summary>
-      <p className="mt-1.5 break-all leading-relaxed text-faint">arkiv_query on {seals.rpc}</p>
+      <p className="mt-1.5 break-all leading-relaxed text-faint">Your browser ran this on {ARKIV_RPC}, not through our server:</p>
       <p className="mt-1 break-all leading-relaxed text-ink">{seals.query}</p>
     </details>
   );

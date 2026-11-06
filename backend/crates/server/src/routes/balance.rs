@@ -10,31 +10,66 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use axum::http::HeaderMap;
 use strike_core::address;
-use strike_core::crypto::{mint_balance_session, BALANCE_SESSION_COOKIE};
+use strike_core::crypto::{
+    balance_session_message, balance_session_wallet, mint_balance_session, BALANCE_SESSION_COOKIE,
+    MAX_CLOCK_SKEW_MS, MAX_INTENT_AGE_MS,
+};
 use strike_core::error::{ApiError, ApiResult};
+use strike_core::eth::verify_personal_signature;
 use strike_core::ledger;
 
 use crate::bans::is_globally_banned;
-use crate::http::{json_with_cookie, Cookie};
+use crate::http::{cookie, json_with_cookie, Cookie};
 use crate::sql;
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/api/balance/session", post(mint_session))
+        .route(
+            "/api/balance/session",
+            post(mint_session).get(session_wallet),
+        )
         .route("/api/balance/{address}", get(read_balance))
 }
 
-/// `POST /api/balance/session` — mints the HttpOnly gate cookie. With no secret
-/// configured the TS mints nothing and answers `{ok:true}` without a cookie, so
-/// development keeps working; the mutation guard is what refuses requests.
-async fn mint_session() -> ApiResult<axum::response::Response> {
-    let body = Value::Object(Map::from_iter([("ok".to_string(), Value::Bool(true))]));
-    let Some(value) = mint_balance_session() else {
-        return Ok(Json(body).into_response());
+/// `POST /api/balance/session` — the wallet signs `balance_session_message` and
+/// gets an HttpOnly cookie bound to it. With no secret configured nothing is
+/// minted, so development keeps working; the mutation guard refuses requests.
+async fn mint_session(Json(body): Json<Value>) -> ApiResult<axum::response::Response> {
+    let address = body["address"].as_str().unwrap_or_default();
+    let issued_at = body["issuedAt"].as_i64().unwrap_or_default();
+    let signature = body["signature"].as_str().unwrap_or_default();
+    if !address::is_address(address) {
+        return Err(ApiError::bad_request("A wallet address is required"));
+    }
+    let age = chrono::Utc::now().timestamp_millis() - issued_at;
+    if !(-MAX_CLOCK_SKEW_MS..=MAX_INTENT_AGE_MS).contains(&age) {
+        return Err(ApiError::bad_request(
+            "Sign-in message is stale, sign again",
+        ));
+    }
+    if !verify_personal_signature(
+        address,
+        &balance_session_message(address, issued_at),
+        signature,
+    )
+    .await?
+    {
+        return Err(ApiError::unauthorized(
+            "Sign-in signature is not from this wallet",
+        ));
+    }
+    let wallet = address::canonical(address);
+    let ok = Value::Object(Map::from_iter([
+        ("ok".to_string(), Value::Bool(true)),
+        ("wallet".to_string(), Value::String(wallet.clone())),
+    ]));
+    let Some(value) = mint_balance_session(&wallet) else {
+        return Ok(Json(ok).into_response());
     };
     Ok(json_with_cookie(
-        body,
+        ok,
         Cookie {
             name: BALANCE_SESSION_COOKIE,
             value,
@@ -43,6 +78,13 @@ async fn mint_session() -> ApiResult<axum::response::Response> {
             http_only: true,
         },
     ))
+}
+
+/// `GET /api/balance/session` — which wallet this browser is signed in as, so the
+/// app asks for a signature only when it has to.
+async fn session_wallet(headers: HeaderMap) -> Json<Value> {
+    let wallet = balance_session_wallet(cookie(&headers, BALANCE_SESSION_COOKIE).as_deref());
+    Json(serde_json::json!({ "wallet": wallet }))
 }
 
 #[derive(Deserialize)]

@@ -2,13 +2,13 @@
 
 import React, { useEffect, useState } from 'react';
 import { ArrowUpRight } from '@phosphor-icons/react';
-import { matchesLedger, type ArkivEntity } from '@/lib/arkiv';
+import { entityUrl, matchesLedger, readSealedEntity, type ArkivEntity } from '@/lib/arkiv';
 
 interface Seal {
   sealed: boolean;
   settled?: boolean;
   block?: number;
-  entityUrl?: string;
+  key?: string;
   entity?: ArkivEntity | null;
 }
 
@@ -23,7 +23,7 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
     const ctrl = new AbortController();
     fetch(`/api/arkiv/bets/${encodeURIComponent(betId)}/seal`, { credentials: 'include', signal: ctrl.signal })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then(setSeal)
+      .then(async (s: Seal) => setSeal(s.sealed && s.key ? { ...s, entity: await readSealedEntity(s.key, ctrl.signal) } : s))
       .catch((err) => {
         if (ctrl.signal.aborted) return;
         console.error('[arkiv] seal fetch failed', betId, err);
@@ -49,6 +49,8 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
             <span className="font-jet text-muted">Sealing… {(waited / 1000).toFixed(1)}s</span>
           ) : !seal.sealed ? (
             <span className="text-muted">{seal.settled ? 'Queued for the next block' : 'Sealed once the round settles'}</span>
+          ) : !seal.entity ? (
+            <span className="text-down">Our server says sealed, but Arkiv has no such entity</span>
           ) : ok === false ? (
             <span className="text-down">Sealed in block #{seal.block}, does not match the ledger</span>
           ) : (
@@ -58,9 +60,9 @@ export default function ArkivSeal({ betId, ledgerPayout }: { betId: string; ledg
           )}
         </div>
       </div>
-      {seal?.entityUrl ? (
+      {seal?.key ? (
         <a
-          href={seal.entityUrl}
+          href={entityUrl(seal.key)}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-muted ring-1 ring-line"
