@@ -1165,9 +1165,18 @@ export const LiveChart = React.memo(function LiveChart({
     ]);
   }, [chart, lastResult, currentPrice]);
 
+  // A quiet market sends no ticks, so indicators need their own clock to reach the tip.
+  const hasIndicators = Object.values(activeIndicators).some(Boolean);
+  const [indicatorClock, setIndicatorClock] = useState(0);
+  useEffect(() => {
+    if (!hasIndicators) return;
+    const id = setInterval(() => setIndicatorClock(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [hasIndicators]);
+
   const indicators = useMemo(
-    () => computeIndicators(priceHistory, activeIndicators),
-    [priceHistory, activeIndicators],
+    () => computeIndicators(priceHistory, activeIndicators, indicatorClock),
+    [priceHistory, activeIndicators, indicatorClock],
   );
 
   const quoteCell = useCallback(

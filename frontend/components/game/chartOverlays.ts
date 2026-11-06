@@ -26,46 +26,107 @@ export interface OverlayPalette extends Colors {
   border: string;
 }
 
+const BAR_MS = 1_000;
+// Fifteen minutes: past the widest view, with room for the averages to settle.
+const MAX_BARS = 900;
 const RSI_PERIOD = 14;
 const RSI_PANEL_HEIGHT = 100;
 const RSI_PANEL_BOTTOM = 20;
 export const RSI_PANEL_INSET = RSI_PANEL_HEIGHT + RSI_PANEL_BOTTOM;
 
-function movingAverage(points: readonly PricePoint[], period: number): PricePoint[] {
+interface Bar extends PricePoint {
+  high: number;
+  low: number;
+}
+
+/** One second a bar, so "14" means 14 seconds on every asset, however often it trades. */
+function toBars(points: readonly PricePoint[], now: number): Bar[] {
+  const last = points[points.length - 1];
+  if (!last) return [];
+  // A quiet market still has bars: its price holds up to now.
+  const end = Math.max(now, last.timestamp);
+  const lastSecond = Math.floor(end / BAR_MS);
+  const firstSecond = Math.max(Math.floor(points[0].timestamp / BAR_MS), lastSecond - MAX_BARS + 1);
+
+  const bars: Bar[] = [];
+  let next = 0;
+  let close = points[0].price;
+  for (let second = firstSecond; second <= lastSecond; second++) {
+    const barStart = second * BAR_MS;
+    const barEnd = barStart + BAR_MS;
+    let high = -Infinity;
+    let low = Infinity;
+    for (; next < points.length && points[next].timestamp < barEnd; next++) {
+      close = points[next].price;
+      if (points[next].timestamp < barStart) continue;
+      high = Math.max(high, close);
+      low = Math.min(low, close);
+    }
+    bars.push({
+      timestamp: Math.min(barEnd - 1, end),
+      price: close,
+      high: Number.isFinite(high) ? high : close,
+      low: Number.isFinite(low) ? low : close,
+    });
+  }
+  return bars;
+}
+
+function movingAverage(bars: readonly Bar[], period: number): PricePoint[] {
   const out: PricePoint[] = [];
-  for (let i = 1; i < points.length; i++) {
-    const slice = points.slice(Math.max(0, i + 1 - Math.min(i + 1, period)), i + 1);
-    out.push({ timestamp: points[i].timestamp, price: slice.reduce((sum, p) => sum + p.price, 0) / slice.length });
+  let sum = 0;
+  for (let i = 0; i < bars.length; i++) {
+    sum += bars[i].price;
+    if (i >= period) sum -= bars[i - period].price;
+    if (i >= period - 1) out.push({ timestamp: bars[i].timestamp, price: sum / period });
   }
   return out;
 }
 
-function bollinger(points: readonly PricePoint[], period: number): [PricePoint[], PricePoint[], PricePoint[]] {
+function bollinger(bars: readonly Bar[], period: number): [PricePoint[], PricePoint[], PricePoint[]] {
   const top: PricePoint[] = [];
   const bottom: PricePoint[] = [];
-  const middle = movingAverage(points, period);
+  const middle = movingAverage(bars, period);
   middle.forEach(({ timestamp, price: avg }, index) => {
-    const i = index + 1;
-    const slice = points.slice(Math.max(0, i + 1 - Math.min(i + 1, period)), i + 1).map((p) => p.price);
-    const deviation = Math.sqrt(slice.reduce((sum, value) => sum + (value - avg) ** 2, 0) / slice.length);
+    const window = bars.slice(index, index + period);
+    const deviation = Math.sqrt(window.reduce((sum, bar) => sum + (bar.price - avg) ** 2, 0) / period);
     top.push({ timestamp, price: avg + 2 * deviation });
     bottom.push({ timestamp, price: avg - 2 * deviation });
   });
   return [top, bottom, middle];
 }
 
-function rsi(points: readonly PricePoint[]): RsiPoint[] {
+/** Williams' line: a smoothed average of each bar's median, drawn `shift` bars ahead. */
+function alligatorLine(bars: readonly Bar[], period: number, shift: number): PricePoint[] {
+  const out: PricePoint[] = [];
+  let average = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const median = (bars[i].high + bars[i].low) / 2;
+    if (i < period) average += median;
+    if (i === period - 1) average /= period;
+    if (i >= period) average = (average * (period - 1) + median) / period;
+    if (i >= period - 1) out.push({ timestamp: bars[i].timestamp + shift * BAR_MS, price: average });
+  }
+  return out;
+}
+
+function rsiValue(avgGain: number, avgLoss: number): number {
+  if (avgGain === 0 && avgLoss === 0) return 50;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+function rsi(bars: readonly Bar[]): RsiPoint[] {
   const out: RsiPoint[] = [];
   let avgGain = 0;
   let avgLoss = 0;
-  for (let i = 1; i < points.length; i++) {
-    const change = points[i].price - points[i - 1].price;
+  for (let i = 1; i < bars.length; i++) {
+    const change = bars[i].price - bars[i - 1].price;
     const gain = Math.max(change, 0);
     const loss = Math.max(-change, 0);
     if (i < RSI_PERIOD) {
       avgGain += gain;
       avgLoss += loss;
-      out.push({ timestamp: points[i].timestamp, rsi: 50 });
       continue;
     }
     if (i === RSI_PERIOD) {
@@ -75,20 +136,21 @@ function rsi(points: readonly PricePoint[]): RsiPoint[] {
       avgGain = (avgGain * (RSI_PERIOD - 1) + gain) / RSI_PERIOD;
       avgLoss = (avgLoss * (RSI_PERIOD - 1) + loss) / RSI_PERIOD;
     }
-    out.push({ timestamp: points[i].timestamp, rsi: 100 - 100 / (1 + avgGain / (avgLoss || 0.00001)) });
+    out.push({ timestamp: bars[i].timestamp, rsi: rsiValue(avgGain, avgLoss) });
   }
   return out;
 }
 
-export function computeIndicators(points: readonly PricePoint[], active: Record<string, boolean>): Indicators {
-  if (points.length < 2) return {};
+export function computeIndicators(points: readonly PricePoint[], active: Record<string, boolean>, now: number): Indicators {
+  if (!Object.values(active).some(Boolean)) return {};
+  const bars = toBars(points, now);
   return {
-    ma: active.ma ? movingAverage(points, 20) : undefined,
-    bollinger: active.bollinger ? bollinger(points, 20) : undefined,
+    ma: active.ma ? movingAverage(bars, 20) : undefined,
+    bollinger: active.bollinger ? bollinger(bars, 20) : undefined,
     alligator: active.alligator
-      ? [movingAverage(points, 13), movingAverage(points, 8), movingAverage(points, 5)]
+      ? [alligatorLine(bars, 13, 8), alligatorLine(bars, 8, 5), alligatorLine(bars, 5, 3)]
       : undefined,
-    rsi: active.rsi ? rsi(points) : undefined,
+    rsi: active.rsi ? rsi(bars) : undefined,
   };
 }
 
@@ -162,7 +224,7 @@ export function drawRsiPanel(ctx: CanvasRenderingContext2D, s: Scales, points: r
   ctx.fillText('30', 10, yOf(30) - 4);
   ctx.fillStyle = palette.subtle;
   ctx.textAlign = 'right';
-  ctx.fillText('RSI 14', s.width - 12, top + 16);
+  ctx.fillText('RSI 14s', s.width - 12, top + 16);
 
   ctx.strokeStyle = palette.ink;
   ctx.globalAlpha = 0.7;
