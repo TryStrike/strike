@@ -57,6 +57,7 @@ pub struct Config {
     pub withdrawal_stuck_secs: i64,
     /// Upstream quote URLs. Overridable so a test decides what the market did.
     pub binance_endpoint: String,
+    pub binance_ws_endpoint: String,
     pub yahoo_spark_endpoint: String,
     /// How long between samples of every tradable asset.
     pub price_sample_ms: u64,
@@ -130,6 +131,8 @@ impl Config {
             withdrawal_stuck_secs: parse_num("WITHDRAWAL_STUCK_SECS").unwrap_or(600),
             binance_endpoint: str_var("BINANCE_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::BINANCE_ENDPOINT.to_string()),
+            binance_ws_endpoint: str_var("BINANCE_WS_ENDPOINT")
+                .unwrap_or_else(|| crate::prices::BINANCE_WS_ENDPOINT.to_string()),
             yahoo_spark_endpoint: str_var("YAHOO_SPARK_ENDPOINT")
                 .unwrap_or_else(|| crate::prices::SPARK_ENDPOINT.to_string()),
             price_sample_ms: parse_num("PRICE_SAMPLE_MS").unwrap_or(1_000),

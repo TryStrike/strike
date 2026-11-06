@@ -153,10 +153,7 @@ pub fn union_of(assets_per_client: impl IntoIterator<Item = BTreeSet<String>>) -
     union.into_iter().collect()
 }
 
-fn only<'a>(
-    values: &'a BTreeMap<String, f64>,
-    assets: &'a BTreeSet<String>,
-) -> BTreeMap<String, f64> {
+fn only(values: &BTreeMap<String, f64>, assets: &BTreeSet<String>) -> BTreeMap<String, f64> {
     values
         .iter()
         .filter(|(asset, _)| assets.contains(*asset))
@@ -269,7 +266,7 @@ async fn pump() {
         beat = beat.wrapping_add(1);
         let quotes = prices::ring_quotes(&union);
         let ts = prices::now_millis();
-        let bands = if beat % FRAMES_PER_BAND_UPDATE == 0 {
+        let bands = if beat.is_multiple_of(FRAMES_PER_BAND_UPDATE) {
             band_widths(&union, ts)
         } else {
             BTreeMap::new()

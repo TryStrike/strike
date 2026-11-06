@@ -45,6 +45,9 @@ pub const MULTIPLIER_SCALE: u32 = 4;
 pub const BET_CUTOFF_MS: i64 = 2_000;
 /// The furthest column or box the chart can reach, and the ring's default span.
 pub const MAX_ROUND_MS: i64 = 900_000;
+/// A live trade stamped before the end can still be on the wire when the round
+/// ends, so a round stays open this long past it.
+const END_TICK_GRACE_MS: i64 = 250;
 /// Yahoo quotes refresh every 15 s at source.
 const SLOW_TICK_TOLERANCE_MS: i64 = 20_000;
 /// A band can be at most this share of the recent range. The chart caps a drawn
@@ -412,7 +415,7 @@ pub async fn settle(database: &Db, bet_id: &str, by: &str, now_ms: i64) -> ApiRe
         return Ok(Settled::Unknown);
     };
     let end_ms = end_time_us.div_euclid(1_000);
-    if !settled && now_ms < end_ms {
+    if !settled && now_ms < end_ms + END_TICK_GRACE_MS {
         return Ok(Settled::Open { end_ms });
     }
 

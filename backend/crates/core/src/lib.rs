@@ -9,6 +9,7 @@ pub mod address;
 pub mod agent;
 pub mod arkiv;
 pub mod bets;
+pub mod binance_ws;
 pub mod config;
 pub mod copilot;
 pub mod crypto;

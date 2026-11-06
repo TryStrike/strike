@@ -7,9 +7,10 @@
 //! { "prices": { "<ASSET>": <number>, ... } }
 //! ```
 //!
-//! Crypto quotes come from Binance (a single batched
-//! call), everything else from Yahoo's `spark` endpoint, and Yahoo doubles as the
-//! crypto fallback if Binance returns nothing for an asset.
+//! Crypto quotes come from Binance: live trades from [`crate::binance_ws`], and a
+//! single batched REST call that fills in whenever the stream or a quiet pair
+//! goes silent. Everything else comes from Yahoo's `spark` endpoint, and Yahoo
+//! doubles as the crypto fallback if Binance returns nothing for an asset.
 //!
 //! Design notes carried through the whole module:
 //!   * Timings are compile-time constants.
@@ -32,6 +33,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
+use crate::binance_ws;
 use crate::config::config;
 use crate::error::{ApiError, ApiResult};
 
@@ -43,6 +45,8 @@ use crate::error::{ApiError, ApiResult};
 pub const SPARK_ENDPOINT: &str = "https://query2.finance.yahoo.com/v7/finance/spark";
 /// `BINANCE_ENDPOINT` in marketPrices.ts.
 pub const BINANCE_ENDPOINT: &str = "https://api.binance.com/api/v3/ticker/price";
+/// The combined trade stream.
+pub const BINANCE_WS_ENDPOINT: &str = "wss://stream.binance.com:9443/stream";
 
 /// `CRYPTO_CACHE_MS`: clients poll once a second, so crypto stays live but
 /// bounded. The aggregator *does* cache, so this TTL is mirrored, not invented.
@@ -602,7 +606,9 @@ pub async fn fetch_latest_prices(
             let stamp = now_millis();
             for (asset, price) in pairs {
                 out.insert(asset.clone(), price);
-                cache_set(&asset, price, stamp, source);
+                if !binance_ws::covers(&asset, stamp) {
+                    cache_set(&asset, price, stamp, source);
+                }
             }
         };
 
@@ -616,7 +622,7 @@ pub async fn fetch_latest_prices(
     // Crypto Binance did not return still gets a Yahoo quote (just slower).
     let crypto_missing: Vec<String> = crypto
         .iter()
-        .filter(|a| !out.contains_key(a.as_str()))
+        .filter(|a| !out.contains_key(a.as_str()) && !binance_ws::covers(a, now_millis()))
         .cloned()
         .collect();
     if !crypto_missing.is_empty() {
@@ -777,6 +783,19 @@ pub fn price_frame(
         json_number_map(prices),
         json_number_map(bands)
     )
+}
+
+/// A live trade from the Binance stream, recorded like a REST quote from the same
+/// venue, so a round can't refund because the feed changed transport.
+pub fn record_trade(asset: &str, price: f64, at_ms: i64) {
+    if valid_price(price) {
+        cache_set(asset, price, at_ms, "binance");
+    }
+}
+
+/// `true` for the stock endpoint. A stand-in market in tests has no stream.
+pub fn uses_live_binance() -> bool {
+    config().binance_endpoint == BINANCE_ENDPOINT
 }
 
 /// The newest recorded price of each asset. Reads memory only, so the stream can
