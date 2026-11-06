@@ -8,6 +8,8 @@ what got in our way building Strike on Arkiv, and what would have helped. everyt
 2. **paging that works on the public node.** see the repro below. today a query that returns more than one page can't be read to the end
 3. **the write limits, written down.** how big a batch can be, how many queries a second, and the largest `limit` a query takes. we found all three by hitting them
 
+we filed the main ones upstream: [arkiv#289](https://github.com/Arkiv-Network/arkiv/issues/289) (paging), [arkiv#290](https://github.com/Arkiv-Network/arkiv/issues/290) (batch size) and [arkiv-starlight-docs#96](https://github.com/Arkiv-Network/arkiv-starlight-docs/issues/96) (public node limits). the rate limits are already tracked in [arkiv-sdk-js#126](https://github.com/Arkiv-Network/arkiv-sdk-js/issues/126)
+
 ## when something broke
 
 ### big batches are refused with no hint why
