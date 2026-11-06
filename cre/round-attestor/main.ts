@@ -28,7 +28,7 @@ import {
   type Hex,
 } from 'viem'
 import { z } from 'zod'
-import { decide, leaf, merkleRoot, parseKlines, priceInKlines, roundSchema, type Kline, type Round } from './settle'
+import { decide, leaf, merkleRoot, parseKlines, priceInKlines, roundSchema, type Kline } from './settle'
 
 const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'expected a 0x address')
 
@@ -98,8 +98,8 @@ const checkEpoch = (runtime: NodeRuntime<Config>, epoch: string, eventRoot: stri
   }
 
   const rounds = [...body.rounds].sort((a, b) => (a.bet_id < b.bet_id ? -1 : a.bet_id > b.bet_id ? 1 : 0))
-  const verifiable = (r: Round) => r.strike_source === 'binance' && r.outcome !== 'withheld' && r.asset in symbols
-  const assets = [...new Set(rounds.filter(verifiable).map((r) => r.asset))].sort().slice(0, KLINE_CALL_BUDGET)
+  // Checkability comes from the asset, never from the source labels the house serves.
+  const assets = [...new Set(rounds.filter((r) => r.asset in symbols).map((r) => r.asset))].sort().slice(0, KLINE_CALL_BUDGET)
 
   const windowStart = body.end_ms - KLINE_WINDOW_MS
   const klines = new Map<string, Map<number, Kline>>()
@@ -113,33 +113,52 @@ const checkEpoch = (runtime: NodeRuntime<Config>, epoch: string, eventRoot: stri
   let strikeUnchecked = 0
   for (const r of rounds) {
     const k = klines.get(r.asset)
-    if (!k || !verifiable(r)) {
+    if (!k) {
       skipped++
       continue
     }
-    // A non-binance end refunds whatever its price, so only a binance end needs the kline check.
-    let endOk = true
+    const inWindow = (us: number) => us / 1_000 >= windowStart && us / 1_000 <= body.end_ms
+    // On a Binance asset a missing or non-Binance price where Binance printed one is the house's pick,
+    // and it decides a refund, so it counts as a mismatch.
+    const binanceHad = (us: number) => inWindow(us) && priceInKlines(k, us, 0n) !== null
+
+    let endOk: boolean
     if (r.end_price !== null && r.end_price_at !== null && r.end_source === 'binance') {
-      const inWindow = r.end_price_at / 1_000 >= windowStart && r.end_price_at / 1_000 <= body.end_ms
-      const inRange = inWindow ? priceInKlines(k, r.end_price_at, r.end_price) : false
+      const inRange = inWindow(r.end_price_at) ? priceInKlines(k, r.end_price_at, r.end_price) : false
       if (inRange === null) {
         skipped++
         continue
       }
       endOk = inRange
+    } else {
+      endOk = !binanceHad(r.end_time)
     }
-    const strikeOk = r.strike_at / 1_000 >= windowStart ? priceInKlines(k, r.strike_at, r.strike) : null
-    if (strikeOk === null) strikeUnchecked++
+    let strikeOk: boolean | null
+    if (r.strike_source === 'binance') {
+      strikeOk = inWindow(r.strike_at) ? priceInKlines(k, r.strike_at, r.strike) : null
+      if (strikeOk === null) strikeUnchecked++
+    } else {
+      strikeOk = inWindow(r.strike_at) ? !binanceHad(r.strike_at) : null
+    }
 
     const want = decide(r)
-    const decided = want.outcome === r.outcome && want.payout === r.payout
-    checked++
+    // A ban turns any credit into withheld/0, so the prices must still owe one.
+    const decided =
+      r.outcome === 'withheld'
+        ? want.payout > 0n && r.payout === 0n
+        : want.outcome === r.outcome && want.payout === r.payout
     if (!endOk || strikeOk === false || !decided) {
       runtime.log(
-        `mismatch ${r.bet_id}: end in klines ${endOk}, strike in klines ${strikeOk}, ` +
+        `mismatch ${r.bet_id}: end ok ${endOk}, strike ok ${strikeOk}, ` +
           `stored ${r.outcome}/${r.payout}, recomputed ${want.outcome}/${want.payout}`,
       )
       mismatches++
+      checked++
+    } else if (r.outcome === 'withheld' || (r.strike_source !== 'binance' && strikeOk === null)) {
+      // The ban, or a non-Binance strike older than the window, rests on the house's word.
+      skipped++
+    } else {
+      checked++
     }
   }
   if (strikeUnchecked > 0) runtime.log(`${strikeUnchecked} strikes older than the kline window, end checked only`)

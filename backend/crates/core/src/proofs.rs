@@ -31,6 +31,8 @@ pub const MAX_EPOCH_ROUNDS: usize = 1_000;
 /// The largest epoch whose bounds still fit in microseconds.
 pub const MAX_EPOCH: u64 = (i64::MAX / 1_000 / EPOCH_MS - 1) as u64;
 const COMMIT_EVERY: Duration = Duration::from_secs(30);
+/// A failing commit waits 30 s, doubling to about an hour, so a revert can't burn gas every pass.
+const MAX_BACKOFF_DOUBLINGS: u32 = 7;
 const CHAIN_CACHE: Duration = Duration::from_secs(30);
 /// Ledger money scale 10 down to USDC's 6 decimals.
 const LEDGER_PER_USDC_UNIT: i64 = 10_000;
@@ -83,7 +85,7 @@ impl Round {
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             bet_id: row.get(0)?,
-            user: row.get(1)?,
+            user: evm_user(row.get(1)?),
             asset: row.get(2)?,
             mode: row.get(3)?,
             direction: row.get(4)?,
@@ -107,7 +109,7 @@ impl Round {
         let text = |v: Option<i64>| v.map(|v| v.to_string());
         json!({
             "bet_id": self.bet_id,
-            "user": self.user.to_lowercase(),
+            "user": self.user,
             "asset": self.asset,
             "mode": self.mode,
             "direction": self.direction,
@@ -126,6 +128,16 @@ impl Round {
             "payout": self.payout.to_string(),
             "leaf": hex32(leaf),
         })
+    }
+}
+
+/// `0x` and lowercase, the one spelling the leaf, the API and the workflow share.
+fn evm_user(raw: String) -> String {
+    let lower = raw.to_lowercase();
+    if lower.starts_with("0x") {
+        lower
+    } else {
+        format!("0x{lower}")
     }
 }
 
@@ -155,8 +167,9 @@ fn code(value: &str, codes: &[&str], field: &str, bet_id: &str) -> ApiResult<[u8
     Ok(word_int(index as i64))
 }
 
-/// `keccak256(abi.encode(...))` of the 15 fields in docs order: 480 bytes, so a
-/// leaf can never pass for a 64-byte inner node.
+/// `keccak256(abi.encode(...))` of the 17 fields in docs order: 544 bytes, so a
+/// leaf can never pass for a 64-byte inner node. The price sources are in it
+/// because the workflow decides refunds from them.
 pub fn leaf(round: &Round) -> ApiResult<[u8; 32]> {
     let id = round.bet_id.as_str();
     let user = hex::decode(round.user.strip_prefix("0x").unwrap_or(&round.user))
@@ -192,6 +205,11 @@ pub fn leaf(round: &Round) -> ApiResult<[u8; 32]> {
             id,
         )?,
         word_uint(round.payout, "payout", id)?,
+        keccak256(round.strike_source.as_bytes()),
+        round
+            .end_source
+            .as_ref()
+            .map_or([0; 32], |source| keccak256(source.as_bytes())),
     ];
     Ok(keccak256(&words.concat()))
 }
@@ -346,13 +364,18 @@ pub async fn run_committer() {
         }
     };
     let mut next = start;
-    let mut every = tokio::time::interval(COMMIT_EVERY);
-    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failures = 0;
     loop {
-        every.tick().await;
+        tokio::time::sleep(COMMIT_EVERY * 2u32.pow(failures)).await;
         match commit_next(&treasury, next).await {
-            Ok(after) => next = after,
-            Err(err) => tracing::error!("[proofs] commit failed, will retry: {err}"),
+            Ok(after) => (next, failures) = (after, 0),
+            Err(err) => {
+                failures = (failures + 1).min(MAX_BACKOFF_DOUBLINGS);
+                tracing::error!(
+                    "[proofs] commit failed, retrying in {}s: {err}",
+                    (COMMIT_EVERY * 2u32.pow(failures)).as_secs()
+                );
+            }
         }
     }
 }
@@ -577,6 +600,12 @@ fn verdict_json(verdict: &Verdict) -> Value {
     })
 }
 
+/// Whether the workflow re-settles this round rather than skipping it: a ban
+/// and a non-Binance strike rest on the house's word.
+fn checked_by_workflow(round: &Round) -> bool {
+    round.strike_source == "binance" && round.outcome != "withheld"
+}
+
 /// `GET /api/proofs/bet/{id}`. `None` for an unknown bet.
 pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> {
     let id = bet_id.to_string();
@@ -616,7 +645,7 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
             "commit_tx": null,
             "attestation": null,
             "status": "pending",
-            "strike_source": round.strike_source,
+            "checked": checked_by_workflow(&round),
         })));
     };
     let leaves = leaves_of(&rows.rounds)?;
@@ -638,7 +667,7 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
         "commit_tx": commit.tx_hash,
         "attestation": verdict.as_ref().map(verdict_json),
         "status": status(&commit.root, verdict.as_ref()),
-        "strike_source": round.strike_source,
+        "checked": checked_by_workflow(&round),
     })))
 }
 
@@ -754,11 +783,11 @@ mod tests {
     }
 
     const LEAVES: [&str; 3] = [
-        "0xe99632a99ff3254fa7702d6542e436e810b70664df4fdcacb0448e3a021e6c36",
-        "0x1baeabcd9c9fe3979e68597d35028c6044047223f3068977594c26122f5cf69e",
-        "0xa6e81ab1280f51c9ee42cce43ac14c46996c43926dc6e7cd41726724b989c257",
+        "0xbcf4aa3a5aea30d352dbbdf86a012c4eda08243c91178ffa7f62c5be17e825ae",
+        "0xfca6f393c3bbed8b9cc1dd6a4c2725e402ff40251204392b3b99f05bd63e904f",
+        "0xf8c275059a7ff4bb2dc617d39e186abb8e510ca68b63382c56539953d96fa871",
     ];
-    const ROOT: &str = "0x360651e991f69e45477db9f7ef08e7ff9a6a993a107557f192cc8ba645d9b93e";
+    const ROOT: &str = "0xb4262fe9dad22b5ead0b31c3ba3bbc4584ad5514485346d93c4bc622c4d1ec54";
 
     #[test]
     fn the_shared_vector_hashes_to_its_pinned_root() {
@@ -821,6 +850,18 @@ mod tests {
                 user: "0x1111111111111111111111111111111111111112".into(),
                 ..base.clone()
             },
+            Round {
+                strike_source: "yahoo".into(),
+                ..base.clone()
+            },
+            Round {
+                end_source: Some("yahoo".into()),
+                ..base.clone()
+            },
+            Round {
+                end_source: None,
+                ..base.clone()
+            },
         ];
         for round in changed {
             assert_ne!(leaf(&round).unwrap(), original);
@@ -831,6 +872,8 @@ mod tests {
             ..base.clone()
         };
         assert_eq!(leaf(&upper).unwrap(), original);
+        assert_eq!(evm_user(base.user.to_uppercase()), base.user);
+        assert_eq!(evm_user(base.user[2..].into()), base.user);
     }
 
     #[test]

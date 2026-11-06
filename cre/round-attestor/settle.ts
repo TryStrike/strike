@@ -1,4 +1,4 @@
-import { concat, encodeAbiParameters, keccak256, parseAbiParameters, toBytes, type Hex } from 'viem'
+import { concat, encodeAbiParameters, keccak256, parseAbiParameters, toBytes, zeroHash, type Hex } from 'viem'
 import { z } from 'zod'
 
 // Mirrors backend/crates/core/src/settlement.rs and proofs.rs. Money is MONEY_SCALE 10,
@@ -35,7 +35,7 @@ export type Round = z.infer<typeof roundSchema>
 export type Outcome = (typeof OUTCOMES)[number]
 
 const LEAF_PARAMS = parseAbiParameters(
-  'bytes32, address, bytes32, uint8, uint8, uint256, uint256, int256, int256, int256, uint64, uint64, int256, uint8, uint256',
+  'bytes32, address, bytes32, uint8, uint8, uint256, uint256, int256, int256, int256, uint64, uint64, int256, uint8, uint256, bytes32, bytes32',
 )
 
 export function leaf(r: Round): Hex {
@@ -56,6 +56,8 @@ export function leaf(r: Round): Hex {
       r.end_price ?? 0n,
       OUTCOMES.indexOf(r.outcome),
       r.payout,
+      keccak256(toBytes(r.strike_source)),
+      r.end_source === null ? zeroHash : keccak256(toBytes(r.end_source)),
     ]),
   )
 }
@@ -123,7 +125,8 @@ export function parseKlines(body: unknown): Map<number, Kline> {
 // A sampled tick is our receive time, so its trade can sit in the second before or the one before that.
 const TICK_LAG_MS = 2_000
 
-/// Whether `price` sits inside the 1s klines covering `[atUs - 2s, atUs]`. Null when no kline exists there.
+/// Whether `price` sits inside the 1s klines covering `[atUs - 2s, atUs]`. Null when no kline exists there,
+/// so `priceInKlines(k, at, 0n) !== null` asks whether Binance printed a price at all.
 export function priceInKlines(klines: Map<number, Kline>, atUs: number, price: bigint): boolean | null {
   const atSecond = Math.floor(atUs / 1_000_000) * 1_000
   let low: bigint | null = null

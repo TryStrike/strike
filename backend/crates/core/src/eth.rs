@@ -22,6 +22,8 @@ pub const RPC_TIMEOUT: Duration = Duration::from_secs(12);
 pub const MIN_CONFIRMATIONS: u64 = 3;
 /// Confirmations a payout must reach before the ledger is debited.
 pub const PAYOUT_CONFIRMATIONS: u64 = 3;
+const COMMIT_REBROADCASTS: usize = 3;
+const COMMIT_REBROADCAST_GAP: Duration = Duration::from_secs(2);
 
 /// keccak256("Transfer(address,address,uint256)")
 pub fn transfer_topic() -> [u8; 32] {
@@ -1038,7 +1040,25 @@ impl Treasury {
         let mut queue = self.queue.lock().await;
         self.assert_operator_matches().await?;
         let (nonce, raw) = self.sign_call(&queue, &data).await?;
-        match self.rpc.broadcast(&raw).await {
+        let mut sent = self.rpc.broadcast(&raw).await;
+        // The same signed bytes can't land twice, so resending only learns the
+        // outcome. Left unknown, the held nonce stops every send, payouts too.
+        for _ in 0..COMMIT_REBROADCASTS {
+            if !matches!(sent, Broadcast::Unknown(_)) {
+                break;
+            }
+            tokio::time::sleep(COMMIT_REBROADCAST_GAP).await;
+            sent = match self.rpc.broadcast(&raw).await {
+                Broadcast::Refused(message) if message.to_lowercase().contains("nonce too low") => {
+                    Broadcast::Accepted(raw_tx_hash(&raw))
+                }
+                Broadcast::Unknown(message) if message.to_lowercase().contains("already known") => {
+                    Broadcast::Accepted(raw_tx_hash(&raw))
+                }
+                other => other,
+            };
+        }
+        match sent {
             Broadcast::Accepted(hash) => {
                 queue.next_nonce = Some(nonce + 1);
                 Ok(hash)
