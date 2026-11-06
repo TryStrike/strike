@@ -86,7 +86,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
   useThemeSync();
 
   const updateAllPrices = useStore((s) => s.updateAllPrices);
-  const feed = usePriceStream(updateAllPrices);
+  const setMaxBands = useStore((s) => s.setMaxBands);
+  const feed = usePriceStream(updateAllPrices, { onBands: setMaxBands });
   useEffect(() => {
     useStore.getState().setPriceFeed(feed);
   }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps

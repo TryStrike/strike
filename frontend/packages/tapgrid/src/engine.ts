@@ -88,13 +88,13 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
   };
 
   const updateView = (now: number, dt: number) => {
-    const { seriesKey: key, intervalMs, pxPerSecond, tipRatio, minRange, rows, reducedMotion } = options;
+    const { seriesKey: key, intervalMs, pxPerSecond, tipRatio, minRange, maxStep, rows, reducedMotion } = options;
     const since = now - ((width * tipRatio) / pxPerSecond) * 1000;
     const column = Math.floor(now / intervalMs);
 
     if (key !== seriesKey) {
       seriesKey = key;
-      step = stepFor(visibleRange(points, since, price), minRange, rows);
+      step = stepFor(visibleRange(points, since, price), minRange, rows, maxStep);
       center = price;
       tip = price;
       lastColumn = column;
@@ -105,7 +105,7 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
 
     if (now - lastStepCheck >= STEP_CHECK_MS) {
       lastStepCheck = now;
-      targetStep = stepFor(visibleRange(points, since, price), minRange, rows);
+      targetStep = stepFor(visibleRange(points, since, price), minRange, rows, maxStep);
     }
     if (targetStep > 0) {
       const change = stepChange(step, targetStep);

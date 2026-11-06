@@ -56,6 +56,7 @@ export interface TapGridOptions {
   decimals: number;
   lockMs: number;
   minRange: number;
+  maxStep: number;
   colors: Colors;
   fontFamily: string;
   reducedMotion: boolean;

@@ -11,8 +11,15 @@ export function snapStep(raw: number): number {
   return unit * magnitude;
 }
 
-export function stepFor(range: number, minRange: number, rows: number): number {
-  return snapStep(Math.max(range, minRange) / (rows * RANGE_SHARE));
+function snapDown(value: number): number {
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  return (normalized >= 5 ? 5 : normalized >= 2 ? 2 : 1) * magnitude;
+}
+
+export function stepFor(range: number, minRange: number, rows: number, maxStep: number): number {
+  const step = snapStep(Math.max(range, minRange) / (rows * RANGE_SHARE));
+  return maxStep > 0 && step > maxStep ? snapDown(maxStep) : step;
 }
 
 export function stepChange(current: number, target: number): 'keep' | 'boundary' | 'now' {

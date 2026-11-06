@@ -123,6 +123,11 @@ pub fn end_tick_tolerance_ms(asset: &str) -> i64 {
     }
 }
 
+/// The widest band [`freeze_bet`] accepts for this asset right now, 0 when unknown.
+pub fn max_band_width(ring: &TickBuffer, asset: &str, now_ms: i64) -> f64 {
+    ring.range(asset, now_ms - BAND_WIDTH_WINDOW_MS) * BAND_MAX_WIDTH
+}
+
 /// The highest multiplier a band may be offered at, whatever the chart showed.
 ///
 /// A chart's multiplier depends on its own axis, which the server cannot see, so
@@ -188,7 +193,7 @@ fn freeze_band(
             "This market is not moving right now",
         ));
     }
-    if top - bottom > ring.range(asset, now_ms - BAND_WIDTH_WINDOW_MS) * BAND_MAX_WIDTH {
+    if top - bottom > max_band_width(ring, asset, now_ms) {
         return Err(refuse(400, "band_too_wide", "Price band is too wide"));
     }
     if multiplier > band_multiplier_ceiling(strike, top, bottom, range) {

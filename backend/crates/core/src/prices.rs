@@ -55,7 +55,7 @@ pub const REQUEST_TIMEOUT_MS: u64 = 8_000;
 /// `BATCH_SIZE`: Yahoo rejects oversized symbol lists.
 pub const BATCH_SIZE: usize = 15;
 
-/// `PRICE_TICK_MS` in priceStream.ts — the shared SSE pump cadence.
+/// The SSE frame beat.
 pub const PRICE_TICK_MS: u64 = 250;
 /// `HEARTBEAT_MS` in priceStream.ts — SSE comment-line cadence.
 pub const HEARTBEAT_MS: u64 = 15_000;
@@ -646,19 +646,24 @@ pub async fn fetch_latest_prices(
 
 /// Samples every tradable asset for the life of the process, so a round's prices
 /// never depend on a client being connected. Crypto skips the cache to get a tick
-/// per sample; slow assets refresh on their own 15 s window. During an outage this
+/// per sample; slow assets refresh on their own 15 s window. The two loops are
+/// separate so a slow Yahoo call can't stall crypto. During an outage this
 /// records nothing, which is what the staleness and refund rules read.
 pub async fn run_sampler() {
-    let assets: Vec<String> = VALID_ASSETS
+    let (crypto, slow): (Vec<String>, Vec<String>) = VALID_ASSETS
         .iter()
         .filter(|asset| is_quoted(asset))
         .map(|asset| asset.to_string())
-        .collect();
+        .partition(|asset| is_crypto(asset));
+    futures::future::join(sample_loop(crypto, true), sample_loop(slow, false)).await;
+}
+
+async fn sample_loop(assets: Vec<String>, bypass_cache: bool) {
     let mut every = tokio::time::interval(Duration::from_millis(config().price_sample_ms.max(1)));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         every.tick().await;
-        fetch_latest_prices(&assets, true).await;
+        fetch_latest_prices(&assets, bypass_cache).await;
     }
 }
 
@@ -746,25 +751,44 @@ pub fn parse_asset_selector(raw: Option<&str>) -> Result<Vec<String>, String> {
     Ok(assets)
 }
 
-/// `dataFrame({ asset, price, ts })` for a market move. Key order and the
-/// integer millisecond `ts` match the route exactly.
-pub fn tick_frame(asset: &str, price: f64, ts_ms: i64) -> String {
+fn json_number_map(values: &BTreeMap<String, f64>) -> String {
+    let entries: Vec<String> = values
+        .iter()
+        .map(|(asset, value)| format!("\"{}\":{}", json_escape(asset), number_to_json(*value)))
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+/// One SSE frame: the prices that moved, and each asset's widest legal band when
+/// the pump has refreshed them.
+pub fn price_frame(
+    prices: &BTreeMap<String, f64>,
+    bands: &BTreeMap<String, f64>,
+    ts_ms: i64,
+) -> String {
+    if bands.is_empty() {
+        return format!(
+            "data: {{\"ts\":{ts_ms},\"prices\":{}}}\n\n",
+            json_number_map(prices)
+        );
+    }
     format!(
-        "data: {{\"asset\":\"{}\",\"price\":{},\"ts\":{}}}\n\n",
-        json_escape(asset),
-        number_to_json(price),
-        ts_ms
+        "data: {{\"ts\":{ts_ms},\"prices\":{},\"bands\":{}}}\n\n",
+        json_number_map(prices),
+        json_number_map(bands)
     )
 }
 
-/// `dataFrame({ asset, price, ts, snapshot: true })` for the connect-time prime.
-pub fn snapshot_frame(asset: &str, price: f64, ts_ms: i64) -> String {
-    format!(
-        "data: {{\"asset\":\"{}\",\"price\":{},\"ts\":{},\"snapshot\":true}}\n\n",
-        json_escape(asset),
-        number_to_json(price),
-        ts_ms
-    )
+/// The newest recorded price of each asset. Reads memory only, so the stream can
+/// never wait on an upstream.
+pub fn ring_quotes(assets: &[String]) -> BTreeMap<String, f64> {
+    assets
+        .iter()
+        .filter_map(|asset| {
+            let tick = crate::ticks::buffer().latest(asset)?;
+            Some((asset.clone(), tick.price))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -800,27 +824,6 @@ pub async fn latest_post(assets: &[String]) -> ApiResult<PricesResponse> {
         cache_control: String::new(),
         vary: None,
     })
-}
-
-/// The same priming with the quotes and the clock supplied, so the pairing is
-/// testable without a network. Zipping a filtered price list against the asset
-/// list would silently relabel every asset after the first missing quote, so the
-/// asset travels with its own price.
-pub fn snapshot_frames_at(
-    assets: &[String],
-    prices: &BTreeMap<String, f64>,
-    ts_ms: i64,
-) -> Vec<String> {
-    assets
-        .iter()
-        .filter_map(|asset| {
-            prices
-                .get(asset)
-                .copied()
-                .filter(|p| p.is_finite() && *p > 0.0)
-                .map(|price| snapshot_frame(asset, price, ts_ms))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -884,6 +887,20 @@ mod tests {
     // -----------------------------------------------------------------------
     // symbol mapping / coverage
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn price_frame_carries_prices_and_only_refreshed_bands() {
+        let prices = BTreeMap::from([("BTC".to_string(), 111111.5), ("ETH".to_string(), 2.0)]);
+        assert_eq!(
+            price_frame(&prices, &BTreeMap::new(), 1_700_000_000_000),
+            "data: {\"ts\":1700000000000,\"prices\":{\"BTC\":111111.5,\"ETH\":2}}\n\n"
+        );
+        let bands = BTreeMap::from([("BTC".to_string(), 25.0)]);
+        assert_eq!(
+            price_frame(&BTreeMap::new(), &bands, 1),
+            "data: {\"ts\":1,\"prices\":{},\"bands\":{\"BTC\":25}}\n\n"
+        );
+    }
 
     #[test]
     fn maps_known_symbols_both_directions() {
@@ -1166,19 +1183,6 @@ mod tests {
     }
 
     #[test]
-    fn tick_frame_matches_route_shape() {
-        assert_eq!(
-            tick_frame("BTC", 111111.5, 1_700_000_000_000),
-            "data: {\"asset\":\"BTC\",\"price\":111111.5,\"ts\":1700000000000}\n\n"
-        );
-        // snapshot frame adds the flag last, key order preserved
-        assert_eq!(
-            snapshot_frame("BTC", 100.0, 1_700_000_000_000),
-            "data: {\"asset\":\"BTC\",\"price\":100,\"ts\":1700000000000,\"snapshot\":true}\n\n"
-        );
-    }
-
-    #[test]
     fn tick_stream_dedup_uses_exact_price_equality() {
         // priceStream.ts skips a push when the price is unchanged; mirror that
         // predicate here so the server ticker can reuse it verbatim.
@@ -1198,33 +1202,5 @@ mod tests {
         assert!(!valid_price(-1.0));
         assert!(!valid_price(f64::NAN));
         assert!(!valid_price(f64::INFINITY));
-    }
-
-    #[test]
-    fn snapshot_frames_never_relabel_a_missing_asset() {
-        // A gap in the middle of the requested list used to shift every later
-        // price onto the next asset's name, which paints one market as another.
-        let assets: Vec<String> = ["BTC", "ETH", "SOL"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let mut prices = BTreeMap::new();
-        prices.insert("BTC".to_string(), 100_000.0_f64);
-        prices.insert("SOL".to_string(), 150.0_f64);
-
-        let frames = snapshot_frames_at(&assets, &prices, 1_700_000_000_000);
-        assert_eq!(
-            frames,
-            vec![
-                snapshot_frame("BTC", 100_000.0, 1_700_000_000_000),
-                snapshot_frame("SOL", 150.0, 1_700_000_000_000),
-            ]
-        );
-
-        // A zero or negative quote is "no quote", not a price of nothing.
-        prices.insert("ETH".to_string(), 0.0);
-        let frames = snapshot_frames_at(&assets, &prices, 1_700_000_000_000);
-        assert_eq!(frames.len(), 2);
-        assert!(frames.iter().all(|f| !f.contains("\"ETH\"")));
     }
 }

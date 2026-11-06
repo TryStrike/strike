@@ -1,15 +1,14 @@
 //! Server-side tick broadcaster that feeds every SSE price connection.
 //!
-//! One shared loop per process re-quotes the union of every subscribed asset
-//! and fans the *changes* out to listeners, so N browser tabs cost one upstream
-//! call per tick instead of N. `/api/prices/latest` keeps its own cache-bounded
-//! semantics and is untouched by anything here.
+//! One shared loop per process reads the newest prices from the rings on a fixed
+//! beat and fans the *changes* out as one frame per connection. It never awaits
+//! an upstream, so a slow quote can't delay a frame, and N browser tabs cost
+//! nothing upstream.
 //!
 //! A hub behind one mutex plus a single spawned task, aborted when the last
-//! client leaves. Starting the loop
-//! is an explicit call rather than a side effect of subscribing, which keeps the
-//! hub testable without a live upstream. The pump awaits its own fetch, so ticks
-//! cannot overlap.
+//! client leaves. Starting the loop is an explicit call rather than a side effect
+//! of subscribing, which keeps the hub testable. A connection that stops reading
+//! fills its bounded channel and misses frames, it never grows memory.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
@@ -17,9 +16,16 @@ use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
 
 use crate::prices::{self, HEARTBEAT_MS, PRICE_TICK_MS};
+use crate::settlement;
+use crate::ticks;
 
-pub type FrameTx = mpsc::UnboundedSender<String>;
-pub type FrameRx = mpsc::UnboundedReceiver<String>;
+/// About 15 seconds of frames for a client that has stopped reading.
+const FRAME_BUFFER: usize = 64;
+/// Band limits move slowly, so they ride on one frame a second.
+const FRAMES_PER_BAND_UPDATE: u32 = 4;
+
+pub type FrameTx = mpsc::Sender<String>;
+pub type FrameRx = mpsc::Receiver<String>;
 
 /// One registered connection. Dropping it removes the connection from the hub,
 /// which is what the SSE handler relies on: the connection ends when the
@@ -86,7 +92,7 @@ pub fn deduped_asset_count() -> usize {
 
 /// Register a connection's asset interest and return its frame channel.
 pub fn subscribe(assets: &[String]) -> Subscription {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(FRAME_BUFFER);
     let mut hub = lock_hub();
     let id = hub.next_id;
     hub.next_id += 1;
@@ -147,39 +153,58 @@ pub fn union_of(assets_per_client: impl IntoIterator<Item = BTreeSet<String>>) -
     union.into_iter().collect()
 }
 
-/// One pump iteration, pure: given what every client asked for and what the
-/// aggregator returned, decide which connection receives which frame.
+fn only<'a>(
+    values: &'a BTreeMap<String, f64>,
+    assets: &'a BTreeSet<String>,
+) -> BTreeMap<String, f64> {
+    values
+        .iter()
+        .filter(|(asset, _)| assets.contains(*asset))
+        .map(|(asset, value)| (asset.clone(), *value))
+        .collect()
+}
+
+/// One pump iteration, pure: given what every client asked for and what the rings
+/// hold, decide what each connection receives.
 ///
-/// A quote is pushed only when it actually moved (exact equality, as the TS
-/// did), only once per asset per tick, and never for a price the feed could not
-/// produce. `last_sent` is updated in place so the caller owns the dedupe.
+/// A price is pushed only when it actually moved, and never when the feed could
+/// not produce one. `last_sent` is updated in place so the caller owns the dedupe.
 pub fn fan_out(
     clients: &[(u64, BTreeSet<String>)],
     last_sent: &mut BTreeMap<String, f64>,
     prices: &BTreeMap<String, f64>,
+    bands: &BTreeMap<String, f64>,
     ts_ms: i64,
 ) -> Vec<(u64, String)> {
-    let mut moved: Vec<(String, f64)> = Vec::new();
+    let mut moved = BTreeMap::new();
     for (asset, price) in prices {
-        if !price.is_finite() || *price <= 0.0 {
-            continue;
-        }
-        if last_sent.get(asset) == Some(price) {
+        if !price.is_finite() || *price <= 0.0 || last_sent.get(asset) == Some(price) {
             continue;
         }
         last_sent.insert(asset.clone(), *price);
-        moved.push((asset.clone(), *price));
+        moved.insert(asset.clone(), *price);
     }
 
-    let mut frames = Vec::new();
-    for (asset, price) in moved {
-        for (id, client_assets) in clients {
-            if client_assets.contains(&asset) {
-                frames.push((*id, prices::tick_frame(&asset, price, ts_ms)));
-            }
-        }
-    }
-    frames
+    clients
+        .iter()
+        .filter_map(|(id, assets)| {
+            let prices = only(&moved, assets);
+            let bands = only(bands, assets);
+            (!prices.is_empty() || !bands.is_empty())
+                .then(|| (*id, prices::price_frame(&prices, &bands, ts_ms)))
+        })
+        .collect()
+}
+
+fn band_widths(assets: &[String], now_ms: i64) -> BTreeMap<String, f64> {
+    assets
+        .iter()
+        .map(|asset| {
+            let width = settlement::max_band_width(ticks::buffer(), asset, now_ms);
+            (asset.clone(), width)
+        })
+        .filter(|(_, width)| *width > 0.0)
+        .collect()
 }
 
 /// Send already-rendered frames to one connection. Returns how many landed; a
@@ -189,7 +214,7 @@ pub fn deliver(id: u64, frames: &[String]) -> usize {
     match hub.clients.get(&id) {
         Some(client) => frames
             .iter()
-            .filter(|frame| client.tx.send((*frame).clone()).is_ok())
+            .filter(|frame| client.tx.try_send((*frame).clone()).is_ok())
             .count(),
         None => 0,
     }
@@ -209,26 +234,26 @@ pub fn heartbeat_interval() -> std::time::Duration {
     std::time::Duration::from_millis(HEARTBEAT_MS)
 }
 
-/// Prime a fresh connection with the current values, exactly as the TS does in
-/// `ReadableStream.start`: issued after subscribing, so a market move that lands
-/// during the fetch is still delivered afterwards.
-pub fn spawn_prime(id: u64, assets: Vec<String>) {
-    let tx = lock_hub().clients.get(&id).map(|client| client.tx.clone());
-    let Some(tx) = tx else { return };
-    tokio::spawn(async move {
-        let prices = prices::fetch_latest_prices(&assets, false).await;
-        let ts = prices::now_millis();
-        for frame in prices::snapshot_frames_at(&assets, &prices, ts) {
-            if tx.send(frame).is_err() {
-                return; // the connection hung up before the snapshot landed
-            }
-        }
-    });
+/// Prime a fresh connection with the current values, from memory, so a client
+/// never waits for a change to get its first prices. Later moves come from the pump.
+pub fn prime(id: u64, assets: &[String]) {
+    let quotes = prices::ring_quotes(assets);
+    if quotes.is_empty() {
+        return;
+    }
+    let now = prices::now_millis();
+    let frame = prices::price_frame(&quotes, &band_widths(assets, now), now);
+    if let Some(client) = lock_hub().clients.get(&id) {
+        let _ = client.tx.try_send(frame);
+    }
 }
 
 async fn pump() {
+    let mut every = tokio::time::interval(tick_interval());
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut beat = 0u32;
     loop {
-        tokio::time::sleep(tick_interval()).await;
+        every.tick().await;
 
         let union = {
             let hub = lock_hub();
@@ -241,23 +266,26 @@ async fn pump() {
             continue;
         }
 
-        let quotes = prices::fetch_latest_prices(&union, true).await;
+        beat = beat.wrapping_add(1);
+        let quotes = prices::ring_quotes(&union);
         let ts = prices::now_millis();
+        let bands = if beat % FRAMES_PER_BAND_UPDATE == 0 {
+            band_widths(&union, ts)
+        } else {
+            BTreeMap::new()
+        };
 
         let mut hub = lock_hub();
-        // Re-derive the client list under the lock: a connection can have left
-        // while the quote was in flight.
         let live: Vec<(u64, BTreeSet<String>)> = hub
             .clients
             .iter()
             .map(|(id, client)| (*id, client.assets.clone()))
             .collect();
-        if live.is_empty() {
-            return;
-        }
-        for (id, frame) in fan_out(&live, &mut hub.last_sent, &quotes, ts) {
+        for (id, frame) in fan_out(&live, &mut hub.last_sent, &quotes, &bands, ts) {
             if let Some(client) = hub.clients.get(&id) {
-                let _ = client.tx.send(frame);
+                if client.tx.try_send(frame).is_err() {
+                    tracing::debug!("[stream] client {id} is not reading, frame dropped");
+                }
             }
         }
     }
@@ -273,6 +301,10 @@ mod tests {
 
     fn quotes(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
         pairs.iter().map(|(a, p)| (a.to_string(), *p)).collect()
+    }
+
+    fn none() -> BTreeMap<String, f64> {
+        BTreeMap::new()
     }
 
     #[test]
@@ -294,14 +326,33 @@ mod tests {
         let clients = vec![(1u64, set(&["BTC"])), (2u64, set(&["BTC", "ETH"]))];
         let mut last_sent = BTreeMap::new();
 
-        let first = fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 100.0)]), 10);
+        let first = fan_out(
+            &clients,
+            &mut last_sent,
+            &quotes(&[("BTC", 100.0)]),
+            &none(),
+            10,
+        );
         assert_eq!(first.len(), 2, "both subscribers of BTC hear the move");
 
-        let unchanged = fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 100.0)]), 11);
+        let unchanged = fan_out(
+            &clients,
+            &mut last_sent,
+            &quotes(&[("BTC", 100.0)]),
+            &none(),
+            11,
+        );
         assert!(unchanged.is_empty(), "an identical quote is not a tick");
 
         assert_eq!(
-            fan_out(&clients, &mut last_sent, &quotes(&[("BTC", 100.01)]), 12).len(),
+            fan_out(
+                &clients,
+                &mut last_sent,
+                &quotes(&[("BTC", 100.01)]),
+                &none(),
+                12
+            )
+            .len(),
             2
         );
     }
@@ -310,10 +361,16 @@ mod tests {
     fn fan_out_only_delivers_to_interested_clients() {
         let clients = vec![(1u64, set(&["BTC"])), (2u64, set(&["ETH"]))];
         let mut last_sent = BTreeMap::new();
-        let frames = fan_out(&clients, &mut last_sent, &quotes(&[("ETH", 3000.0)]), 5);
+        let frames = fan_out(
+            &clients,
+            &mut last_sent,
+            &quotes(&[("ETH", 3000.0)]),
+            &none(),
+            5,
+        );
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].0, 2);
-        assert!(frames[0].1.contains("\"asset\":\"ETH\""));
+        assert!(frames[0].1.contains("\"ETH\":3000"));
     }
 
     #[test]
@@ -329,6 +386,7 @@ mod tests {
                 ("SOL", f64::NAN),
                 ("XAU", f64::INFINITY),
             ]),
+            &none(),
             1,
         );
         assert!(frames.is_empty());
@@ -337,18 +395,29 @@ mod tests {
     }
 
     #[test]
-    fn tick_frame_matches_the_ts_data_line() {
-        let clients = vec![(1u64, set(&["BTC"]))];
+    fn a_client_gets_one_frame_with_only_its_own_moves_and_bands() {
+        let clients = vec![(1u64, set(&["BTC", "ETH"])), (2u64, set(&["SOL"]))];
         let mut last_sent = BTreeMap::new();
         let frames = fan_out(
             &clients,
             &mut last_sent,
-            &quotes(&[("BTC", 67123.45)]),
-            1_700_000_000_000,
+            &quotes(&[("BTC", 10.0), ("ETH", 20.0)]),
+            &quotes(&[("ETH", 5.0), ("SOL", 1.0)]),
+            7,
         );
         assert_eq!(
-            frames[0].1,
-            "data: {\"asset\":\"BTC\",\"price\":67123.45,\"ts\":1700000000000}\n\n"
+            frames,
+            vec![
+                (
+                    1,
+                    "data: {\"ts\":7,\"prices\":{\"BTC\":10,\"ETH\":20},\"bands\":{\"ETH\":5}}\n\n"
+                        .to_string()
+                ),
+                (
+                    2,
+                    "data: {\"ts\":7,\"prices\":{},\"bands\":{\"SOL\":1}}\n\n".to_string()
+                ),
+            ]
         );
     }
 
@@ -432,12 +501,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_client_that_stops_reading_never_grows_its_queue() {
+        let _serial = TEST_HUB_LOCK.lock().await;
+
+        let sub = subscribe(&["DOGE".to_string()]);
+        let frames: Vec<String> = (0..FRAME_BUFFER + 10).map(|n| n.to_string()).collect();
+        assert_eq!(deliver(sub.id(), &frames), FRAME_BUFFER);
+    }
+
+    #[tokio::test]
     async fn prime_is_a_noop_for_an_unknown_connection() {
         let _serial = TEST_HUB_LOCK.lock().await;
 
-        // Nothing is fetched and nothing is spawned once the client has left.
-        spawn_prime(999_998, vec!["BTC".to_string()]);
-        tokio::task::yield_now().await;
+        // Nothing happens once the client has left.
+        prime(999_998, &["BTC".to_string()]);
         assert_eq!(active_client_count(), 0);
     }
 }

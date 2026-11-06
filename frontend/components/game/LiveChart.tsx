@@ -301,6 +301,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   const setSelectedAsset = useStore((state) => state.setSelectedAsset);
   const placeBetFromHouseBalance = useStore((state) => state.placeBetFromHouseBalance);
   const settlingCount = useStore((state) => state.settlingBets.length);
+  const maxBand = useStore((state) => state.maxBands[state.selectedAsset] ?? 0);
   const userAddress = useStore((state) => state.address);
   const houseBalance = useStore((state) => state.houseBalance);
   const isPlacingBet = useStore((state) => state.isPlacingBet);
@@ -762,6 +763,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
             decimals={currentAssetConfig.decimals}
             lockMs={BET_LOCK_MS}
             minRange={Math.max(currentPrice * 0.0003, 20 * 10 ** -currentAssetConfig.decimals)}
+            maxStep={maxBand}
             colors={theme.palette}
             fontFamily={theme.fontFamily}
             reducedMotion={prefersReducedMotion}

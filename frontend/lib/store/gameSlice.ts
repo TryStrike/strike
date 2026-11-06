@@ -41,6 +41,7 @@ export interface GameState {
   rawAssetPrices: Record<string, number>;
   activeBets: ActiveBet[];
   settlingBets: ActiveBet[];
+  maxBands: Record<string, number>;
   targetCells: TargetCell[];
   isPlacingBet: boolean;
   lastResult: {
@@ -73,6 +74,7 @@ export interface GameState {
   placeBetFromHouseBalance: (amount: string, targetId: string, userAddress: string, cellId?: string, metadata?: { priceTop?: number; priceBottom?: number; startTime?: number; endTime?: number }) => Promise<{ betId: string; remainingBalance: number; bet: ActiveBet } | void>;
   updatePrice: (price: number, asset?: AssetType) => void;
   updateAllPrices: (prices: Record<string, number>) => void;
+  setMaxBands: (bands: Record<string, number>) => void;
 
 
   addActiveBet: (bet: ActiveBet) => void;
@@ -247,6 +249,7 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
 
   activeBets: [],
   settlingBets: [],
+  maxBands: {},
   targetCells: DEFAULT_TARGET_CELLS,
   isPlacingBet: false,
   lastResult: null,
@@ -525,6 +528,10 @@ export const createGameSlice: StateCreator<any> = (set, get) => {
     }
 
     set(update as GameState);
+  },
+
+  setMaxBands: (bands: Record<string, number>) => {
+    set((state: GameState) => ({ maxBands: { ...state.maxBands, ...bands } }));
   },
 
   updateAllPrices: (prices: Record<string, number>) => {
