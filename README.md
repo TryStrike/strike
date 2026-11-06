@@ -17,7 +17,7 @@ Strike is a binary options app on Arc. you call higher or lower on crypto, forex
 | Arkiv + Swarm bonus | [arkiv/swarm.md](arkiv/swarm.md) |
 | World ID Agent Pass, Best Use of IDKit | [docs/world.md](docs/world.md), [docs/world-debrief.md](docs/world-debrief.md) |
 
-**we built the missing Rust SDK.** Arkiv had no Rust SDK, so we wrote our own encoder for Strike's backend, then turned it into [arkiv-rs-sdk](https://github.com/TryStrike/arkiv-rs-sdk): open source (MIT), with typed attributes, batched writes that stay under the node's size limit, queries, and retries. its tests check it byte for byte against the official TypeScript SDK and against what Strike writes in production
+**we built the missing Rust SDK.** Arkiv had no Rust SDK, so we wrote our own encoder for Strike's backend, then turned it into [arkiv-rs-sdk](https://github.com/TryStrike/arkiv-rs-sdk), published on [crates.io](https://crates.io/crates/arkiv-rs-sdk): open source (MIT), with typed attributes, batched writes that stay under the node's size limit, queries, and retries. its tests check it byte for byte against the official TypeScript SDK and against what Strike writes in production
 
 ## Arkiv: who writes, and one query to run
 
