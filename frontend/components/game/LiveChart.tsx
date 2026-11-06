@@ -24,6 +24,7 @@ interface LiveChartProps {
 }
 
 interface BoxQuote {
+  asset: AssetType;
   multiplier: string;
   isUp: boolean;
 }
@@ -674,7 +675,7 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
   );
 
   const quoteCell = useCallback((cell: Cell, scales: Scales): CellLabel<BoxQuote> => {
-    const { currentPrice: price, isBlitzActive, hasBlitzAccess, blitzMultiplier } = useStore.getState();
+    const { currentPrice: price, selectedAsset: asset, isBlitzActive, hasBlitzAccess, blitzMultiplier } = useStore.getState();
     const center = (cell.top + cell.bottom) / 2;
     const priceRange = scales.maxPrice - scales.minPrice;
     const inRow = price <= cell.top && price >= cell.bottom;
@@ -686,12 +687,12 @@ export const LiveChart = React.memo(function LiveChart({ betAmount }: LiveChartP
     const boosted = isBlitzActive && hasBlitzAccess && (base > 2.2 || isLuckyDiagonal);
     const multiplier = Math.min(Math.min(base + timeBonus, 10) * (boosted ? blitzMultiplier : 1), 20).toFixed(2);
 
-    return { text: `${multiplier}x`, accent: boosted, value: { multiplier, isUp: center > price } };
+    return { text: `${multiplier}x`, accent: boosted, value: { asset, multiplier, isUp: center > price } };
   }, [timeframeSeconds]);
 
   const handleCellTap = async (cell: Cell, label: CellLabel | null) => {
     const quote = label?.value as BoxQuote | undefined;
-    if (!quote || !betAmount || !userAddress) return;
+    if (!quote || quote.asset !== useStore.getState().selectedAsset || !betAmount || !userAddress) return;
 
     if ((houseBalance || 0) < parseFloat(betAmount)) {
       setShowInsufficientFunds(true);
