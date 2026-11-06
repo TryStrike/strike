@@ -917,7 +917,7 @@ export const LiveChart = React.memo(function LiveChart({
 
   const gameMode = useStore((state) => state.gameMode);
   const timeframeSeconds = useStore((state) => state.timeframeSeconds);
-  const lastResult = useStore((state) => state.lastResult);
+  const settledResults = useStore((state) => state.settledResults);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
   const hasOpenBets = useStore(
@@ -1135,35 +1135,43 @@ export const LiveChart = React.memo(function LiveChart({
     return () => observer.disconnect();
   }, []);
 
-  const lastProcessedResultRef = useRef<number>(0);
+  const processedResultsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!lastResult || lastResult.timestamp <= lastProcessedResultRef.current)
-      return;
-    lastProcessedResultRef.current = lastResult.timestamp;
     const scales = chart?.scales();
     if (!scales) return;
-
+    const fresh = settledResults.filter(
+      (r) => !processedResultsRef.current.has(r.betId),
+    );
+    if (fresh.length === 0) return;
+    for (const r of fresh) processedResultsRef.current.add(r.betId);
+    const markers = fresh
+      .filter((r) => r.asset === selectedAsset)
+      .map((r) => {
+        const boxed =
+          r.mode === "box" &&
+          r.endTime !== undefined &&
+          r.priceTop !== undefined &&
+          r.priceBottom !== undefined;
+        return {
+          id: `result-${r.betId}`,
+          won: r.won,
+          refunded: r.refunded,
+          amount: r.amount,
+          payout: r.payout,
+          multiplier: Number(
+            (r.amount > 0 ? r.payout / r.amount : 0).toFixed(2),
+          ),
+          timestamp: Date.now(),
+          x: boxed ? scales.x(r.endTime as number) : scales.tipX,
+          y: boxed
+            ? scales.y(((r.priceTop as number) + (r.priceBottom as number)) / 2)
+            : scales.y(currentPrice),
+        };
+      });
+    if (markers.length === 0) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- marker position comes from the chart instance's scales, an external system
-    setBetResults((prev) => [
-      ...prev,
-      {
-        id: `result-${lastResult.betId ?? lastResult.timestamp}`,
-        won: lastResult.won,
-        refunded: lastResult.refunded,
-        amount: lastResult.amount,
-        payout: lastResult.payout,
-        multiplier: Number(
-          (lastResult.amount > 0
-            ? lastResult.payout / lastResult.amount
-            : 0
-          ).toFixed(2),
-        ),
-        timestamp: Date.now(),
-        x: scales.tipX,
-        y: scales.y(currentPrice),
-      },
-    ]);
-  }, [chart, lastResult, currentPrice]);
+    setBetResults((prev) => [...prev, ...markers]);
+  }, [chart, settledResults, selectedAsset, currentPrice]);
 
   // A quiet market sends no ticks, so indicators need their own clock to reach the tip.
   const hasIndicators = Object.values(activeIndicators).some(Boolean);

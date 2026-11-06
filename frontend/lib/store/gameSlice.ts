@@ -8,6 +8,11 @@ import { useToastStore } from "@/lib/hooks/useToast";
 import { ensureBalanceSession } from "@/lib/balance/balanceClientHeaders";
 import { ApiFailure, needsSession, readApiError } from "@/lib/api/errors";
 import { sendGuarded } from "@/lib/world/gate";
+import {
+  groupKey,
+  summarizeGroup,
+  type SettledResult,
+} from "@/lib/game/resultGroups";
 
 export type GameMode = "binomo" | "box";
 
@@ -74,7 +79,12 @@ export interface GameState {
     cellId?: string;
     currency?: string;
     betId?: string;
+    count?: number;
+    wins?: number;
+    refunds?: number;
+    betIds?: string[];
   } | null;
+  settledResults: SettledResult[];
   error: string | null;
   timeframeSeconds: number;
 
@@ -253,6 +263,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
   get,
 ) => {
   const roundTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const groupResults = new Map<string, SettledResult[]>();
 
   const settleRound = async (betId: string) => {
     roundTimers.delete(betId);
@@ -284,63 +295,93 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
       settlingBets: state.settlingBets.filter((b) => b.id !== betId),
     }));
 
-    if (!sameWallet(wallet, get().address)) return;
-    if (wallet) void get().fetchBalance?.(wallet);
-
-    if (!result) {
-      console.error("No server result for bet", bet.id);
+    const key = groupKey(bet);
+    if (!sameWallet(wallet, get().address)) {
+      groupResults.delete(key);
       return;
     }
+    if (wallet) void get().fetchBalance?.(wallet);
 
-    const won = result.won === true;
-    const payout = Number(result.payout) || 0;
-    const refunded =
-      result.outcome === "tie" || result.outcome === "refund_no_price";
-    const endPrice = Number(result.endPrice) || 0;
     const timestamp = Date.now();
+    if (!result) {
+      console.error("No server result for bet", bet.id);
+    } else {
+      const won = result.won === true;
+      const payout = Number(result.payout) || 0;
+      const refunded =
+        result.outcome === "tie" || result.outcome === "refund_no_price";
+      const endPrice = Number(result.endPrice) || 0;
 
-    if (!refunded) {
-      if (won) playWinSound();
-      else playLoseSound();
-    }
+      get().addBet?.({
+        id: bet.id,
+        timestamp,
+        amount: bet.amount.toString(),
+        won,
+        payout: payout.toString(),
+        startPrice: bet.strikePrice || 0,
+        endPrice,
+        actualChange: endPrice ? endPrice - (bet.strikePrice || 0) : 0,
+        asset: bet.asset,
+        endTime: bet.endTime ?? null,
+        strikePrice: bet.strikePrice ?? null,
+        priceTop: bet.priceTop,
+        priceBottom: bet.priceBottom,
+        target: {
+          id: bet.mode === "binomo" ? "classic" : "box",
+          label:
+            bet.mode === "binomo"
+              ? `${bet.direction} ${bet.multiplier}x`
+              : `Box ${bet.multiplier}x`,
+          multiplier: bet.multiplier,
+          priceChange: 0,
+          direction: bet.direction,
+        },
+      });
 
-    get().addBet?.({
-      id: bet.id,
-      timestamp,
-      amount: bet.amount.toString(),
-      won,
-      payout: payout.toString(),
-      startPrice: bet.strikePrice || 0,
-      endPrice,
-      actualChange: endPrice ? endPrice - (bet.strikePrice || 0) : 0,
-      asset: bet.asset,
-      endTime: bet.endTime ?? null,
-      strikePrice: bet.strikePrice ?? null,
-      priceTop: bet.priceTop,
-      priceBottom: bet.priceBottom,
-      target: {
-        id: bet.mode === "binomo" ? "classic" : "box",
-        label:
-          bet.mode === "binomo"
-            ? `${bet.direction} ${bet.multiplier}x`
-            : `Box ${bet.multiplier}x`,
-        multiplier: bet.multiplier,
-        priceChange: 0,
-        direction: bet.direction,
-      },
-    });
-
-    set({
-      lastResult: {
+      const settled: SettledResult = {
+        betId: bet.id,
+        cellId: bet.cellId,
+        asset: bet.asset,
+        mode: bet.mode,
+        endTime: bet.endTime,
+        priceTop: bet.priceTop,
+        priceBottom: bet.priceBottom,
         won,
         refunded,
         amount: bet.amount,
         payout,
+        currency,
+        timestamp,
+      };
+      groupResults.set(key, [...(groupResults.get(key) ?? []), settled]);
+      set((state: GameState) => ({
+        settledResults: [...state.settledResults, settled].slice(-200),
+      }));
+    }
+
+    // The column is done once no sibling bet is still waiting to settle.
+    const { activeBets: waiting, settlingBets: inFlight } = get();
+    if ([...waiting, ...inFlight].some((b) => groupKey(b) === key)) return;
+    const group = summarizeGroup(groupResults.get(key) ?? []);
+    groupResults.delete(key);
+    if (!group) return; // every claim failed, show nothing as before
+    if (group.sound === "win") playWinSound();
+    else if (group.sound === "lose") playLoseSound();
+    set({
+      lastResult: {
+        won: group.won,
+        refunded: group.refunded,
+        amount: group.amount,
+        payout: group.payout,
         timestamp,
         asset: bet.asset,
         cellId: bet.cellId,
         currency,
-        betId: bet.id,
+        betId: group.betId,
+        count: group.count,
+        wins: group.wins,
+        refunds: group.refunds,
+        betIds: group.betIds,
       },
     });
   };
@@ -377,6 +418,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
     targetCells: DEFAULT_TARGET_CELLS,
     isPlacingBet: false,
     lastResult: null,
+    settledResults: [],
     error: null,
     timeframeSeconds: 5,
     activeTab: "bet",
@@ -462,10 +504,11 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         priceBottom?: number;
         startTime?: number;
         endTime?: number;
-      blitz?: boolean;
+        blitz?: boolean;
       },
     ) => {
-      if (get().isPlacingBet || Date.now() - lastBetAttemptAt < BET_DEBOUNCE_MS) return;
+      if (get().isPlacingBet || Date.now() - lastBetAttemptAt < BET_DEBOUNCE_MS)
+        return;
       lastBetAttemptAt = Date.now();
 
       set({ isPlacingBet: true, error: null });
@@ -621,8 +664,12 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
 
         addActiveBet(activeBet);
         void import("@/lib/arkivBets")
-          .then(({ recordBetOnArkiv }) => recordBetOnArkiv(userAddress, activeBet))
-          .catch((err) => console.warn("[arkiv] could not record bet", activeBet.id, err));
+          .then(({ recordBetOnArkiv }) =>
+            recordBetOnArkiv(userAddress, activeBet),
+          )
+          .catch((err) =>
+            console.warn("[arkiv] could not record bet", activeBet.id, err),
+          );
 
         set({
           isPlacingBet: false,
@@ -764,19 +811,30 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
     },
 
     seedHistory: (asset: string, points: [number, number][]) => {
-      const { assetHistories, assetPrices, rawAssetPrices, selectedAsset, serverOffsetMs } = get();
+      const {
+        assetHistories,
+        assetPrices,
+        rawAssetPrices,
+        selectedAsset,
+        serverOffsetMs,
+      } = get();
       const seeded: PricePoint[] = points
         .filter(([t, p]) => Number.isFinite(t) && Number.isFinite(p) && p > 0)
         .map(([t, p]) => ({ timestamp: t - serverOffsetMs, price: p }));
       if (seeded.length === 0) return;
       const lastSeeded = seeded[seeded.length - 1].timestamp;
-      const live = (assetHistories[asset] || []).filter((p) => p.timestamp > lastSeeded);
+      const live = (assetHistories[asset] || []).filter(
+        (p) => p.timestamp > lastSeeded,
+      );
       const merged = [...seeded, ...live].slice(-MAX_PRICE_HISTORY);
       const last = merged[merged.length - 1].price;
       const update: Partial<GameState> = {
         assetHistories: { ...assetHistories, [asset]: merged },
         assetPrices: { ...assetPrices, [asset]: assetPrices[asset] ?? last },
-        rawAssetPrices: { ...rawAssetPrices, [asset]: rawAssetPrices[asset] ?? last },
+        rawAssetPrices: {
+          ...rawAssetPrices,
+          [asset]: rawAssetPrices[asset] ?? last,
+        },
       };
       if (asset === selectedAsset) {
         update.priceHistory = merged;
@@ -801,7 +859,9 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         isBlitzActive: !!blitz?.active,
         blitzMultiplier: blitz?.boost ?? 2.0,
         hasBlitzAccess:
-          !!blitz?.active && blitzPassStart !== null && blitzPassStart === blitz.startsAt,
+          !!blitz?.active &&
+          blitzPassStart !== null &&
+          blitzPassStart === blitz.startsAt,
       });
     },
 
@@ -815,11 +875,15 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         const res = await fetch(`/api/blitz/pass?wallet=${address}`);
         if (!res.ok || !sameWallet(address, get().address)) return;
         const data = await res.json();
-        const start = data.hasPass && typeof data.windowStartsAt === "number" ? data.windowStartsAt : null;
+        const start =
+          data.hasPass && typeof data.windowStartsAt === "number"
+            ? data.windowStartsAt
+            : null;
         const { blitz } = get();
         set({
           blitzPassStart: start,
-          hasBlitzAccess: !!blitz?.active && start !== null && start === blitz.startsAt,
+          hasBlitzAccess:
+            !!blitz?.active && start !== null && start === blitz.startsAt,
         });
       } catch (err) {
         console.warn("[blitz] could not read pass", err);

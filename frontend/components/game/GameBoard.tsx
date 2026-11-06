@@ -217,6 +217,10 @@ export const GameBoard: React.FC = () => {
     if (error && isBalanceError) return `Insufficient balance. ${error}`;
     if (!lastResult) return "";
     const cur = lastResult.currency || "USDC";
+    const count = lastResult.count ?? 1;
+    if (count > 1 && !lastResult.refunded) {
+      return `${lastResult.wins ?? 0} of ${count} boxes hit. Paid ${lastResult.payout.toFixed(2)} ${cur} on ${lastResult.amount.toFixed(2)} staked.`;
+    }
     return lastResult.refunded
       ? `Round draw. Stake ${lastResult.amount.toFixed(2)} ${cur} refunded.`
       : lastResult.won
@@ -256,15 +260,17 @@ export const GameBoard: React.FC = () => {
     return () => window.removeEventListener("keydown", onKey);
   }, [gameMode, isWalletConnected, isPlacingBet]);
 
-  const lastSettledBet = useMemo(
-    () => matchSettledRound(bets, lastResult),
-    [bets, lastResult],
-  );
+  const lastSettledBet = useMemo(() => {
+    if ((lastResult?.count ?? 1) > 1)
+      return bets.find((b) => b.id === lastResult?.betId) ?? null;
+    return matchSettledRound(bets, lastResult);
+  }, [bets, lastResult]);
   const resultProof = useMemo<SettlementProofInput | null>(() => {
     if (!lastResult) return null;
     const betId = lastSettledBet?.id ?? lastResult.betId ?? null;
     if (!betId) return null;
     const row = lastSettledBet;
+    if ((lastResult.count ?? 1) > 1 && !row) return null;
     const rowAsset =
       (row as unknown as { asset?: string | null } | null)?.asset ?? null;
     return {
