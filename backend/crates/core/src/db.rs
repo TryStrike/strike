@@ -117,12 +117,11 @@ const MIGRATIONS: &[&str] = &[
        linked_at INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX world_links_by_human ON world_links(iss, sub);",
-    // 5: house commitments of settled round epochs, checked by Chainlink CRE.
+    // 5: house commitments of settled round epochs on Arc.
     "CREATE TABLE round_commits (
        epoch            INTEGER PRIMARY KEY,
        root             TEXT NOT NULL,
        rounds           INTEGER NOT NULL CHECK (rounds > 0),
-       liabilities_usdc TEXT NOT NULL,
        tx_hash          TEXT NOT NULL,
        created_at       INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
      ) STRICT;

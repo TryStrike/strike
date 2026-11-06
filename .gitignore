@@ -13,5 +13,3 @@ npm-debug.log*
 frontend/AGENTS.md
 /contracts/out
 /contracts/cache
-/cre/**/binary.wasm*
-/cre/**/.cre_build_tmp.js

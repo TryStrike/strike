@@ -8,18 +8,6 @@ import { Badge } from '@/components/ui/kit';
 
 const CLOSE_GRACE_MS = 60_000;
 
-type ProofStatus = 'pending' | 'committed' | 'verified' | 'mismatch';
-
-interface Attestation {
-  root: Hex;
-  checked: number;
-  mismatches: number;
-  skipped: number;
-  usdc_balance: string;
-  liabilities: string;
-  tx: Hex | null;
-}
-
 interface BetProof {
   epoch: number;
   end_ms: number;
@@ -27,21 +15,10 @@ interface BetProof {
   proof: Hex[] | null;
   house_root: Hex | null;
   commit_tx: Hex | null;
-  attestation: Attestation | null;
-  status: ProofStatus;
-  checked: boolean;
+  status: 'pending' | 'committed';
 }
 
 type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; data: BetProof };
-
-export function solvencyLabel(bps: number | null | undefined): string {
-  return bps === null || bps === undefined ? 'no liabilities' : `${(bps / 10_000).toFixed(2)}x`;
-}
-
-const solvencyBps = (balance: string, liabilities: string): number | null => {
-  const owed = BigInt(liabilities);
-  return owed === BigInt(0) ? null : Number((BigInt(balance) * BigInt(10_000)) / owed);
-};
 
 const foldsToRoot = (leaf: Hex, proof: Hex[], root: Hex): boolean =>
   proof.reduce<Hex>((node, sib) => {
@@ -96,7 +73,7 @@ export default function OnchainProof({ betId }: { betId: string }) {
     <div data-testid="onchain-proof" className="mt-3 rounded-3xl border border-line px-4 py-3">
       <div className="flex items-center justify-between gap-2">
         <div className="text-[11px] uppercase tracking-[0.08em] text-subtle">Onchain proof</div>
-        {state.kind === 'ready' && <StatusBadge data={state.data} />}
+        {state.kind === 'ready' && <Badge>{state.data.status}</Badge>}
       </div>
       {state.kind === 'loading' && <div className="mt-2 h-3 w-2/3 animate-pulse rounded-full bg-ink/[0.06]" />}
       {state.kind === 'error' && (
@@ -107,17 +84,8 @@ export default function OnchainProof({ betId }: { betId: string }) {
   );
 }
 
-const skippedRound = (d: BetProof) => !d.checked;
-
-const StatusBadge: React.FC<{ data: BetProof }> = ({ data }) => {
-  if (data.status === 'mismatch') return <Badge tone="down">mismatch</Badge>;
-  if (skippedRound(data)) return <Badge>not checked</Badge>;
-  if (data.status === 'verified') return <Badge tone="up">verified</Badge>;
-  return <Badge>{data.status}</Badge>;
-};
-
 const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
-  const { epoch, status, attestation: att, commit_tx, house_root } = data;
+  const { epoch, status, commit_tx, house_root } = data;
   const [now] = useState(Date.now);
   const epochLine = <span className="font-jet text-subtle">epoch {epoch}</span>;
   const closeAt = data.end_ms + CLOSE_GRACE_MS;
@@ -137,69 +105,18 @@ const ProofBody: React.FC<{ data: BetProof }> = ({ data }) => {
 
   const included =
     house_root && data.leaf && data.proof ? foldsToRoot(data.leaf, data.proof, house_root) : false;
-  const links = (
-    <div className="mt-2 flex flex-col gap-1 text-xs">
-      {commit_tx && <TxLink hash={commit_tx} label="House commit" />}
-      {att?.tx && <TxLink hash={att.tx} label="Chainlink attestation" />}
-    </div>
-  );
-  const inclusion = (
-    <p className={`mt-1.5 text-[11px] ${included ? 'text-muted' : 'text-down'}`}>
-      {included
-        ? 'Your bet is in this root: the Merkle proof folds to the committed root.'
-        : 'The Merkle proof for this bet does not fold to the committed root.'}
-    </p>
-  );
-
-  if (status === 'mismatch') {
-    return (
-      <>
-        <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-down">
-          {att && att.mismatches > 0
-            ? `Chainlink found ${att.mismatches} ${att.mismatches === 1 ? 'mismatch' : 'mismatches'} in this epoch.`
-            : 'Chainlink recomputed a different root for this epoch than the house committed.'}
-        </p>
-        {links}
-      </>
-    );
-  }
-
-  if (skippedRound(data)) {
-    return (
-      <>
-        <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
-          This market is priced from Yahoo, Chainlink checks crypto rounds only. The round is still in the house root for{' '}
-          {epochLine}.
-        </p>
-        {inclusion}
-        {links}
-      </>
-    );
-  }
-
-  if (status === 'verified' && att) {
-    return (
-      <>
-        <p className="mt-1.5 text-xs font-medium text-up">Verified by Chainlink CRE</p>
-        <p className="mt-1 font-jet text-[11px] text-muted">
-          {`${att.checked} checked · ${att.skipped} skipped · solvency ${solvencyLabel(
-            solvencyBps(att.usdc_balance, att.liabilities),
-          )}`}{' '}
-          · {epochLine}
-        </p>
-        {inclusion}
-        {links}
-      </>
-    );
-  }
-
   return (
     <>
-      <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
-        House root committed for {epochLine}. Chainlink check pending.
+      <p className={`mt-1.5 text-[11px] leading-relaxed ${included ? 'text-muted' : 'text-down'}`}>
+        {included
+          ? <>Your bet is in the house root for {epochLine}: the Merkle proof folds to the committed root.</>
+          : <>The Merkle proof for this bet does not fold to the root committed for {epochLine}.</>}
       </p>
-      {inclusion}
-      {links}
+      {commit_tx && (
+        <div className="mt-2 text-xs">
+          <TxLink hash={commit_tx} label="House commit" />
+        </div>
+      )}
     </>
   );
 };

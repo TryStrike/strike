@@ -1,25 +1,17 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { Badge, Label } from '@/components/ui/kit';
-import { TxLink, solvencyLabel } from '@/components/game/OnchainProof';
+import { Label } from '@/components/ui/kit';
+import { TxLink } from '@/components/game/OnchainProof';
 
 interface EpochSummary {
   epoch: number;
   count: number;
   commit_tx: string;
-  status: 'committed' | 'verified' | 'mismatch';
-  checked: number | null;
-  mismatches: number | null;
-  skipped: number | null;
-  solvency_bps: number | null;
 }
 
 type State = { kind: 'loading' } | { kind: 'error'; reason: string } | { kind: 'ready'; epochs: EpochSummary[] };
 
-const count = (n: number | null, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-
-const TONE = { committed: 'neutral', verified: 'up', mismatch: 'down' } as const;
 
 export default function EpochStrip() {
   const [state, setState] = useState<State>({ kind: 'loading' });
@@ -45,7 +37,7 @@ export default function EpochStrip() {
     <section aria-label="Onchain epochs" className="rounded-3xl bg-white/70 p-5 ring-1 ring-ink/[0.06] backdrop-blur-xl">
       <div className="mb-3 flex items-center justify-between gap-2">
         <Label>Onchain epochs</Label>
-        <span className="font-jet text-[11px] text-faint">House roots on Arc, re-settled by Chainlink CRE</span>
+        <span className="font-jet text-[11px] text-faint">House roots committed on Arc</span>
       </div>
       {state.kind === 'loading' && <div className="h-3 w-1/2 animate-pulse rounded-full bg-ink/[0.06]" />}
       {state.kind === 'error' && <p className="text-[11px] text-down">Epoch proofs unavailable: {state.reason}</p>}
@@ -56,15 +48,8 @@ export default function EpochStrip() {
         <ul className="flex flex-col divide-y divide-line">
           {state.epochs.map((e) => (
             <li key={e.epoch} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2 text-xs">
-              <span className="flex items-center gap-2">
-                <span className="font-jet text-ink">#{e.epoch}</span>
-                <Badge tone={TONE[e.status]}>{e.status}</Badge>
-              </span>
-              <span className="font-jet text-[11px] text-muted">
-                {e.status === 'committed'
-                  ? `${count(e.count, 'round', 'rounds')} · Chainlink check pending`
-                  : `${count(e.count, 'round', 'rounds')} · ${e.checked} checked · ${count(e.mismatches, 'mismatch', 'mismatches')} · ${e.skipped} skipped · solvency ${solvencyLabel(e.solvency_bps)}`}
-              </span>
+              <span className="font-jet text-ink">#{e.epoch}</span>
+              <span className="font-jet text-[11px] text-muted">{`${e.count} ${e.count === 1 ? 'round' : 'rounds'}`}</span>
               <TxLink hash={e.commit_tx} label="commit" />
             </li>
           ))}

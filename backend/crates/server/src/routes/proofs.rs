@@ -1,52 +1,25 @@
-//! Public settlement proofs: `/api/proofs/epoch/{n}` for the Chainlink CRE
-//! workflow, `/api/proofs/bet/{id}` and `/api/proofs/epochs` for the app. No
-//! session: everything here is committed on Arc anyway.
+//! Public settlement proofs for the app: `/api/proofs/bet/{id}` and
+//! `/api/proofs/epochs`. No session: everything here is committed on Arc anyway.
 
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
 use strike_core::db;
 use strike_core::error::{ApiError, ApiResult};
-use strike_core::proofs::{self, EpochRead, MAX_EPOCH};
+use strike_core::proofs;
 
 const DEFAULT_EPOCHS: u32 = 10;
 const MAX_EPOCHS: u32 = 50;
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/api/proofs/epoch/{n}", get(epoch))
         .route("/api/proofs/bet/{id}", get(bet))
         .route("/api/proofs/epochs", get(epochs))
-}
-
-async fn epoch(Path(raw): Path<String>) -> ApiResult<Response> {
-    let n = raw
-        .parse::<u64>()
-        .ok()
-        .filter(|n| *n <= MAX_EPOCH)
-        .ok_or_else(|| ApiError::bad_request("invalid_epoch"))?;
-    match proofs::epoch_json(db::db().await?, n).await? {
-        EpochRead::Ready(body) => {
-            let mut response = Json(body).into_response();
-            response.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=31536000, immutable"),
-            );
-            Ok(response)
-        }
-        EpochRead::Open => Err(ApiError::conflict("epoch_open")),
-        EpochRead::Empty => Err(ApiError::json(StatusCode::NOT_FOUND, "epoch_empty")),
-        EpochRead::TooLarge(count) => Err(ApiError::json(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "epoch_too_large",
-        )
-        .with("count", count.into())),
-    }
 }
 
 async fn bet(Path(raw): Path<String>) -> ApiResult<Response> {

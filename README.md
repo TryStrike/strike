@@ -17,7 +17,7 @@ This repo settles on **Arc only**. Players deposit **USDC**, trade binary rounds
 
 ## ETHGlobal Mumbai
 
-Tracks: Arc (main), World ID Agent Pass, Chainlink CRE. Architecture: [`docs/architecture.md`](docs/architecture.md). Demo order: [`docs/demo-script.md`](docs/demo-script.md).
+Tracks: Arc (main), World ID Agent Pass. Architecture: [`docs/architecture.md`](docs/architecture.md). Demo order: [`docs/demo-script.md`](docs/demo-script.md).
 
 **Arc Studio project:** https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd
 
@@ -32,7 +32,7 @@ Before kickoff:
 - **Oct 26, Arc port.** Pruned to Arc only (every other chain, staking, ~26.8k lines of dead code). USDC-only `StrikeTreasury` with `depositToken`, `withdrawTokenTo`, batched payouts, pause and two-step ownership. USDC moves only through the 6 decimal ERC-20 interface.
 - **Oct 31 to Nov 1.** Backend moved from Next routes to Rust (axum) and SQLite.
 - **Nov 3, merged to `main` at `a78c7d2`.** Agent engine (normal and YOLO), copilot, capped operator treasury with payout refs, CCTP and round proofs.
-- **Nov 5, 01:51 to 02:47 IST, branch `feat/side-tracks` (`c90aa13..eb16b39`).** World ID step-up gate for YOLO, epoch Merkle commits and `/api/proofs/*`, `RoundAttestor` and the CRE workflow, the World chip, the onchain proof block and the epoch strip.
+- **Nov 5, 01:51 to 02:47 IST, branch `feat/side-tracks` (`c90aa13..eb16b39`).** World ID step-up gate for YOLO, epoch Merkle commits and `/api/proofs/*`, the World chip, the onchain proof block and the epoch strip.
 
 During the event: `TODO` list the commits after Nov 5, 21:00 IST with their range (`git log --since="2026-11-05 21:00 +0530"`).
 
@@ -57,23 +57,11 @@ During the event: `TODO` list the commits after Nov 5, 21:00 IST with their rang
 
 Debrief: [`docs/world-debrief.md`](docs/world-debrief.md).
 
-### Chainlink CRE: independent round re-settlement
+### Settlement proofs on Arc
 
-**What.** Rust settles every round off chain in milliseconds. Chainlink CRE then re-settles each round of a committed epoch on its own, from Binance's 1 s klines, and writes its verdict to Arc. If the house lies, `HouseMismatch` is onchain for good.
+Every 10 minutes, after the epoch closes plus 60 s, the Rust committer sends `StrikeTreasury.commitRounds(epoch, root, count)`. The root is a sorted-pair Merkle root over one leaf per settled round. `GET /api/proofs/bet/{id}` returns the bet's leaf and Merkle proof, and the proof modal folds it to the committed root in the browser. `/history` lists the latest committed epochs with their Arc tx.
 
-**How.**
-
-- Every 10 minutes, after the epoch closes plus 60 s, the Rust committer sends `StrikeTreasury.commitRounds(epoch, root, count)`. The root is a sorted-pair Merkle root over one leaf per round.
-- The workflow `cre/round-attestor` triggers on `RoundsCommitted`, reads `GET /api/proofs/epoch/{n}`, checks every strike and end price against Binance klines, ports `decide()` from `settlement.rs`, rebuilds leaves and root from the fields, and reads `roundRoots(n)` and the treasury's USDC balance.
-- It reports `(epoch, root, checked, mismatches, skipped, usdcBalance, liabilities)` to `RoundAttestor`. The attestor stores it once and emits `EpochAttested`, plus `HouseMismatch` or `Undercollateralized` when they apply.
-- `GET /api/proofs/bet/{id}` and `GET /api/proofs/epochs` read the verdict from Arc. The proof modal and the `/history` epoch strip show verified, mismatch or pending.
-- Yahoo-priced and withheld rounds are counted as skipped, but stay in the root.
-
-**Where.** `backend/crates/core/src/proofs.rs`, `backend/crates/server/src/routes/proofs.rs`, `contracts/RoundAttestor.sol`, `cre/round-attestor/main.ts`, `cre/round-attestor/settle.ts`, `frontend/components/game/OnchainProof.tsx`, `frontend/components/history/EpochStrip.tsx`.
-
-**Run.** Set `PROOFS_START_EPOCH` and `NEXT_PUBLIC_ROUND_ATTESTOR_ADDRESS`. Deploy params, `cre login` and the exact `cre workflow simulate ... --broadcast` command are in [`cre/README.md`](cre/README.md). Verify with `cast call <attestor> "attestations(uint256)" N --rpc-url https://rpc.testnet.arc.io`, or open the bet's proof modal.
-
-Trust limits: simulation writes through the MockForwarder, so a verdict proves the pipeline, not a DON signature. Liabilities come from our ledger at commit time.
+**Where.** `backend/crates/core/src/proofs.rs`, `backend/crates/server/src/routes/proofs.rs`, `frontend/components/game/OnchainProof.tsx`, `frontend/components/history/EpochStrip.tsx`. Set `PROOFS_START_EPOCH` so the committer never backfills history.
 
 ---
 
@@ -242,7 +230,7 @@ Net amount is what is credited on deposit or sent on withdrawal. Blitz entry fee
 
 ## Architecture
 
-Whole system with World and Chainlink, plus sequence diagrams: [`docs/architecture.md`](docs/architecture.md).
+Whole system with World and the settlement proofs, plus sequence diagrams: [`docs/architecture.md`](docs/architecture.md).
 
 ### State (Zustand — `lib/store/`)
 

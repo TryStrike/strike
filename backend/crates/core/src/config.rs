@@ -100,8 +100,6 @@ pub struct Config {
     pub world_acr_floor: Option<String>,
     /// First epoch the round committer commits, so it never backfills history.
     pub proofs_start_epoch: Option<u64>,
-    /// `RoundAttestor`, where Chainlink CRE writes its verdicts.
-    pub round_attestor_address: Option<String>,
     /// `NODE_ENV === 'production'` equivalent: strict guard behaviour.
     pub production: bool,
     pub bind_addr: String,
@@ -181,7 +179,6 @@ impl Config {
             world_orb_max: parse_num("WORLD_ORB_MAX").unwrap_or(rust_decimal::Decimal::from(50)),
             world_acr_floor: str_var("WORLD_ACR_FLOOR"),
             proofs_start_epoch: parse_num("PROOFS_START_EPOCH"),
-            round_attestor_address: str_var("NEXT_PUBLIC_ROUND_ATTESTOR_ADDRESS"),
             production,
             bind_addr: str_var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
         }

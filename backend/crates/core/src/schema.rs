@@ -172,7 +172,6 @@ pub const COLUMNS: &[(&str, &str, &str)] = &[
     ("round_commits", "epoch", "bigint"),
     ("round_commits", "root", "text"),
     ("round_commits", "rounds", "bigint"),
-    ("round_commits", "liabilities_usdc", "text"),
     ("round_commits", "tx_hash", "text"),
     ("round_commits", "created_at", TS),
 ];

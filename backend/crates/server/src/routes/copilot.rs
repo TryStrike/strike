@@ -247,7 +247,6 @@ async fn read_personal(tool: &ToolUse, claims: &AgentClaims) -> Result<Value, St
                     "epoch": onchain["epoch"],
                     "status": onchain["status"],
                     "commit_tx": onchain["commit_tx"],
-                    "attestation": onchain["attestation"],
                 }),
                 Ok(None) => json!({ "status": "not_a_round" }),
                 Err(err) => {

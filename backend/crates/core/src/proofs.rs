@@ -1,17 +1,12 @@
 //! Epoch proofs of settled rounds. A round belongs to the 10 minute epoch its
 //! `end_time` falls in. Once an epoch is closed, its rounds hash into a
 //! sorted-pair Merkle root that [`run_committer`] writes to
-//! `StrikeTreasury.commitRounds`, and the Chainlink CRE workflow in
-//! `cre/round-attestor` re-settles every round from exchange data and writes its
-//! verdict to `RoundAttestor`. The leaf is byte-identical in Rust, the workflow
-//! and `verifyRound`.
+//! `StrikeTreasury.commitRounds`. The leaf is byte-identical in Rust and
+//! `verifyRound`.
 //!
 //! Nothing here runs on the bet path: it only reads rows that are already final.
-//! The Chainlink verdict is never stored in our database, only read from Arc.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
@@ -21,23 +16,17 @@ use crate::bets::now_ms;
 use crate::config::config;
 use crate::db::{db, Db};
 use crate::error::{ApiError, ApiResult};
-use crate::eth::{self, Attestation, Rpc, Treasury};
+use crate::eth::{self, Rpc, Treasury};
 
 pub const EPOCH_MS: i64 = 600_000;
 /// An epoch commits this long after it ends, so the sweeper has settled it.
 pub const CLOSE_GRACE_MS: i64 = 60_000;
-/// About 250 KB of epoch JSON, CRE's HTTP response cap.
-pub const MAX_EPOCH_ROUNDS: usize = 1_000;
 /// The largest epoch whose bounds still fit in microseconds.
 pub const MAX_EPOCH: u64 = (i64::MAX / 1_000 / EPOCH_MS - 1) as u64;
 const COMMIT_EVERY: Duration = Duration::from_secs(30);
 /// A failing commit waits 30 s, doubling to about an hour, so a revert can't burn gas every pass.
 const MAX_BACKOFF_DOUBLINGS: u32 = 7;
-const CHAIN_CACHE: Duration = Duration::from_secs(30);
-/// Ledger money scale 10 down to USDC's 6 decimals.
-const LEDGER_PER_USDC_UNIT: i64 = 10_000;
 const ROUNDS_COMMITTED: &str = "RoundsCommitted(uint256,bytes32,uint256)";
-const EPOCH_ATTESTED: &str = "EpochAttested(uint256,bytes32,uint32,uint32,uint32)";
 
 pub fn epoch_of(end_time_us: i64) -> u64 {
     end_time_us.div_euclid(1_000).div_euclid(EPOCH_MS) as u64
@@ -104,34 +93,9 @@ impl Round {
             payout: row.get::<_, Option<i64>>(17)?.unwrap_or_default(),
         })
     }
-
-    fn to_json(&self, leaf: &[u8; 32]) -> Value {
-        let text = |v: Option<i64>| v.map(|v| v.to_string());
-        json!({
-            "bet_id": self.bet_id,
-            "user": self.user,
-            "asset": self.asset,
-            "mode": self.mode,
-            "direction": self.direction,
-            "stake": self.stake.to_string(),
-            "multiplier": self.multiplier.to_string(),
-            "strike": self.strike.to_string(),
-            "strike_at": self.strike_at,
-            "strike_source": self.strike_source,
-            "top": text(self.top),
-            "bottom": text(self.bottom),
-            "end_time": self.end_time,
-            "end_price": text(self.end_price),
-            "end_price_at": self.end_price_at,
-            "end_source": self.end_source,
-            "outcome": self.outcome,
-            "payout": self.payout.to_string(),
-            "leaf": hex32(leaf),
-        })
-    }
 }
 
-/// `0x` and lowercase, the one spelling the leaf, the API and the workflow share.
+/// `0x` and lowercase, the one spelling the leaf and the API share.
 fn evm_user(raw: String) -> String {
     let lower = raw.to_lowercase();
     if lower.starts_with("0x") {
@@ -168,8 +132,7 @@ fn code(value: &str, codes: &[&str], field: &str, bet_id: &str) -> ApiResult<[u8
 }
 
 /// `keccak256(abi.encode(...))` of the 17 fields in docs order: 544 bytes, so a
-/// leaf can never pass for a 64-byte inner node. The price sources are in it
-/// because the workflow decides refunds from them.
+/// leaf can never pass for a 64-byte inner node.
 pub fn leaf(round: &Round) -> ApiResult<[u8; 32]> {
     let id = round.bet_id.as_str();
     let user = hex::decode(round.user.strip_prefix("0x").unwrap_or(&round.user))
@@ -280,33 +243,10 @@ fn read_epoch_rows(conn: &Connection, n: u64) -> ApiResult<EpochRows> {
     Ok(EpochRows { open, rounds })
 }
 
-pub async fn epoch_rounds(database: &Db, n: u64) -> ApiResult<EpochRows> {
-    database.read(move |conn| read_epoch_rows(conn, n)).await
-}
-
-/// USDC owed to players right now, in 6 decimals: every USDC balance plus the
-/// stake of every open USDC round, rounded up so it never understates.
-pub async fn liabilities_usdc(database: &Db) -> ApiResult<u128> {
-    let ledger: i64 = database
-        .read(|conn| {
-            Ok(conn.query_row(
-                "SELECT (SELECT COALESCE(SUM(balance), 0) FROM user_balances WHERE currency = 'USDC') \
-                      + (SELECT COALESCE(SUM(stake), 0) FROM bet_rounds \
-                          WHERE outcome IS NULL AND currency = 'USDC')",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .await?;
-    Ok(ledger.max(0).div_euclid(LEDGER_PER_USDC_UNIT) as u128
-        + u128::from(ledger.rem_euclid(LEDGER_PER_USDC_UNIT) > 0))
-}
-
 /// A `round_commits` row.
 pub struct Commit {
     pub root: String,
     pub rounds: i64,
-    pub liabilities_usdc: String,
     pub tx_hash: String,
     pub created_at_us: i64,
 }
@@ -314,16 +254,15 @@ pub struct Commit {
 fn read_commit(conn: &Connection, n: u64) -> ApiResult<Option<Commit>> {
     Ok(conn
         .prepare_cached(
-            "SELECT root, rounds, liabilities_usdc, tx_hash, created_at \
+            "SELECT root, rounds, tx_hash, created_at \
              FROM round_commits WHERE epoch = ?1",
         )?
         .query_row([n as i64], |r| {
             Ok(Commit {
                 root: r.get(0)?,
                 rounds: r.get(1)?,
-                liabilities_usdc: r.get(2)?,
-                tx_hash: r.get(3)?,
-                created_at_us: r.get(4)?,
+                tx_hash: r.get(2)?,
+                created_at_us: r.get(3)?,
             })
         })
         .optional()?)
@@ -419,12 +358,6 @@ async fn commit_next(treasury: &Treasury, from: u64) -> ApiResult<u64> {
         return Ok(n + 1);
     };
     let count = rows.rounds.len();
-    if count > MAX_EPOCH_ROUNDS {
-        tracing::warn!(
-            "[proofs] epoch {n} has {count} rounds, over the {MAX_EPOCH_ROUNDS} its API serves"
-        );
-    }
-    let liabilities = liabilities_usdc(database).await?;
 
     let cfg = config();
     let rpc = Rpc::from_config();
@@ -432,7 +365,7 @@ async fn commit_next(treasury: &Treasury, from: u64) -> ApiResult<u64> {
     let tx = if onchain == [0; 32] {
         treasury.commit_rounds(n, ours, count as u64).await?
     } else if onchain == ours {
-        match eth::epoch_event_tx(&rpc, &cfg.treasury_address, ROUNDS_COMMITTED, n, None).await? {
+        match eth::epoch_event_tx(&rpc, &cfg.treasury_address, ROUNDS_COMMITTED, n).await? {
             Some(tx) => tx,
             None => {
                 tracing::error!(
@@ -456,15 +389,9 @@ async fn commit_next(treasury: &Treasury, from: u64) -> ApiResult<u64> {
     database
         .write(move |conn| {
             conn.execute(
-                "INSERT INTO round_commits (epoch, root, rounds, liabilities_usdc, tx_hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    n as i64,
-                    root_hex,
-                    count as i64,
-                    liabilities.to_string(),
-                    tx_hash
-                ],
+                "INSERT INTO round_commits (epoch, root, rounds, tx_hash) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![n as i64, root_hex, count as i64, tx_hash],
             )?;
             Ok(())
         })
@@ -476,136 +403,6 @@ async fn commit_next(treasury: &Treasury, from: u64) -> ApiResult<u64> {
 // ---------------------------------------------------------------------------
 // public reads
 // ---------------------------------------------------------------------------
-
-pub enum EpochRead {
-    /// Not closed, or closed and not committed yet.
-    Open,
-    Empty,
-    TooLarge(usize),
-    Ready(Value),
-}
-
-/// `GET /api/proofs/epoch/{n}`: immutable once committed, liabilities included,
-/// so every CRE node reads the same bytes.
-pub async fn epoch_json(database: &Db, n: u64) -> ApiResult<EpochRead> {
-    let (commit, rows) = database
-        .read(move |conn| Ok((read_commit(conn, n)?, read_epoch_rows(conn, n)?)))
-        .await?;
-    let Some(commit) = commit else {
-        let closed = epoch_closed(n, rows.open, now_ms());
-        return Ok(if closed && rows.rounds.is_empty() {
-            EpochRead::Empty
-        } else {
-            EpochRead::Open
-        });
-    };
-    if rows.rounds.len() > MAX_EPOCH_ROUNDS {
-        return Ok(EpochRead::TooLarge(rows.rounds.len()));
-    }
-    let leaves = leaves_of(&rows.rounds)?;
-    let ours = root(&leaves).unwrap_or([0; 32]);
-    flag_root_drift(n, &ours, &commit);
-    let (start_ms, end_ms) = epoch_bounds(n);
-    let rounds: Vec<Value> = rows
-        .rounds
-        .iter()
-        .zip(&leaves)
-        .map(|(round, leaf)| round.to_json(leaf))
-        .collect();
-    Ok(EpochRead::Ready(json!({
-        "epoch": n,
-        "start_ms": start_ms,
-        "end_ms": end_ms,
-        "root": hex32(&ours),
-        "count": rounds.len(),
-        "commit_tx": commit.tx_hash,
-        "liabilities_usdc": commit.liabilities_usdc,
-        "liabilities_at_ms": commit.created_at_us.div_euclid(1_000),
-        "rounds": rounds,
-    })))
-}
-
-/// A verdict and the transaction that wrote it.
-type Verdict = (Attestation, Option<String>);
-
-type VerdictCache = Mutex<HashMap<u64, (Option<Verdict>, Instant)>>;
-
-static VERDICTS: LazyLock<VerdictCache> = LazyLock::new(Mutex::default);
-
-/// The Chainlink verdict for epoch `n`, read from Arc. A verdict is write-once,
-/// so a complete one is cached for good and anything else for 30 s. `None` when
-/// no attestor is configured or nothing is attested yet.
-pub async fn verdict(n: u64) -> ApiResult<Option<Verdict>> {
-    let Some(attestor) = config().round_attestor_address.clone() else {
-        return Ok(None);
-    };
-    if !crate::address::is_address_shape(&attestor) {
-        return Err(ApiError::internal(
-            "NEXT_PUBLIC_ROUND_ATTESTOR_ADDRESS is not a valid address",
-        ));
-    }
-    if let Some((cached, at)) = VERDICTS.lock().expect("verdict cache").get(&n) {
-        let complete = matches!(cached, Some((_, Some(_))));
-        if complete || at.elapsed() < CHAIN_CACHE {
-            return Ok(cached.clone());
-        }
-    }
-    let rpc = Rpc::from_config();
-    let unavailable = |err: ApiError| {
-        tracing::error!("[proofs] attestation read for epoch {n} failed: {err}");
-        ApiError::json(
-            axum::http::StatusCode::BAD_GATEWAY,
-            "attestation_read_failed",
-        )
-    };
-    let found = match eth::attestation(&rpc, &attestor, n)
-        .await
-        .map_err(unavailable)?
-    {
-        Some(attestation) => {
-            let at = Some(attestation.attested_at);
-            let tx = eth::epoch_event_tx(&rpc, &attestor, EPOCH_ATTESTED, n, at)
-                .await
-                .map_err(unavailable)?;
-            Some((attestation, tx))
-        }
-        None => None,
-    };
-    VERDICTS
-        .lock()
-        .expect("verdict cache")
-        .insert(n, (found.clone(), Instant::now()));
-    Ok(found)
-}
-
-/// `verified` only when Chainlink's root is the house root and nothing mismatched.
-pub fn status(house_root: &str, verdict: Option<&Verdict>) -> &'static str {
-    match verdict {
-        None => "committed",
-        Some((a, _)) if a.mismatches == 0 && hex32(&a.root) == house_root => "verified",
-        Some(_) => "mismatch",
-    }
-}
-
-fn verdict_json(verdict: &Verdict) -> Value {
-    let (a, tx) = verdict;
-    json!({
-        "root": hex32(&a.root),
-        "checked": a.checked,
-        "mismatches": a.mismatches,
-        "skipped": a.skipped,
-        "usdc_balance": a.usdc_balance.to_string(),
-        "liabilities": a.liabilities.to_string(),
-        "attested_at": a.attested_at,
-        "tx": tx,
-    })
-}
-
-/// Whether the workflow re-settles this round rather than skipping it: a ban
-/// and a non-Binance strike rest on the house's word.
-fn checked_by_workflow(round: &Round) -> bool {
-    round.strike_source == "binance" && round.outcome != "withheld"
-}
 
 /// `GET /api/proofs/bet/{id}`. `None` for an unknown bet.
 pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> {
@@ -644,9 +441,7 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
             "proof": null,
             "house_root": null,
             "commit_tx": null,
-            "attestation": null,
             "status": "pending",
-            "checked": checked_by_workflow(&round),
         })));
     };
     let leaves = leaves_of(&rows.rounds)?;
@@ -658,7 +453,6 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
         })?;
     let ours = root(&leaves).unwrap_or([0; 32]);
     flag_root_drift(n, &ours, &commit);
-    let verdict = verdict(n).await?;
     Ok(Some(json!({
         "epoch": n,
         "end_ms": epoch_bounds(n).1,
@@ -666,50 +460,28 @@ pub async fn bet_proof(database: &Db, bet_id: &str) -> ApiResult<Option<Value>> 
         "proof": proof(&leaves, index).iter().map(hex32).collect::<Vec<_>>(),
         "house_root": commit.root,
         "commit_tx": commit.tx_hash,
-        "attestation": verdict.as_ref().map(verdict_json),
-        "status": status(&commit.root, verdict.as_ref()),
-        "checked": checked_by_workflow(&round),
+        "status": "committed",
     })))
 }
 
-/// `GET /api/proofs/epochs?limit=`: the newest committed epochs with their verdicts.
+/// `GET /api/proofs/epochs?limit=`: the newest committed epochs.
 pub async fn recent_epochs(database: &Db, limit: u32) -> ApiResult<Value> {
-    let commits: Vec<(u64, i64, String, String)> = database
+    let epochs: Vec<Value> = database
         .read(move |conn| {
             Ok(conn
                 .prepare_cached(
-                    "SELECT epoch, rounds, tx_hash, root FROM round_commits \
-                     ORDER BY epoch DESC LIMIT ?1",
+                    "SELECT epoch, rounds, tx_hash FROM round_commits ORDER BY epoch DESC LIMIT ?1",
                 )?
                 .query_map([limit], |r| {
-                    Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?))
+                    Ok(json!({
+                        "epoch": r.get::<_, i64>(0)?,
+                        "count": r.get::<_, i64>(1)?,
+                        "commit_tx": r.get::<_, String>(2)?,
+                    }))
                 })?
                 .collect::<Result<_, _>>()?)
         })
         .await?;
-    let verdicts = futures::future::try_join_all(commits.iter().map(|(n, ..)| verdict(*n))).await?;
-    let epochs: Vec<Value> = commits
-        .iter()
-        .zip(&verdicts)
-        .map(|((n, count, tx, house_root), verdict)| {
-            let a = verdict.as_ref().map(|(a, _)| a);
-            json!({
-                "epoch": n,
-                "count": count,
-                "commit_tx": tx,
-                "status": status(house_root, verdict.as_ref()),
-                "checked": a.map(|a| a.checked),
-                "mismatches": a.map(|a| a.mismatches),
-                "skipped": a.map(|a| a.skipped),
-                "solvency_bps": a
-                    .filter(|a| a.liabilities > 0)
-                    .map(|a| {
-                        u64::try_from(a.usdc_balance.saturating_mul(10_000) / a.liabilities)
-                            .unwrap_or(u64::MAX)
-                    }),
-            })
-        })
-        .collect();
     Ok(Value::Array(epochs))
 }
 
@@ -725,8 +497,7 @@ mod tests {
         node == *root
     }
 
-    /// The shared 3-leaf vector: Foundry and the CRE workflow assert the same
-    /// leaves and root.
+    /// A pinned 3-leaf vector.
     pub(super) fn vector() -> Vec<Round> {
         let base = Round {
             bet_id: "bet-a".into(),
@@ -924,35 +695,5 @@ mod tests {
         assert!(!epoch_closed(5, 0, end + CLOSE_GRACE_MS));
         assert!(epoch_closed(5, 0, end + CLOSE_GRACE_MS + 1));
         assert!(!epoch_closed(5, 1, end + CLOSE_GRACE_MS + 1));
-    }
-
-    #[test]
-    fn only_an_agreeing_clean_verdict_is_verified() {
-        let leaves = leaves_of(&vector()).unwrap();
-        let house = hex32(&root(&leaves).unwrap());
-        let attestation = Attestation {
-            root: root(&leaves).unwrap(),
-            checked: 3,
-            mismatches: 0,
-            skipped: 0,
-            usdc_balance: 2,
-            liabilities: 1,
-            attested_at: 1,
-        };
-        assert_eq!(status(&house, None), "committed");
-        assert_eq!(
-            status(&house, Some(&(attestation.clone(), None))),
-            "verified"
-        );
-        let dirty = Attestation {
-            mismatches: 1,
-            ..attestation.clone()
-        };
-        assert_eq!(status(&house, Some(&(dirty, None))), "mismatch");
-        let other = Attestation {
-            root: [1; 32],
-            ..attestation
-        };
-        assert_eq!(status(&house, Some(&(other, None))), "mismatch");
     }
 }
