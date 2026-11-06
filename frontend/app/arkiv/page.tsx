@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import Link from "next/link";
 import { ArrowSquareOut, TreeStructure } from "@phosphor-icons/react/dist/ssr";
-import { SiteNav } from "@/components/SiteNav";
 
 export const metadata: Metadata = { title: "How it works" };
 
@@ -52,18 +50,6 @@ const CHECKS = [
 export default function ArkivPage() {
   return (
     <div className="min-h-full w-full bg-white font-tight text-ink">
-      <SiteNav
-        wide
-        right={
-          <Link
-            href="/trade"
-            className="inline-flex h-9 items-center rounded-full bg-ink px-4 text-sm font-medium text-white"
-          >
-            Trade
-          </Link>
-        }
-      />
-
       <main className="mx-auto max-w-[1200px] px-5 pb-16 pt-8 sm:px-8">
         <header className="mb-10">
           <div className="mb-2 flex items-center gap-2 font-jet text-[11px] uppercase tracking-[0.14em] text-faint">

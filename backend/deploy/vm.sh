@@ -62,8 +62,10 @@ npm run build
 cd ~/strike.new
 
 echo "→ building the Rust backend (release)"
+# Outside ~/strike.new, so dependencies stay compiled between deploys.
+export CARGO_TARGET_DIR="$HOME/.cache/strike-target"
 cargo build --release --locked --manifest-path backend/Cargo.toml -p server
-[ -x "$HOME/strike.new/backend/target/release/strike-backend" ] \
+[ -x "$CARGO_TARGET_DIR/release/strike-backend" ] \
   || { echo "✗ cargo build produced no strike-backend binary"; exit 1; }
 
 DATA=/opt/strike/bin/strike-data
@@ -79,7 +81,7 @@ sudo "$DATA" backup
 sudo install -m 644 backend/deploy/strike-backend.service backend/deploy/strike-litestream.service /etc/systemd/system/
 sudo install -m 644 backend/deploy/litestream.yml /etc/strike/litestream.yml
 if [ -x "$BIN" ]; then sudo cp -p "$BIN" "$BIN.prev"; fi
-sudo install -m 755 backend/target/release/strike-backend "$BIN"
+sudo install -m 755 "$CARGO_TARGET_DIR/release/strike-backend" "$BIN"
 
 cd ~
 rm -rf ~/strike && mv ~/strike.new ~/strike
