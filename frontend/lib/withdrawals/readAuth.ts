@@ -11,7 +11,7 @@ export function buildWithdrawalReadAuthMessage(
   nonce: string,
 ): string {
   return (
-    `STRIKE withdrawal read authorization\n` +
+    `Strike withdrawal read authorization\n` +
     `address:${address}\n` +
     `issuedAt:${issuedAt}\n` +
     `nonce:${nonce}`

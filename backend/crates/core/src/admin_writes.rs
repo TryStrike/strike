@@ -116,7 +116,7 @@ pub fn withdrawal_intent_message(
     signed_at: f64,
 ) -> String {
     format!(
-        "STRIKE withdrawal authorization\naddress:{spelling}\namount:{}\ncurrency:{normalized_currency}\nsignedAt:{}",
+        "Strike withdrawal authorization\naddress:{spelling}\namount:{}\ncurrency:{normalized_currency}\nsignedAt:{}",
         to_fixed8(amount),
         js_number_string(signed_at)
     )
@@ -884,7 +884,7 @@ mod tests {
         // keep this byte-identical or every admin accept fails with 401.
         assert_eq!(
             withdrawal_intent_message("0xAbC123", 1.5, "USDT", 1_788_000_000_000.0),
-            "STRIKE withdrawal authorization\naddress:0xAbC123\namount:1.50000000\ncurrency:USDT\nsignedAt:1788000000000"
+            "Strike withdrawal authorization\naddress:0xAbC123\namount:1.50000000\ncurrency:USDT\nsignedAt:1788000000000"
         );
         // No stray '.0' on the timestamp, no drift in the fixed amount.
         let msg = withdrawal_intent_message("0xabc", 10.0, "USDC", 1_730_000_000_000.0);

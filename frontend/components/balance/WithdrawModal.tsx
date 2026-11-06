@@ -87,7 +87,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
     signedAt: number
   ): Promise<string> => {
     const message =
-      `STRIKE withdrawal authorization\n` +
+      `Strike withdrawal authorization\n` +
       `address:${address}\n` +
       `amount:${withdrawAmount.toFixed(8)}\n` +
       `currency:${asset}\n` +

@@ -673,7 +673,7 @@ export default function WithdrawalsPage() {
 
         <p className="text-[11px] text-faint leading-relaxed max-w-3xl">
           Withdrawals are signed intents: you sign off-chain, an operator reviews the request within{' '}
-          {windowMinutes()} minutes, and the STRIKE treasury contract pays USDC on Arc. Review is manual — the code
+          {windowMinutes()} minutes, and the Strike treasury contract pays USDC on Arc. Review is manual — the code
           has no fixed payout timer, so we never promise one. A transaction hash and explorer link appear only after
           the ledger records a real chain hash. Refreshing this page only re-reads the ledger; it never re-submits
           your signature or creates a duplicate request.

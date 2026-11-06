@@ -173,7 +173,7 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  const handleStrikeBet = async (direction: 'UP' | 'DOWN') => {
+  const handleBet = async (direction: 'UP' | 'DOWN') => {
     if (!address || !isWalletConnected || gameMode !== 'binomo') return;
     if (useStore.getState().isPlacingBet) return;
 
@@ -241,9 +241,9 @@ export const GameBoard: React.FC = () => {
     }
   }, [error, isBalanceError]);
 
-  const betRef = React.useRef(handleStrikeBet);
+  const betRef = React.useRef(handleBet);
   useEffect(() => {
-    betRef.current = handleStrikeBet;
+    betRef.current = handleBet;
   });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -443,10 +443,10 @@ export const GameBoard: React.FC = () => {
               {isWalletConnected ? (
                 <>
                   <div className="grid grid-cols-2 gap-2">
-                    <Button variant="up" size="lg" onClick={() => handleStrikeBet('UP')} disabled={isPlacingBet} aria-keyshortcuts="ArrowUp">
+                    <Button variant="up" size="lg" onClick={() => handleBet('UP')} disabled={isPlacingBet} aria-keyshortcuts="ArrowUp">
                       <ArrowUp size={18} weight="bold" /> Higher
                     </Button>
-                    <Button variant="down" size="lg" onClick={() => handleStrikeBet('DOWN')} disabled={isPlacingBet} aria-keyshortcuts="ArrowDown">
+                    <Button variant="down" size="lg" onClick={() => handleBet('DOWN')} disabled={isPlacingBet} aria-keyshortcuts="ArrowDown">
                       <ArrowDown size={18} weight="bold" /> Lower
                     </Button>
                   </div>

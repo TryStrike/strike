@@ -91,7 +91,7 @@ function baseSteps(): {
   confirmed: TimelineStep;
 } {
   return {
-    requested: { key: 'requested', label: 'Requested', state: 'done', detail: 'Signed intent received by STRIKE' },
+    requested: { key: 'requested', label: 'Requested', state: 'done', detail: 'Signed intent received by Strike' },
     review: {
       key: 'review',
       label: 'Under review',
@@ -199,7 +199,7 @@ function describeLedgerStatus(row: WithdrawalRowLike | null | undefined): Ledger
         label: 'Needs reconciliation',
         tone: 'attention',
         playerMessage:
-          'A payout attempt for this request was made but could not be completed cleanly, so a STRIKE operator must reconcile it manually. Do NOT submit the same withdrawal again — copy your request ID below and contact support with it.',
+          'A payout attempt for this request was made but could not be completed cleanly, so a Strike operator must reconcile it manually. Do NOT submit the same withdrawal again — copy your request ID below and contact support with it.',
         steps: [s.requested, s.review, s.approved, s.sent, s.confirmed],
         terminal: true,
         netTxHash: netTx,
@@ -238,7 +238,7 @@ export function describeWithdrawal(
 
   if (intent.state === 'expired') {
     const s = baseSteps();
-    s.requested.detail = `Signed intent received by STRIKE at ${formatWhenMs(intent.signedAtMs)}`;
+    s.requested.detail = `Signed intent received by Strike at ${formatWhenMs(intent.signedAtMs)}`;
     s.review.state = 'failed';
     s.review.label = 'Review window elapsed';
     s.review.detail = `No operator accepted it within the ${windowMinutes(intent.maxAgeMs)}-minute signing window`;

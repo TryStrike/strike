@@ -1,13 +1,9 @@
 
 function getReferralShareTweetText(): string {
   return [
-    'THIS PLATFORM IS INSANE.⚡️',
+    'Strike: 5-second binary rounds on crypto, forex, metals and stocks, settled in USDC on Arc.',
     '',
-    'Strike - The first binary options trading dapp where you can trade over 1,010+ crypto, forex, metals, stocks and commodities in 5s-1m time charts.',
-    '',
-    'Tap my link → We earn 10% on their trading volume. We both run it up. 💸',
-    '',
-    'Stop watching. Start trading. Try it now: 🔥👇',
+    'Join with my link:',
   ].join('\n');
 }
 

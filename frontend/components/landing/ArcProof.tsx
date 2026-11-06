@@ -65,7 +65,7 @@ export function ArcProof() {
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 font-jet text-xs text-subtle"
               >
-                StrikeTreasury {short(treasury.address)} <ArrowUpRight size={12} aria-hidden="true" />
+                Treasury {short(treasury.address)} <ArrowUpRight size={12} aria-hidden="true" />
               </a>
             )}
           </BlurFade>

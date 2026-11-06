@@ -1445,7 +1445,7 @@ mod tests {
     fn personal_sign_recovers_known_signer() {
         // Deterministic round trip: sign the framed digest ourselves and check
         // the recovery lands on the same address.
-        let message = "STRIKE withdrawal authorization\naddress:0xabc\namount:1.00000000\ncurrency:USDC\nsignedAt:1700000000000";
+        let message = "Strike withdrawal authorization\naddress:0xabc\namount:1.00000000\ncurrency:USDC\nsignedAt:1700000000000";
         let key = SigningKey::from_slice(&[0x11u8; 32]).unwrap();
         let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
         let mut framed = prefix.into_bytes();

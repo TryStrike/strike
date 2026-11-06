@@ -32,7 +32,7 @@ pub struct ReadAuthProof {
 /// re-format here would silently reject every real signature.
 pub fn read_auth_message(address: &str, issued_at: f64, nonce: &str) -> String {
     format!(
-        "STRIKE withdrawal read authorization\naddress:{address}\nissuedAt:{}\nnonce:{nonce}",
+        "Strike withdrawal read authorization\naddress:{address}\nissuedAt:{}\nnonce:{nonce}",
         js_number_string(issued_at)
     )
 }
@@ -216,7 +216,7 @@ mod tests {
         // Changing this format silently rejects every signature in the wild.
         assert_eq!(
             read_auth_message("0xAbC", 1_700_000_000_000.0, "beef"),
-            "STRIKE withdrawal read authorization\naddress:0xAbC\nissuedAt:1700000000000\nnonce:beef"
+            "Strike withdrawal read authorization\naddress:0xAbC\nissuedAt:1700000000000\nnonce:beef"
         );
         // An integer epoch never gains a `.0`, which is what JS would print.
         assert!(!read_auth_message("0xAbC", 5.0, "beef").contains("5.0"));

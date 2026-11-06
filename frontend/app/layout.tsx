@@ -14,7 +14,7 @@ const pixelify = Pixelify_Sans({ variable: "--font-pixelify", subsets: ["latin"]
 
 export const metadata: Metadata = {
   metadataBase: new URL(BRAND.url),
-  title: `${BRAND.name} · ${BRAND.tagline}`,
+  title: { default: `${BRAND.name} · ${BRAND.tagline}`, template: `%s · ${BRAND.name}` },
   description: BRAND.description,
   openGraph: { title: BRAND.name, description: BRAND.description },
 };

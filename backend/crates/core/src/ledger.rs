@@ -1212,7 +1212,7 @@ pub fn withdraw_intent_message(
         _ => return Err(route_crash()),
     };
     Ok(format!(
-        "STRIKE withdrawal authorization\naddress:{}\namount:{amount_fixed}\ncurrency:{currency}\nsignedAt:{}",
+        "Strike withdrawal authorization\naddress:{}\namount:{amount_fixed}\ncurrency:{currency}\nsignedAt:{}",
         js_to_string(user_address),
         js_to_string(signed_at)
     ))
@@ -2424,7 +2424,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             message,
-            format!("STRIKE withdrawal authorization\naddress:{ADDR}\namount:1.00000000\ncurrency:USDC\nsignedAt:1700000000000")
+            format!("Strike withdrawal authorization\naddress:{ADDR}\namount:1.00000000\ncurrency:USDC\nsignedAt:1700000000000")
         );
         // The raw address spelling is signed, not the canonical one.
         let message =
