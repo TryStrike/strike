@@ -17,7 +17,7 @@ use strike_core::crypto::{
     MAX_CLOCK_SKEW_MS, MAX_INTENT_AGE_MS,
 };
 use strike_core::error::{ApiError, ApiResult};
-use strike_core::eth::recover_personal_signer;
+use strike_core::eth::verify_personal_signature;
 use strike_core::ledger;
 
 use crate::bans::is_globally_banned;
@@ -49,14 +49,18 @@ async fn mint_session(Json(body): Json<Value>) -> ApiResult<axum::response::Resp
             "Sign-in message is stale, sign again",
         ));
     }
-    let signer = recover_personal_signer(&balance_session_message(address, issued_at), signature)
-        .ok_or_else(|| ApiError::unauthorized("Invalid sign-in signature"))?;
-    let wallet = address::canonical(address);
-    if address::canonical(&signer) != wallet {
+    if !verify_personal_signature(
+        address,
+        &balance_session_message(address, issued_at),
+        signature,
+    )
+    .await?
+    {
         return Err(ApiError::unauthorized(
             "Sign-in signature is not from this wallet",
         ));
     }
+    let wallet = address::canonical(address);
     let ok = Value::Object(Map::from_iter([
         ("ok".to_string(), Value::Bool(true)),
         ("wallet".to_string(), Value::String(wallet.clone())),
