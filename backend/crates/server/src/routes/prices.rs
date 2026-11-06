@@ -24,8 +24,7 @@ pub fn routes() -> Router {
 }
 
 /// `GET ?asset=BTC` - one asset if asked for one, otherwise the whole feed list.
-/// The TS route does not validate the name; an unknown asset simply yields no
-/// quote, which `fetch_latest_prices` already reproduces.
+/// The name is not validated: an unknown asset simply yields no quote.
 async fn latest_get(Query(query): Query<LatestQuery>) -> Response {
     let assets = match query.asset.filter(|a| !a.is_empty()) {
         Some(asset) => vec![asset],

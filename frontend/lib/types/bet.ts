@@ -13,6 +13,8 @@ export interface BetRecord {
   asset?: string;
   endTime?: number | null;
   strikePrice?: number | null;
+  priceTop?: number;
+  priceBottom?: number;
 }
 
 /** History keeps `won` true on a tie or refund, which returns only the stake. */

@@ -911,6 +911,9 @@ export const LiveChart = React.memo(function LiveChart({
   const lastResult = useStore((state) => state.lastResult);
   const selectedCurrency = useStore((state) => state.selectedCurrency);
 
+  const marketClosed = useStore((state) =>
+    state.closedAssets.includes(state.selectedAsset),
+  );
   const { mode: feedMode, connected: streamLive } = useStore(
     (state) => state.priceFeed,
   );
@@ -925,7 +928,7 @@ export const LiveChart = React.memo(function LiveChart({
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
 
-  const isLoadingPrice = currentPrice <= 0 || priceHistory.length < 2;
+  const isLoadingPrice = currentPrice <= 0;
 
   const [showInsufficientFunds, setShowInsufficientFunds] = useState(false);
 
@@ -1067,7 +1070,9 @@ export const LiveChart = React.memo(function LiveChart({
     return () => clearInterval(id);
   }, []);
 
-  const feedState = feedStalled
+  const feedState = marketClosed
+    ? "closed"
+    : feedStalled
     ? "stale"
     : feedMode === "stream" && streamLive
       ? "live"
@@ -1138,14 +1143,16 @@ export const LiveChart = React.memo(function LiveChart({
   );
 
   const quoteCell = useCallback(
-    (cell: Cell, scales: Scales): CellLabel<BoxQuote> => {
+    (cell: Cell, scales: Scales): CellLabel<BoxQuote> | null => {
       const {
         currentPrice: price,
         selectedAsset: asset,
         isBlitzActive,
         hasBlitzAccess,
         blitzMultiplier,
+        closedAssets,
       } = useStore.getState();
+      if (closedAssets.includes(asset)) return null;
       const center = (cell.top + cell.bottom) / 2;
       const priceRange = scales.maxPrice - scales.minPrice;
       const inRow = price <= cell.top && price >= cell.bottom;
@@ -1371,7 +1378,9 @@ export const LiveChart = React.memo(function LiveChart({
             <span
               data-testid="feed-state"
               title={
-                feedState === "live"
+                feedState === "closed"
+                  ? "Market closed, last traded price shown"
+                  : feedState === "live"
                   ? "Streaming live ticks"
                   : feedState === "stale"
                     ? "Price feed delayed"

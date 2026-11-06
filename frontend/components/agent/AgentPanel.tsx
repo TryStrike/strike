@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { useAccount } from "wagmi";
 import { Lightning, Play } from "@phosphor-icons/react";
-import { useStore } from "@/lib/store";
+import { useHouseBalance, useStore } from "@/lib/store";
 import {
   Badge,
   Button,
@@ -21,6 +21,7 @@ import {
   type WorldAttempt,
 } from "@/lib/agent/useAgent";
 import { useCopilot } from "@/lib/copilot/useCopilot";
+import type { AssetType } from "@/lib/utils/priceFeed";
 
 const AgentStream = dynamic(() => import("@/components/agent/AgentStream"), {
   ssr: false,
@@ -35,11 +36,15 @@ const MINUTES = [
   { value: 30, label: "30m" },
 ];
 
-type Limits = Omit<StartLimits, "asset">;
+type Limits = Pick<StartLimits, "mode" | "minutes">;
+type Amount = "budget" | "maxPerTrade" | "stopLoss";
+const AMOUNT_INPUT = /^\d*\.?\d*$/;
+const NORMAL_STAKE = 1;
 
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
+  const houseBalance = useHouseBalance();
   const {
     session,
     decisions,
@@ -54,12 +59,19 @@ export function AgentPanel() {
   const [world, setWorld] = useState<WorldAttempt | null>(null);
   const [limits, setLimits] = useState<Limits>({
     mode: "normal",
-    budget: 20,
-    maxPerTrade: 2,
-    stopLoss: 5,
     minutes: 15,
   });
+  const [amounts, setAmounts] = useState<Record<Amount, string>>({
+    budget: "20",
+    maxPerTrade: "2",
+    stopLoss: "5",
+  });
   const running = session?.status === "running";
+  const sessionAsset = session?.asset;
+  useEffect(() => {
+    if (sessionAsset)
+      useStore.getState().setSelectedAsset(sessionAsset as AssetType);
+  }, [sessionAsset]);
   const newest = decisions.reduce<Decision | undefined>(
     (a, d) => (!a || d.createdAt > a.createdAt ? d : a),
     undefined,
@@ -70,12 +82,18 @@ export function AgentPanel() {
     newest.reason === WAITING_FOR_HUMAN;
   const set = <K extends keyof Limits>(k: K, v: Limits[K]) =>
     setLimits((l) => ({ ...l, [k]: v }));
-  const num = (k: "budget" | "maxPerTrade" | "stopLoss") => ({
-    value: String(limits[k]),
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
-      set(k, Math.max(0, Number(e.target.value) || 0)),
+  const num = (k: Amount) => ({
+    value: amounts[k],
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      const value = e.target.value;
+      if (AMOUNT_INPUT.test(value)) setAmounts((a) => ({ ...a, [k]: value }));
+    },
     inputMode: "decimal" as const,
   });
+  const budget = Number(amounts.budget);
+  const maxPerTrade = Number(amounts.maxPerTrade);
+  const stopLoss = Number(amounts.stopLoss);
+  const smallestStake = limits.mode === "normal" ? NORMAL_STAKE : maxPerTrade;
 
   const checks = (
     <>
@@ -208,26 +226,37 @@ export function AgentPanel() {
           : `You approve every trade on ${asset}. 1 USDC each, and a proposal you don't answer in 5 seconds is skipped.`}
       </p>
 
+      {address && (
+        <p
+          className={cx(
+            "-mt-3 text-xs",
+            houseBalance < smallestStake ? "text-down" : "text-faint",
+          )}
+        >
+          House balance {houseBalance.toFixed(4)} USDC.
+          {houseBalance < smallestStake &&
+            ` Trades need ${smallestStake} USDC, deposit on Trade first.`}
+        </p>
+      )}
+
       <Button
         size="lg"
         onClick={() => {
           setWorld(null);
-          start({ ...limits, asset });
+          start({ ...limits, budget, maxPerTrade, stopLoss, asset });
         }}
         disabled={
-          busy ||
-          !address ||
-          limits.budget <= 0 ||
-          limits.maxPerTrade <= 0 ||
-          limits.stopLoss <= 0
+          busy || !address || budget <= 0 || maxPerTrade <= 0 || stopLoss <= 0
         }
       >
         <Play size={18} weight="fill" />{" "}
         {!address
           ? "Connect a wallet to start"
-          : limits.mode === "yolo"
-            ? "Sign and verify with World ID"
-            : "Sign and start"}
+          : busy
+            ? "Confirm in your wallet"
+            : limits.mode === "yolo"
+              ? "Sign and verify with World ID"
+              : "Sign and start"}
       </Button>
 
       {checks}

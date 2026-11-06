@@ -6,7 +6,7 @@ import { ArrowUpRight, CaretDown, MagnifyingGlass, Storefront } from '@phosphor-
 import { SiteNav } from '@/components/SiteNav';
 import { WalletConnect } from '@/components/wallet';
 import { Label, cx, glassPrimary } from '@/components/ui/kit';
-import { PRICE_FEED_IDS } from '@/lib/utils/priceFeed';
+import { isAsset } from '@/lib/utils/priceFeed';
 
 interface Venue {
   issuer: string;
@@ -60,7 +60,7 @@ function spread(a: Asset) {
   const prices = quoted(a).map((v) => v.price as number);
   return prices.length > 1 ? (Math.max(...prices) / Math.min(...prices) - 1) * 100 : 0;
 }
-const tradable = (t: string) => t in PRICE_FEED_IDS;
+const tradable = isAsset;
 
 export default function MarketsPage() {
   const [data, setData] = useState<Markets | null>(null);

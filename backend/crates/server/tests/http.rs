@@ -51,6 +51,8 @@ async fn start_with(env: &[(&str, &str)]) -> Server {
         // The sampler starts with the server: nothing here may reach the market.
         .env("BINANCE_ENDPOINT", "http://127.0.0.1:9/ticker")
         .env("YAHOO_SPARK_ENDPOINT", "http://127.0.0.1:9/spark")
+        .env("BINANCE_PERP_ENDPOINT", "http://127.0.0.1:9/perp")
+        .env("KRAKEN_ENDPOINT", "http://127.0.0.1:9/kraken")
         .envs(env.iter().copied())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

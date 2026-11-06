@@ -155,6 +155,8 @@ async fn start() -> Server {
         .env("BALANCE_INTERNAL_SECRET", SECRET)
         .env("BINANCE_ENDPOINT", "http://127.0.0.1:9/ticker")
         .env("YAHOO_SPARK_ENDPOINT", "http://127.0.0.1:9/spark")
+        .env("BINANCE_PERP_ENDPOINT", "http://127.0.0.1:9/perp")
+        .env("KRAKEN_ENDPOINT", "http://127.0.0.1:9/kraken")
         .env("NEXT_PUBLIC_ARC_RPC_ENDPOINT", rpc_url)
         .env("NEXT_PUBLIC_TREASURY_ADDRESS", TREASURY)
         .env("NEXT_PUBLIC_ARC_USDC_ADDRESS", USDC)

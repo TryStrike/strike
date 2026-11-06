@@ -29,6 +29,8 @@ export interface SettlementProofInput {
   won?: boolean | null;
   network?: string | null;
   strikePrice?: number | null;
+  priceTop?: number | null;
+  priceBottom?: number | null;
   endTime?: number | null;
   recordedEndPrice?: number | null;
   resolvedAt?: number | null;
@@ -50,6 +52,7 @@ export interface SettlementProofData {
   outcomeLabel: string;
   tieRefund: boolean;
   strikePrice: number | null;
+  box: { top: number; bottom: number } | null;
   settlementPrice: number | null;
   settlementTakenAt: number | null;
   delta: number | null;
@@ -108,8 +111,14 @@ export function buildSettlementProof(input: SettlementProofInput): SettlementPro
   const strike = priceOrNull(input.strikePrice);
   const endTime = finiteOrNull(input.endTime);
   const tick = pickSettlementTick(input.ticks, endTime);
-  const settlementPrice = tick ? tick.price : priceOrNull(input.recordedEndPrice);
-  const settlementTakenAt = tick ? tick.timestamp : (endTime ?? finiteOrNull(input.resolvedAt));
+  const recorded = priceOrNull(input.recordedEndPrice);
+  const settlementPrice = recorded ?? tick?.price ?? null;
+  const settlementTakenAt =
+    recorded === null && tick ? tick.timestamp : (endTime ?? finiteOrNull(input.resolvedAt));
+
+  const top = priceOrNull(input.priceTop);
+  const bottom = priceOrNull(input.priceBottom);
+  const box = top !== null && bottom !== null ? { top, bottom } : null;
 
   const tieRefund =
     isTieRefund({ won: input.won, stake, payout, multiplier }) ||
@@ -127,7 +136,9 @@ export function buildSettlementProof(input: SettlementProofInput): SettlementPro
   const delta = strike !== null && settlementPrice !== null ? settlementPrice - strike : null;
   const dir = (input.direction || '').toUpperCase();
   let verdict: string | null = null;
-  if (delta !== null && tieRefund && Math.abs(delta) <= 1e-12) {
+  if (box) {
+    verdict = outcome === 'win' ? 'The price hit your box, so you won.' : outcome === 'loss' ? 'The price missed your box, so you lost.' : null;
+  } else if (delta !== null && tieRefund && Math.abs(delta) <= 1e-12) {
     verdict = 'It settled exactly at the strike, so your stake comes back.';
   } else if (delta !== null && (dir === 'UP' || dir === 'DOWN')) {
     verdict = `You called ${dir === 'UP' ? 'higher' : 'lower'} and it settled ${delta > 0 ? 'higher' : 'lower'}, so you ${
@@ -147,6 +158,7 @@ export function buildSettlementProof(input: SettlementProofInput): SettlementPro
     outcomeLabel,
     tieRefund,
     strikePrice: strike,
+    box,
     settlementPrice,
     settlementTakenAt,
     delta,
@@ -241,6 +253,13 @@ const toMs = (isoish: unknown): number | null => {
 
 const formatMoney = (v: number | null, network: string | null) =>
   v === null ? '—' : `${v.toFixed(2)} ${network || 'USDC'}`;
+
+const resultLine = (proof: SettlementProofData) => {
+  if (proof.outcome === 'win') return `Won ${formatMoney(proof.payout, proof.network)}`;
+  if (proof.outcome === 'loss') return `Lost ${formatMoney(proof.stake, proof.network)}`;
+  if (proof.outcome === 'draw') return `Refunded ${formatMoney(proof.payout, proof.network)}`;
+  return proof.outcomeLabel;
+};
 
 const Row: React.FC<{
   label: string;
@@ -342,7 +361,7 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
     () =>
       buildSettlementProof({
         ...bet,
-        strikePrice: bet.strikePrice ?? server?.strike_price ?? null,
+        strikePrice: bet.priceTop ? null : (bet.strikePrice ?? server?.strike_price ?? null),
         recordedEndPrice: bet.recordedEndPrice ?? server?.recorded_end_price ?? server?.settlement?.price ?? null,
         stake: bet.stake ?? server?.stake ?? null,
         payout: bet.payout ?? server?.payout ?? null,
@@ -381,15 +400,17 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
       className={
         variant === 'chip'
           ? 'inline-flex h-7 items-center gap-1 rounded-full bg-ink/[0.04] px-2.5 text-[11px] font-medium text-muted transition-colors hover:bg-ink/[0.07] hover:text-ink'
-          : 'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3 text-[12px] font-medium text-white ring-1 ring-white/25 backdrop-blur-xl transition-colors hover:bg-white/15'
+          : 'inline-flex shrink-0 items-center gap-1 text-xs font-medium text-muted'
       }
     >
       <ShieldCheck size={14} weight={variant === 'chip' ? 'regular' : 'bold'} />
       {variant === 'chip' ? (
         <>
-          <span className="font-jet tabular-nums text-ink/80">
-            {formatSettlementClock(bet.resolvedAt ?? proof.settlementTakenAt ?? null)}
-          </span>
+          {(bet.resolvedAt ?? proof.settlementTakenAt) != null && (
+            <span className="font-jet tabular-nums text-ink/80">
+              {formatSettlementClock(bet.resolvedAt ?? proof.settlementTakenAt)}
+            </span>
+          )}
           <span className="text-muted/70">{label ?? 'Proof'}</span>
         </>
       ) : (
@@ -401,21 +422,38 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
   return (
     <>
       {variant === 'bar' ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-full bg-ink/80 px-3 py-1.5 text-[12px] text-white backdrop-blur-xl">
-          <span className="flex items-center gap-2 font-jet tabular-nums">
-            <span className="text-white/60">Strike</span>
-            {formatSettlementPrice(proof.strikePrice)}
-            <span className="text-white/40">→</span>
-            <span className="text-white/60">Settled</span>
-            {formatSettlementPrice(proof.settlementPrice)}
-            {priceDelta !== null && (
-              <span className={priceDelta > 0 ? 'text-[#9BE7B4]' : priceDelta < 0 ? 'text-[#FFB4A2]' : 'text-white/60'}>
-                ({priceDelta > 0 ? '+' : ''}
-                {priceDelta.toFixed(Math.abs(priceDelta) >= 1 ? 2 : 6)})
+        <div className="rounded-2xl bg-surface px-4 py-3 ring-1 ring-line">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className={`text-sm font-semibold ${proof.outcome === 'win' ? 'text-up' : proof.outcome === 'loss' ? 'text-down' : 'text-ink'}`}>
+              {resultLine(proof)}
+            </span>
+            <span className="truncate font-jet text-[11px] text-subtle">
+              {[proof.asset, label].filter(Boolean).join(' · ')}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-col gap-1 font-jet text-xs tabular-nums">
+            <div className="flex justify-between gap-3">
+              <span className="text-subtle">{proof.box ? 'Box' : 'Strike'}</span>
+              <span className="text-ink">
+                {proof.box
+                  ? `${formatSettlementPrice(proof.box.bottom)} – ${formatSettlementPrice(proof.box.top)}`
+                  : formatSettlementPrice(proof.strikePrice)}
               </span>
-            )}
-          </span>
-          {trigger}
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-subtle">Settled</span>
+              <span className="text-ink">
+                {formatSettlementPrice(proof.settlementPrice)}
+                {priceDelta !== null && (
+                  <span className={`ml-1.5 ${priceDelta > 0 ? 'text-up' : priceDelta < 0 ? 'text-down' : 'text-subtle'}`}>
+                    {priceDelta > 0 ? '+' : ''}
+                    {priceDelta.toFixed(Math.abs(priceDelta) >= 1 ? 2 : 6)}
+                  </span>
+                )}
+              </span>
+            </div>
+          </div>
+          <div className="mt-2.5 border-t border-line pt-2">{trigger}</div>
         </div>
       ) : (
         trigger
@@ -445,8 +483,14 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
           )}
 
           <div className="mt-3 flex flex-col gap-2.5 rounded-3xl bg-surface px-1 py-3">
-            <Row label="Called">{proof.direction === 'UP' ? 'Higher' : proof.direction === 'DOWN' ? 'Lower' : '—'}</Row>
-            <Row label="Strike">{formatSettlementPrice(proof.strikePrice)}</Row>
+            {proof.box ? (
+              <Row label="Box">{`${formatSettlementPrice(proof.box.bottom)} – ${formatSettlementPrice(proof.box.top)}`}</Row>
+            ) : (
+              <>
+                <Row label="Called">{proof.direction === 'UP' ? 'Higher' : proof.direction === 'DOWN' ? 'Lower' : '—'}</Row>
+                <Row label="Strike">{formatSettlementPrice(proof.strikePrice)}</Row>
+              </>
+            )}
             <Row label="Settled at">{formatSettlementPrice(proof.settlementPrice)}</Row>
             <Row label="Stake">{formatMoney(proof.stake, proof.network)}</Row>
             <Row label="Multiplier">{proof.multiplier === null ? '—' : `${proof.multiplier}×`}</Row>

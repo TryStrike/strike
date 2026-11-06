@@ -41,6 +41,7 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
   let frameId = 0;
   let timerId: ReturnType<typeof setInterval> | null = null;
   let lastFrame = 0;
+  let visible = true;
 
   const snap = (value: number) => Math.round(value * dpr) / dpr;
   const hairline = (value: number) => snap(value) + 0.5 / dpr;
@@ -216,13 +217,19 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
     const xs: number[] = [];
     const ys: number[] = [];
     let last = NaN;
+    let before = NaN;
     for (let i = 0; i < points.length; i++) {
       const { timestamp, price: value } = points[i];
+      if (timestamp <= earliest) before = value;
       if (timestamp <= earliest || timestamp > s.now) continue;
       if (value === last && points[i + 1]?.price === value) continue;
       last = value;
       xs.push(s.x(timestamp));
       ys.push(s.y(value));
+    }
+    if (!Number.isNaN(before)) {
+      xs.unshift(s.x(earliest));
+      ys.unshift(s.y(before));
     }
 
     const tipY = s.y(tip);
@@ -287,16 +294,17 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
   function render(time: number) {
     const dt = lastFrame ? time - lastFrame : 0;
     lastFrame = time;
-    if (width === 0 || height === 0 || price <= 0) return;
+    if (width === 0 || height === 0) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = options.colors.background;
+    ctx.fillRect(0, 0, width, height);
+    if (price <= 0) return;
 
     const now = Date.now();
     updateView(now, dt);
     const s = buildScales(now);
     current = s;
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = options.colors.background;
-    ctx.fillRect(0, 0, width, height);
     drawGrid(s);
     options.underlay?.(ctx, s);
     const tipY = drawLine(s);
@@ -318,7 +326,8 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
   const start = () => {
     stop();
     lastFrame = 0;
-    if (options.reducedMotion) timerId = setInterval(() => render(performance.now()), 1000);
+    if (!visible) return;
+    if (options.reducedMotion) timerId = setInterval(() => !document.hidden && render(performance.now()), 1000);
     else frameId = requestAnimationFrame(loop);
   };
 
@@ -337,6 +346,11 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
 
   const observer = new ResizeObserver(resize);
   observer.observe(canvas);
+  const visibility = new IntersectionObserver(([entry]) => {
+    visible = entry.isIntersecting;
+    start();
+  });
+  visibility.observe(canvas);
   canvas.addEventListener('click', onClick);
   resize();
   start();
@@ -365,6 +379,7 @@ export function createTapGrid(canvas: HTMLCanvasElement, initial: TapGridOptions
     destroy() {
       stop();
       observer.disconnect();
+      visibility.disconnect();
       canvas.removeEventListener('click', onClick);
     },
   };

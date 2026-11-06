@@ -107,6 +107,8 @@ fn spawn_server(dir: &Path, feed_url: &str, port: u16, env: &[(&str, &str)]) -> 
         .env("BALANCE_SETTLEMENT_SECRET", SETTLEMENT_SECRET)
         .env("BINANCE_ENDPOINT", format!("{feed_url}/ticker"))
         .env("YAHOO_SPARK_ENDPOINT", format!("{feed_url}/spark"))
+        .env("BINANCE_PERP_ENDPOINT", format!("{feed_url}/perp"))
+        .env("KRAKEN_ENDPOINT", format!("{feed_url}/kraken"))
         // One missed sample is an outage here, so a test needs no 5 s wait.
         .env("SETTLE_TICK_TOLERANCE_MS", "1500")
         .envs(env.iter().copied())

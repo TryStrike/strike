@@ -6,7 +6,7 @@ import { SiteNav } from '@/components/SiteNav';
 import { WalletConnect } from '@/components/wallet';
 import { useEffect } from 'react';
 import { useStore } from '@/lib/store';
-import { PRICE_FEED_IDS, type AssetType } from '@/lib/utils/priceFeed';
+import { isAsset } from '@/lib/utils/priceFeed';
 
 export default function Trade() {
   const isTourOpen = useStore((state) => state.isTourOpen);
@@ -16,7 +16,7 @@ export default function Trade() {
   useEffect(() => {
     const asset = new URLSearchParams(window.location.search).get('asset')?.toUpperCase();
     if (!asset) return;
-    if (asset in PRICE_FEED_IDS) setSelectedAsset(asset as AssetType);
+    if (isAsset(asset)) setSelectedAsset(asset);
     window.history.replaceState(null, '', window.location.pathname);
   }, [setSelectedAsset]);
   return (

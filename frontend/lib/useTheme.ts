@@ -24,21 +24,25 @@ export function useAiModeToggle() {
   const router = useRouter();
   const pathname = usePathname();
   const inAi = isAiPath(pathname);
+  const target = inAi ? '/trade' : AI_ROUTE;
+
+  useEffect(() => {
+    router.prefetch(target);
+  }, [router, target]);
 
   const toggle = (e: { clientX: number; clientY: number }) => {
-    const href = inAi ? '/trade' : AI_ROUTE;
     const root = document.documentElement;
     root.style.setProperty('--burst-x', `${e.clientX}px`);
     root.style.setProperty('--burst-y', `${e.clientY}px`);
     if (!document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      router.push(href);
+      router.push(target);
       return;
     }
     document.startViewTransition(
       () =>
         new Promise<void>((resolve) => {
           finishTransition = resolve;
-          router.push(href);
+          router.push(target);
         })
     );
   };

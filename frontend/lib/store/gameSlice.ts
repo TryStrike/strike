@@ -42,6 +42,7 @@ export interface GameState {
   activeBets: ActiveBet[];
   settlingBets: ActiveBet[];
   maxBands: Record<string, number>;
+  closedAssets: string[];
   targetCells: TargetCell[];
   isPlacingBet: boolean;
   lastResult: {
@@ -91,6 +92,7 @@ export interface GameState {
   updatePrice: (price: number, asset?: AssetType) => void;
   updateAllPrices: (prices: Record<string, number>) => void;
   setMaxBands: (bands: Record<string, number>) => void;
+  setClosedAssets: (closed: string[]) => void;
 
   addActiveBet: (bet: ActiveBet) => void;
   clearError: () => void;
@@ -289,6 +291,8 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
       asset: bet.asset,
       endTime: bet.endTime ?? null,
       strikePrice: bet.strikePrice ?? null,
+      priceTop: bet.priceTop,
+      priceBottom: bet.priceBottom,
       target: {
         id: bet.mode === "binomo" ? "classic" : "box",
         label:
@@ -344,6 +348,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
     activeBets: [],
     settlingBets: [],
     maxBands: {},
+    closedAssets: [],
     targetCells: DEFAULT_TARGET_CELLS,
     isPlacingBet: false,
     lastResult: null,
@@ -657,6 +662,12 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
       }
 
       set(update as GameState);
+    },
+
+    setClosedAssets: (closed: string[]) => {
+      if (closed.join() !== get().closedAssets.join()) {
+        set({ closedAssets: closed });
+      }
     },
 
     setMaxBands: (bands: Record<string, number>) => {
