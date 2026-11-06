@@ -6,9 +6,17 @@ import { useAccount } from 'wagmi';
 import { Lightning, Play, Stop } from '@phosphor-icons/react';
 import { useStore } from '@/lib/store';
 import { Badge, Button, Field, Label, Segmented, cx } from '@/components/ui/kit';
-import { useAgent, type AgentSession, type Decision, type StartLimits } from '@/lib/agent/useAgent';
+import {
+  useAgent,
+  useWorldAttempt,
+  type AgentSession,
+  type Decision,
+  type StartLimits,
+  type WorldAttempt,
+} from '@/lib/agent/useAgent';
 
 const SettlementProof = dynamic(() => import('@/components/game/SettlementProof'), { ssr: false });
+const WorldCheck = dynamic(() => import('@/components/agent/WorldCheck'), { ssr: false });
 
 const MINUTES = [
   { value: 5, label: '5m' },
@@ -18,12 +26,18 @@ const MINUTES = [
 
 type Limits = Omit<StartLimits, 'asset'>;
 
+/** `agent::WAITING_FOR_HUMAN` in the Rust core. */
+const WAITING_FOR_HUMAN = 'Waiting for a human';
+
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
-  const { session, decisions, error, busy, start, stop, answer } = useAgent();
+  const { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle } = useAgent();
+  const [world, setWorld] = useWorldAttempt();
   const [limits, setLimits] = useState<Limits>({ mode: 'normal', budget: 20, maxPerTrade: 2, stopLoss: 5, minutes: 15 });
   const running = session?.status === 'running';
+  const newest = decisions.reduce<Decision | undefined>((a, d) => (!a || d.createdAt > a.createdAt ? d : a), undefined);
+  const waiting = running && newest?.verdict === 'blocked' && newest.reason === WAITING_FOR_HUMAN;
   const shown: Limits = running
     ? {
         mode: session.mode,
@@ -85,9 +99,27 @@ export function AgentPanel() {
       </section>
       <p className="-mt-3 text-xs text-faint">
         {shown.mode === 'yolo'
-          ? `One signature approves the budget. The agent trades ${running ? session.asset : asset} on its own at up to your per trade cap. Limits stay on.`
+          ? `The agent trades ${running ? session.asset : asset} on its own at up to your per trade cap. YOLO needs a fresh World ID check. One human, one YOLO agent. Budgets over 10 USDC need Orb, over 50 need Orb + face. At half the stop-loss it pauses until you check again.`
           : `You approve every trade on ${running ? session.asset : asset}. 1 USDC each, and a proposal you don't answer in 5 seconds is skipped.`}
       </p>
+
+      {waiting && (
+        <div className="flex flex-col gap-2">
+          <p role="status" className="rounded-2xl bg-down-soft px-4 py-3 text-sm text-down">
+            The agent lost half its stop-loss and paused. Confirm you are still here within 2 minutes or it stops.
+          </p>
+          <Button
+            size="lg"
+            onClick={() => {
+              setWorld(null);
+              checkpoint();
+            }}
+            disabled={busy}
+          >
+            <Play size={18} weight="fill" /> Continue with World ID
+          </Button>
+        </div>
+      )}
 
       {running ? (
         <Button variant="secondary" size="lg" onClick={stop} disabled={busy}>
@@ -96,12 +128,29 @@ export function AgentPanel() {
       ) : (
         <Button
           size="lg"
-          onClick={() => start({ ...limits, asset })}
+          onClick={() => {
+            setWorld(null);
+            start({ ...limits, asset });
+          }}
           disabled={busy || !address || limits.budget <= 0 || limits.maxPerTrade <= 0 || limits.stopLoss <= 0}
         >
-          <Play size={18} weight="fill" /> {address ? 'Sign and start' : 'Connect a wallet to start'}
+          <Play size={18} weight="fill" />{' '}
+          {!address ? 'Connect a wallet to start' : limits.mode === 'yolo' ? 'Sign and verify with World ID' : 'Sign and start'}
         </Button>
       )}
+
+      {challenge && (
+        <WorldCheck
+          key={challenge.attempt}
+          challenge={challenge}
+          onDone={(a) => {
+            settle(a);
+            setWorld(a);
+          }}
+        />
+      )}
+
+      {world && <HumanCheck attempt={world} />}
 
       {error && (
         <p role="alert" className="rounded-2xl bg-down-soft px-4 py-3 text-sm text-down">
@@ -152,6 +201,43 @@ function SessionStats({ session }: { session: AgentSession }) {
         value={`${Math.floor(left / 60_000)}:${String(Math.floor((left % 60_000) / 1000)).padStart(2, '0')}`}
       />
     </section>
+  );
+}
+
+const ACR: Record<string, string> = { orb: 'Orb', selfie: 'Selfie', 'orb-face': 'Orb + face' };
+
+const HUMAN_CHECK: Record<WorldAttempt['status'], { label: string; tone: 'up' | 'down' | 'neutral'; copy: (a: WorldAttempt) => string }> = {
+  approved: {
+    label: 'human verified',
+    tone: 'up',
+    copy: (a) => {
+      const acr = a.acr?.split('/').pop() ?? '';
+      return `Human verified, ${ACR[acr] ?? acr}`;
+    },
+  },
+  denied: { label: 'denied', tone: 'down', copy: (a) => `${a.reason}. No agent started, nothing spent.` },
+  expired: { label: 'expired', tone: 'neutral', copy: () => 'Human check expired. Nothing started.' },
+  mismatch: { label: 'mismatch', tone: 'down', copy: () => 'A different human approved this. This wallet belongs to someone else.' },
+  failed: { label: 'failed', tone: 'down', copy: (a) => a.reason },
+  pending: { label: 'pending', tone: 'neutral', copy: () => 'Waiting for World App. Finish there or sign again.' },
+  unknown: { label: 'used', tone: 'neutral', copy: (a) => a.reason },
+};
+
+const RESUME_CHECK: Partial<Record<WorldAttempt['status'], string>> = {
+  approved: 'Human verified, the agent resumed.',
+  denied: 'Human check denied. The agent stopped.',
+  mismatch: 'A different human answered. The agent stopped.',
+  expired: 'Human check expired.',
+};
+
+function HumanCheck({ attempt }: { attempt: WorldAttempt }) {
+  const c = HUMAN_CHECK[attempt.status];
+  const resume = attempt.kind === 'checkpoint' ? RESUME_CHECK[attempt.status] : undefined;
+  return (
+    <p role="status" className="-mt-3 flex items-start gap-2 text-sm text-muted">
+      <Badge tone={c.tone}>{c.label}</Badge>
+      <span>{resume ?? c.copy(attempt)}</span>
+    </p>
   );
 }
 

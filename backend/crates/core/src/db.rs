@@ -100,6 +100,41 @@ const MIGRATIONS: &[&str] = &[
        block     INTEGER \
      ) STRICT; \
      CREATE INDEX IF NOT EXISTS arkiv_seals_by_tx ON arkiv_seals (tx);",
+    // 5: World ID human checks that unlock YOLO agents.
+    "CREATE TABLE world_attempts (
+       id           TEXT PRIMARY KEY,
+       wallet       TEXT NOT NULL,
+       message      TEXT NOT NULL UNIQUE,
+       nonce        TEXT NOT NULL,
+       browser      TEXT NOT NULL,
+       acr_allowed  TEXT NOT NULL,
+       status       TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired', 'mismatch', 'failed')),
+       reason       TEXT,
+       acr          TEXT,
+       session_id   TEXT,
+       expires_at   INTEGER NOT NULL,
+       done_at      INTEGER,
+       created_at   INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
+     ) STRICT;
+     CREATE TABLE world_links (
+       wallet    TEXT PRIMARY KEY,
+       iss       TEXT NOT NULL,
+       sub       TEXT NOT NULL,
+       acr       TEXT,
+       linked_at INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX world_links_by_human ON world_links(iss, sub);",
+    // 6: house commitments of settled round epochs on Arc.
+    "CREATE TABLE round_commits (
+       epoch            INTEGER PRIMARY KEY,
+       root             TEXT NOT NULL,
+       rounds           INTEGER NOT NULL CHECK (rounds > 0),
+       tx_hash          TEXT NOT NULL,
+       created_at       INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000000 AS INTEGER))
+     ) STRICT;
+     CREATE INDEX bet_rounds_by_end ON bet_rounds(end_time);",
+    // 7: a World ID check also resumes a YOLO agent paused for its human.
+    "ALTER TABLE world_attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'start' CHECK (kind IN ('start', 'checkpoint'));",
 ];
 /// Where a file ends up. A file from a newer build is refused, not guessed at.
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;

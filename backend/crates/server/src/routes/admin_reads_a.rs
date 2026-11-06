@@ -29,10 +29,12 @@ use strike_core::admin_reads_a::{
     ListOptions, ListParams, TRANSACTION_STATUS_VALUES,
 };
 use strike_core::bets::value_to_string;
+use strike_core::db;
 use strike_core::error::{ApiError, ApiResult};
 use strike_core::platform_stats::{
     is_demo_bet, is_demo_wallet, number_or_zero, parse_epoch_ms, truthy,
 };
+use strike_core::world;
 
 use crate::bans::is_globally_banned;
 use crate::http::require_admin;
@@ -798,6 +800,7 @@ async fn run_wallet_insights(
         })
         .unwrap_or(Value::Null);
 
+    let human = world::human_of(db::db().await?, &address).await?;
     let mut body = Map::new();
     body.insert("query".into(), Value::String(address));
     body.insert(
@@ -805,6 +808,7 @@ async fn run_wallet_insights(
         Value::Array(variants.into_iter().map(Value::String).collect()),
     );
     body.insert("bannedGlobally".into(), Value::Bool(banned_globally));
+    body.insert("human".into(), human.unwrap_or(Value::Null));
     body.insert("balances".into(), Value::Array(balance_rows_out));
     body.insert("aggregates".into(), Value::Object(aggregates));
     body.insert("referral".into(), referral);

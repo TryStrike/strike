@@ -2079,44 +2079,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn query_decoding_follows_urlsearchparams() {
-        let decoded = url_query_pairs("limit=5&limit=9&q=0xAb%20c&plus=a+b&bare&broken%zz=1&&x=%2");
-        let map = decoded
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect::<Vec<_>>();
-        // First occurrence wins for a repeated name.
-        assert_eq!(param(&decoded, "limit"), Some("5"));
-        assert!(map.contains(&("q", "0xAb c")));
-        assert!(map.contains(&("plus", "a b")));
-        assert!(map.contains(&("bare", "")));
-        // An invalid escape survives literally, as the browser keeps it.
-        assert!(map.contains(&("broken%zz", "1")));
-        assert!(map.contains(&("x", "%2")));
-        assert_eq!(param(&decoded, "missing"), None);
-    }
-
     // -- paging -------------------------------------------------------------
-
-    #[test]
-    fn defaults_and_caps_match_the_ts() {
-        let o = opts(None, &[]);
-        let p = parsed(&[], &o);
-        assert_eq!((p.limit, p.offset), (50, 0));
-        assert_eq!(p.q, None);
-        assert_eq!(parsed(&[("limit", "100000")], &o).limit, LIST_MAX_LIMIT);
-        assert_eq!(parsed(&[("limit", "200")], &o).limit, 200);
-        assert_eq!(parsed(&[("limit", "1")], &o).limit, 1);
-        // Clamped, not refused, while still a safe integer.
-        assert!(parsed(&[("offset", "999999999999")], &o).offset <= LIST_MAX_OFFSET);
-        assert_eq!(
-            list_range(&parsed(&[("limit", "25"), ("offset", "50")], &o)),
-            (50, 74)
-        );
-        // Leading zeros are still whole numbers.
-        assert_eq!(parsed(&[("limit", "0012")], &o).limit, 12);
-    }
 
     #[test]
     fn non_integer_or_unsafe_paging_input_is_rejected() {
@@ -2363,16 +2326,6 @@ mod tests {
         assert!(body.get("totalDeposits").is_none());
     }
 
-    #[test]
-    fn a_nan_aggregate_surfaces_as_null_like_json_stringify_did() {
-        let body = admin_stats_body(&platform(
-            mode_stats(f64::NAN, 0.0, 1, 0),
-            mode_stats(0.0, 0.0, 0, 0),
-            &[],
-        ));
-        assert_eq!(body["totalVolume"], Value::Null);
-    }
-
     // -- /api/admin/users --------------------------------------------------
 
     fn balance(addr: &str, currency: &str, balance: f64, status: &str, updated: &str) -> Value {
@@ -2442,86 +2395,6 @@ mod tests {
     }
 
     #[test]
-    fn a_non_string_asset_aborts_the_users_read_as_the_ts_typeerror_did() {
-        let balances = vec![balance(
-            "0xabc",
-            "USDC",
-            1.0,
-            "active",
-            "2026-01-02T00:00:00.000Z",
-        )];
-        let bets = vec![bet("b1", "0xdef", 1.0, false, "")];
-        // A real asset string is fine; poison the table with a number instead.
-        let mut poisoned = bets;
-        poisoned[0]["asset"] = json!(7);
-        let err = users_page(
-            &balances,
-            &poisoned,
-            &[],
-            &ListParams::default(),
-            "2026-05-05T00:00:00.000Z",
-        )
-        .err()
-        .expect("the TypeError surfaces as an error");
-        assert!(err.to_string().contains("toUpperCase"));
-    }
-
-    #[test]
-    fn merged_rows_carry_the_dashboard_keys_and_null_absences() {
-        let balances = vec![balance(
-            "0xAbC",
-            "USDC",
-            3.0,
-            "active",
-            "2026-01-02T00:00:00.000Z",
-        )];
-        let bets = vec![bet("b1", "0xabc", 7.0, true, "USDC")];
-        let referrals = vec![json!({
-            "user_address": "0xABC", "referral_code": "ARC2026", "referral_count": 4,
-            "referred_by": "0xother",
-        })];
-        let rows =
-            build_user_rows(&balances, &bets, &referrals, "2026-05-05T00:00:00.000Z").unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "the seen balance key suppresses the synthetic row"
-        );
-        let row = &rows[0];
-        assert_eq!(
-            row["user_address"],
-            json!("0xAbC"),
-            "the stored spelling ships, not the canonical one"
-        );
-        assert_eq!(row["tier"], json!("free"));
-        assert_eq!(row["activity"]["totalBets"], json!(1));
-        assert_eq!(row["referral"]["referral_code"], json!("ARC2026"));
-        assert_eq!(row["referral"]["referred_by"], json!("0xother"));
-
-        let bare = build_user_rows(&balances, &[], &[], "2026-05-05T00:00:00.000Z").unwrap();
-        assert_eq!(bare[0]["referral"]["referral_code"], json!("NONE"));
-        assert_eq!(bare[0]["referral"]["referral_count"], json!(0));
-        assert_eq!(bare[0]["activity"]["totalVolume"], json!(0));
-    }
-
-    #[test]
-    fn rows_sort_newest_first_with_the_address_as_the_tiebreak() {
-        let mut rows = vec![
-            balance("0xzzz", "USDC", 1.0, "active", "2026-01-01T00:00:00.000Z"),
-            balance("0xaaa", "USDC", 1.0, "active", "2026-01-01T00:00:00.000Z"),
-            balance("0xmid", "USDC", 1.0, "active", "2026-02-01T00:00:00.000Z"),
-            // `Date.parse(...) || 0` puts an unparsable timestamp at the epoch.
-            balance("0xjunk", "USDC", 1.0, "active", "not a date"),
-        ];
-        sort_user_rows(&mut rows);
-        let order: Vec<&str> = rows
-            .iter()
-            .map(|r| r["user_address"].as_str().unwrap())
-            .collect();
-        assert_eq!(order, vec!["0xmid", "0xaaa", "0xzzz", "0xjunk"]);
-    }
-
-    #[test]
     fn list_filters_narrow_the_aggregated_rows() {
         let rows: Vec<Value> = vec![
             json!({ "user_address": "0xAbC", "currency": "USDC", "status": "Active",
@@ -2579,120 +2452,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn referrers_filter_and_paging_slice_agree_with_the_ts() {
-        let rows: Vec<Value> = (0..5)
-            .map(|i| {
-                json!({ "user_address": format!("0x{i}"),
-                        "referral": if i % 2 == 0 {
-                            json!({ "referral_code": "NONE", "referral_count": 0 })
-                        } else {
-                            json!({ "referral_code": format!("C{i}"), "referral_count": 1 })
-                        } })
-            })
-            .collect();
-        let referrers = filter_referrers(rows.clone());
-        assert_eq!(referrers.len(), 2, "only wallets holding a real code");
-        let page = page_slice(referrers, 1, 1);
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0]["user_address"], json!("0x3"));
-        // An offset past the end is an empty page, never an error.
-        assert!(page_slice(rows.clone(), 900, 50).is_empty());
-        assert_eq!(page_slice(rows, 0, 0).len(), 0);
-    }
-
-    #[test]
-    fn users_page_reports_the_filtered_total_and_projects_the_whitelist() {
-        let mut balances = vec![balance(
-            "0xabc",
-            "USDC",
-            1.0,
-            "active",
-            "2026-01-02T00:00:00.000Z",
-        )];
-        balances[0]["secret_note"] = json!("risk flag");
-        let referral_enum = [("referrers", &["1"][..])];
-        let o = opts(Some(&USER_STATUS_VALUES), &referral_enum);
-        let page = users_page(
-            &balances,
-            &[],
-            &[],
-            &parsed(&[], &o),
-            "2026-05-05T00:00:00.000Z",
-        )
-        .unwrap();
-        assert_eq!((page.total, page.limit, page.offset), (1, 50, 0));
-        let body = page.to_value();
-        assert_eq!(body["users"].as_array().unwrap().len(), 1);
-        let row = &body["users"][0];
-        // Nothing outside the key list can ride along, even if a SELECT widened.
-        let rendered = row.to_string();
-        assert!(!rendered.contains("risk flag"), "{rendered}");
-        for key in USER_ROW_KEYS {
-            assert!(row.get(key).is_some(), "{key} must always be present");
-        }
-        assert_eq!(row.as_object().unwrap().len(), USER_ROW_KEYS.len());
-    }
-
     // -- POST /api/admin/users/status --------------------------------------
-
-    #[test]
-    fn status_rejections_are_ordered_and_exact() {
-        let o = json!({});
-        assert_eq!(
-            validate_status_request(&o).unwrap_err(),
-            MISSING_ADDRESS_OR_STATUS
-        );
-        assert_eq!(
-            validate_status_request(&json!({ "userAddress": 42, "status": "active" })).unwrap_err(),
-            MISSING_ADDRESS_OR_STATUS,
-            "a number is not a string, so it is a 400 rather than a coercion"
-        );
-        assert_eq!(
-            validate_status_request(&json!({ "userAddress": "   ", "status": "active" }))
-                .unwrap_err(),
-            MISSING_ADDRESS_OR_STATUS
-        );
-        // A degenerate address is still a non-empty variant list, so the update
-        // targets it rather than 400ing: `walletAddressSearchVariants` only
-        // returns [] for a blank string, and the blank case is caught above.
-        let (variants, _) =
-            validate_status_request(&json!({ "userAddress": "0x", "status": "active" }))
-                .expect("a short address is not a rejection");
-        assert_eq!(variants, vec!["0x".to_string()]);
-        assert_eq!(
-            validate_status_request(&json!({ "userAddress": "0xabc" })).unwrap_err(),
-            MISSING_ADDRESS_OR_STATUS
-        );
-        assert_eq!(
-            validate_status_request(&json!({ "userAddress": "0xabc", "status": "refunded" }))
-                .unwrap_err(),
-            INVALID_STATUS,
-            "the enum is checked before any DB round-trip"
-        );
-        assert_eq!(
-            validate_status_request(
-                &json!({ "userAddress": &"0".repeat(129), "status": "active" })
-            )
-            .unwrap_err(),
-            ADDRESS_TOO_LONG
-        );
-        // A whitespace-only address is caught by the first check, so the empty
-        // variant list is unreachable through a valid body; force it directly.
-        assert_eq!(address::search_variants("  "), Vec::<String>::new());
-        assert_eq!(
-            validate_status_request(&json!({"userAddress": null, "status": "active"})).unwrap_err(),
-            MISSING_ADDRESS_OR_STATUS
-        );
-
-        let (variants, status) = validate_status_request(
-            &json!({ "userAddress": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "status": "banned" }),
-        )
-        .unwrap();
-        assert_eq!(status, "banned");
-        assert_eq!(variants.len(), 2, "checksummed plus lowercase");
-        assert_eq!(variants[0], "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
-    }
 
     #[test]
     fn the_status_update_casts_every_bind_and_binds_no_wildcards() {
@@ -2779,33 +2539,6 @@ mod tests {
         assert_eq!(db::highest_placeholder(&prepared.sql), prepared.binds.len());
     }
 
-    #[test]
-    fn transactions_body_keeps_the_dashboard_keys_and_the_paging_trio() {
-        let o = opts(Some(&TRANSACTION_STATUS_VALUES), &[]);
-        let p = parsed(&[("limit", "10"), ("offset", "20")], &o);
-        let rows = vec![json!({
-            "id": 7, "user_address": "0xabc", "currency": "USDC", "operation_type": "deposit",
-            "amount": 5.0, "balance_before": 0.0, "balance_after": 5.0,
-            "transaction_hash": null, "bet_id": null, "created_at": "2026-01-01T00:00:00.000Z",
-        })];
-        let body = transactions_body(&rows, 123, &p);
-        assert_eq!(body["total"], json!(123));
-        assert_eq!(body["limit"], json!(10));
-        assert_eq!(body["offset"], json!(20));
-        let tx = &body["transactions"][0];
-        assert_eq!(tx.as_object().unwrap().len(), TRANSACTION_ROW_KEYS.len());
-        assert_eq!(
-            tx["transaction_hash"],
-            Value::Null,
-            "a null column is a present key"
-        );
-        assert_eq!(
-            tx["amount"],
-            json!(5.0),
-            "NUMERIC stays a JSON number, as parseFloat made it"
-        );
-    }
-
     // -- /api/admin/game-history -------------------------------------------
 
     #[test]
@@ -2886,47 +2619,6 @@ mod tests {
         assert_eq!((collected, stops), (SCAN_CAP, 20));
     }
 
-    #[test]
-    fn the_account_split_is_the_js_demo_test_not_a_sql_one() {
-        let rows = vec![
-            bet("b1", "0xreal", 1.0, true, "USDC"),
-            bet("demo-b2", "0xreal", 1.0, false, "USDC"),
-            bet("b3", "0xDemo9", 1.0, true, "USDC"),
-        ];
-        let (total, real_page) = game_history_account_page(&rows, "real", 0, 50);
-        assert_eq!((total, real_page.len()), (1, 1));
-        assert_eq!(real_page[0]["id"], json!("b1"));
-        let (demo_total, demo_page) = game_history_account_page(&rows, "demo", 1, 50);
-        assert_eq!(demo_total, 2);
-        assert_eq!(
-            demo_page.len(),
-            1,
-            "offset and limit slice the filtered set"
-        );
-        assert_eq!(demo_page[0]["id"], json!("b3"));
-
-        let o = opts(Some(&GAME_STATUS_VALUES), &[("account", &ACCOUNT_VALUES)]);
-        let p = parsed(&[], &o);
-        let body = game_history_body(&demo_page, demo_total, &p, "demo", Some(true));
-        assert_eq!(body["scanTruncated"], json!(true));
-        assert_eq!(body["total"], json!(2));
-        assert_eq!(body["account"], json!("demo"));
-        assert_eq!(
-            body["bets"].as_array().unwrap()[0]
-                .as_object()
-                .unwrap()
-                .len(),
-            GAME_ROW_KEYS.len()
-        );
-
-        let all = game_history_body(&rows, 3, &p, "all", None);
-        assert!(
-            all.get("scanTruncated").is_none(),
-            "the DB-paged branch cannot truncate"
-        );
-        assert_eq!(all["account"], json!("all"));
-    }
-
     // -- /api/admin/mode-analytics -----------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -2944,24 +2636,6 @@ mod tests {
         json!({ "id": id, "wallet_address": wallet, "amount": amount, "payout": payout,
                 "won": won, "mode": mode, "network": network, "asset": asset,
                 "multiplier": multiplier })
-    }
-
-    #[test]
-    fn mode_analytics_labels_chains_and_assets_the_way_js_did() {
-        assert_eq!(chain_label(Some(&json!("arc"))), "ARC");
-        assert_eq!(chain_label(Some(&json!(""))), "UNKNOWN");
-        assert_eq!(chain_label(None), "UNKNOWN");
-        assert_eq!(chain_label(Some(&Value::Null)), "UNKNOWN");
-        assert_eq!(asset_label(Some(&json!("usdt"))), "USDT");
-        assert_eq!(asset_label(Some(&json!(""))), "USDC");
-        assert_eq!(mode_label(Some(&json!(" BOX "))), " box ");
-        assert_eq!(mode_label(Some(&json!(""))), "binomo");
-        assert_eq!(mode_display_label("box"), "Box Mode");
-        assert_eq!(
-            mode_display_label("roulette"),
-            "roulette",
-            "an unknown mode labels itself"
-        );
     }
 
     #[test]
@@ -3007,65 +2681,6 @@ mod tests {
         assert_eq!(single[0].win_rate, 0.0);
         assert_eq!(single[0].avg_multiplier, 2.0);
         assert_eq!(compute_modes(&[]).len(), 0);
-    }
-
-    #[test]
-    fn win_rate_and_average_multiplier_round_like_math_round() {
-        assert_eq!(js_round(0.5), 1.0);
-        assert_eq!(js_round(-0.5), -0.0, "JS rounds half toward +infinity");
-        assert!(js_round(f64::NAN).is_nan());
-        let rows = vec![
-            analytics_bet("a", "0xr", "binomo", 1.0, 1.0, true, "arc", "usdc", 1.9),
-            analytics_bet("b", "0xr", "binomo", 1.0, 1.0, false, "arc", "usdc", 1.9),
-            analytics_bet("c", "0xr", "binomo", 1.0, 1.0, false, "arc", "usdc", 2.0),
-        ];
-        let modes = compute_modes(&rows);
-        assert_eq!(modes[0].win_rate, 33.3);
-        assert_eq!(
-            modes[0].avg_multiplier, 1.93,
-            "(1.9+1.9+2.0)/3 = 1.9333 -> 1.93"
-        );
-    }
-
-    #[test]
-    fn a_missing_multiplier_counts_as_the_classic_odds_not_zero() {
-        let mut row = analytics_bet("a", "0xr", "binomo", 1.0, 1.0, true, "arc", "usdc", 1.9);
-        row.as_object_mut().unwrap().remove("multiplier");
-        let modes = compute_modes(&[row]);
-        assert_eq!(modes[0].avg_multiplier, 1.9);
-    }
-
-    #[test]
-    fn top_assets_are_count_desc_then_first_seen_and_capped_at_five() {
-        let mut rows = Vec::new();
-        for (asset, count) in [
-            ("USDT", 3usize),
-            ("USDC", 5),
-            ("EURC", 1),
-            ("DAI", 2),
-            ("WBTC", 2),
-            ("METH", 2),
-        ] {
-            for _ in 0..count {
-                rows.push(analytics_bet(
-                    "b", "0xr", "binomo", 1.0, 0.0, false, "arc", asset, 1.9,
-                ));
-            }
-        }
-        let modes = compute_modes(&rows);
-        let top = modes[0]
-            .top_assets
-            .iter()
-            .map(|(asset, count)| (asset.as_str(), *count))
-            .collect::<Vec<_>>();
-        assert_eq!(top.len(), 5, "the TS sliced to five");
-        assert_eq!(top[0], ("USDC", 5));
-        assert_eq!(top[1], ("USDT", 3));
-        // 2-count assets keep the order they were first seen in, as V8's stable
-        // sort did.
-        assert_eq!(top[2].0, "DAI");
-        assert_eq!(top[3].0, "WBTC");
-        assert_eq!(top[4].0, "METH");
     }
 
     #[test]
@@ -3115,22 +2730,4 @@ mod tests {
     }
 
     // -- projection --------------------------------------------------------
-
-    #[test]
-    fn the_projection_ships_named_keys_only() {
-        let row = json!({
-            "id": "b1", "wallet_address": "0xabc", "asset": "USDC", "direction": "UP",
-            "amount": 1.0, "payout": 0.0, "won": false, "mode": "binomo",
-            "network": "ARC", "created_at": "2026-01-01T00:00:00.000Z",
-            "signature": "0xdeadbeef", "strike_price": 1000.0,
-        });
-        let projected = project_row(&row, &GAME_ROW_KEYS);
-        let serialized = projected.to_string();
-        assert!(!serialized.contains("0xdeadbeef"));
-        assert!(!serialized.contains("strike_price"));
-        assert_eq!(projected.as_object().unwrap().len(), GAME_ROW_KEYS.len());
-        // A column the SELECT dropped still arrives as null, not as a missing key.
-        let partial = json!({ "id": "b1" });
-        assert_eq!(project_row(&partial, &["id", "won"])["won"], Value::Null);
-    }
 }

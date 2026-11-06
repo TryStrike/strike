@@ -7,7 +7,7 @@
 | **Live (Arc Testnet)** | https://ethglobalmumbai.vercel.app/ |
 | **Trade** | https://ethglobalmumbai.vercel.app/trade |
 | **Arc Studio** | https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd |
-| **Treasury (testnet)** | [`0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A`](https://explorer.testnet.arc.io/address/0x1aE19F0dF3062e154b94b7AF43Cc5A884184De7A) |
+| **Treasury (testnet)** | [`0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871`](https://explorer.testnet.arc.io/address/0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871) |
 | **Deck** | [Google Slides](https://docs.google.com/presentation/d/1gPwWqA6F5mqtdAjCApLNCzE-zLr99AYG1fzq4zLuQyY/edit?usp=sharing) |
 | **GitHub** | https://example.com/strike |
 
@@ -15,21 +15,53 @@ This repo settles on **Arc only**. Players deposit **USDC**, trade binary rounds
 
 ---
 
-## ETHGlobal Mumbai — Arc track
+## ETHGlobal Mumbai
+
+Tracks: Arc (main), World ID Agent Pass. Architecture: [`docs/architecture.md`](docs/architecture.md). Demo order: [`docs/demo-script.md`](docs/demo-script.md).
 
 **Arc Studio project:** https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd
 
-### Before the hackathon
+### Before and during the hackathon
 
-Strike was a working binary options dapp that had been ported across several chains, most recently BOT Chain (native BOT + USDT). The codebase still carried integrations for about ten networks, a staking product, and a treasury contract designed for a separate native coin and ERC-20.
+Hacking starts Nov 5, 21:00 IST. Commit dates in `git log` are the record.
 
-### During the hackathon
+Strike was a working binary options dapp ported across several chains, most recently BOT Chain (native BOT + USDT), with about ten network integrations, a staking product and a treasury built for a native coin plus an ERC-20.
 
-- **Pruned to Arc only** — removed every other chain, staking, dead code and unused packages (~26.8k lines), driven by knip and `tsc --noUnusedLocals`.
-- **USDC-only `StrikeTreasury`** — rewritten for Arc, where native USDC and the ERC-20 interface share one balance: no payable paths, `depositToken`, `withdrawTokenTo`, batched payouts, pause and two-step ownership.
-- **Treasury contract is now the money path** — deposits land in the contract, payouts go through `withdrawTokenTo` signed by the owner key (previously an EOA).
-- **Decimals fix** — the app treated USDC as native with 6 decimals; native USDC on Arc has 18. Everything now goes through the 6-decimal ERC-20 interface.
-- **Testnet end to end** — Arc Testnet config, deploy scripts driven by env.
+Before kickoff:
+
+- **Oct 26, Arc port.** Pruned to Arc only (every other chain, staking, ~26.8k lines of dead code). USDC-only `StrikeTreasury` with `depositToken`, `withdrawTokenTo`, batched payouts, pause and two-step ownership. USDC moves only through the 6 decimal ERC-20 interface.
+- **Oct 31 to Nov 1.** Backend moved from Next routes to Rust (axum) and SQLite.
+- **Nov 3, merged to `main` at `a78c7d2`.** Agent engine (normal and YOLO), copilot, capped operator treasury with payout refs, CCTP and round proofs.
+- **Nov 5, 01:51 to 02:47 IST, branch `feat/side-tracks` (`c90aa13..eb16b39`).** World ID step-up gate for YOLO, epoch Merkle commits and `/api/proofs/*`, the World chip, the onchain proof block and the epoch strip.
+
+During the event: `TODO` list the commits after Nov 5, 21:00 IST with their range (`git log --since="2026-11-05 21:00 +0530"`).
+
+### World ID: human-backed YOLO
+
+**What.** A YOLO agent spends USDC with no tap per trade. It starts only after a live human approves in World App. One human, one YOLO agent. Bans follow the human across wallets. Normal mode, where every trade waits for a tap, needs no World.
+
+**How.** IDKit 4.0 on developer.world.org, checked and verified in Rust. World IdP OIDC stays as the fallback when no IDKit app is set. Local setup and test cases: [`docs/world.md`](docs/world.md).
+
+- `POST /api/agent/start` in YOLO mode saves a pending attempt and answers `401` with `WWW-Authenticate` and `world`: app id, action `strike-yolo`, signal, preset and an `rp_context` the server signs with `WORLD_RP_SIGNING_KEY`.
+- The signal is `sha256(attempt id + signed start message)`, so a proof is for those exact terms only. The action is fixed, so the nullifier is one stable id per human.
+- The widget's result goes to `POST /api/world/attempts/{id}/proof`. Rust checks the browser cookie, environment, action, signed nonce, signal hash and proof class, then forwards it to `/api/v4/verify/{rp_id}`.
+- One write checks the attempt is still pending, the same human owns the wallet, no linked wallet is banned and the human runs no other YOLO, then creates the session.
+- The required proof grows with the budget: selfie up to `WORLD_SELFIE_MAX` (10), Orb up to `WORLD_ORB_MAX` (50), Orb plus a live face above.
+- Cancel, expiry, another browser, another human, a banned human, a second YOLO or too low an assurance leave no session and no bet. `GET /api/world/attempts/{id}` drives the chip on `/agent`.
+- Human checkpoint: once a YOLO agent loses half its stop-loss it pauses with "Waiting for a human" and places nothing. `POST /api/agent/checkpoint` returns the same `401` step-up and only the linked human's nullifier passes. Approval resumes it in one write. Cancel, another human, a ban or 2 minutes with no answer stops it.
+- After approval the agent loop never calls World. It only reads checkpoint results from the DB.
+
+**Where.** `backend/crates/core/src/world.rs`, `backend/crates/server/src/routes/world.rs`, `backend/crates/server/src/routes/agent.rs`, `frontend/lib/agent/useAgent.ts`, `frontend/components/agent/AgentPanel.tsx`. Tables `world_attempts` and `world_links` in `backend/crates/core/src/db.rs`.
+
+**Run.** Create an app at https://developer.world.org, then set `NEXT_PUBLIC_WORLD_APP_ID`, `WORLD_RP_ID` and `WORLD_RP_SIGNING_KEY` in the root `.env.local` (see `.env.example`). `WORLD_ENVIRONMENT=staging` takes proofs from the simulator at https://simulator.worldcoin.org. Without an IDKit app or an OIDC client YOLO start answers `503`. Open `/agent`, pick YOLO, sign. Unit tests: `cargo test --manifest-path backend/Cargo.toml -p strike-core --lib world::`.
+
+Debrief: [`docs/world-debrief.md`](docs/world-debrief.md).
+
+### Settlement proofs on Arc
+
+Every 10 minutes, after the epoch closes plus 60 s, the Rust committer sends `StrikeTreasury.commitRounds(epoch, root, count)`. The root is a sorted-pair Merkle root over one leaf per settled round. `GET /api/proofs/bet/{id}` returns the bet's leaf and Merkle proof, and the proof modal folds it to the committed root in the browser. `/history` lists the latest committed epochs with their Arc tx.
+
+**Where.** `backend/crates/core/src/proofs.rs`, `backend/crates/server/src/routes/proofs.rs`, `frontend/components/game/OnchainProof.tsx`, `frontend/components/history/EpochStrip.tsx`. Set `PROOFS_START_EPOCH` so the committer never backfills history.
 
 ---
 
@@ -193,6 +225,8 @@ Net amount is what is credited on deposit or sent on withdrawal. Blitz entry fee
 ---
 
 ## Architecture
+
+Whole system with World and the settlement proofs, plus sequence diagrams: [`docs/architecture.md`](docs/architecture.md).
 
 ### State (Zustand — `lib/store/`)
 

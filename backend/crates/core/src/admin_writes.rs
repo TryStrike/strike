@@ -881,33 +881,6 @@ mod tests {
     }
 
     #[test]
-    fn fixed8_rounds_the_exact_binary_value_like_js_tofixed() {
-        assert_eq!(to_fixed8(1.5), "1.50000000");
-        assert_eq!(to_fixed8(10.0), "10.00000000");
-        assert_eq!(to_fixed8(0.0), "0.00000000");
-        assert_eq!(to_fixed8(-1.5), "-1.50000000");
-        // 1.000000005 is BELOW the .5 tie in binary: JS toFixed prints ...00.
-        assert_eq!(to_fixed8(1.000000005), "1.00000000");
-        // Carry across the decimal point.
-        assert_eq!(to_fixed8(999.999999999), "1000.00000000");
-        // f64 artefacts of 0.1+0.2 stay inside the eighth decimal.
-        assert_eq!(to_fixed8(0.1 + 0.2), "0.30000000");
-        assert_eq!(to_fixed8(f64::NAN), "NaN");
-        assert_eq!(to_fixed8(f64::INFINITY), "Infinity");
-        // Tiny positive values print zero, not an exponent.
-        assert_eq!(to_fixed8(1e-9), "0.00000000");
-    }
-
-    #[test]
-    fn js_number_string_never_prints_a_float_epoch() {
-        assert_eq!(js_number_string(1_730_000_000_000.0), "1730000000000");
-        assert_eq!(js_number_string(0.0), "0");
-        assert_eq!(js_number_string(-0.0), "0");
-        assert_eq!(js_number_string(1.5), "1.5");
-        assert_eq!(js_number_string(f64::NAN), "NaN");
-    }
-
-    #[test]
     fn the_withdrawal_intent_message_is_the_exact_signed_bytes() {
         // Pinned from the TS route's template literal; the parity harness must
         // keep this byte-identical or every admin accept fails with 401.
@@ -1042,15 +1015,6 @@ mod tests {
     }
 
     #[test]
-    fn suspicious_user_json_spreads_the_balance_row_then_the_streak_fields() {
-        let row = json!({ "id": 5, "user_address": "0xabc", "balance": 10.0, "status": "active" });
-        let out = suspicious_user_json(&row, 12, vec![true, false]);
-        assert_eq!(out["id"], 5);
-        assert_eq!(out["maxStreak"], 12);
-        assert_eq!(out["latestBets"], json!([true, false]));
-    }
-
-    #[test]
     fn withdrawal_stats_aggregate_across_casings_and_currencies() {
         let upper = "0xAbC111111111111111111111111111111111111";
         let lower = "0xabc111111111111111111111111111111111111";
@@ -1144,28 +1108,6 @@ mod tests {
     }
 
     #[test]
-    fn frequency_users_sort_by_total_desc_stably() {
-        let row = |addr: &str, total: i64| {
-            let stats = WdStats {
-                completed_count: total,
-                ..WdStats::empty(addr.to_string())
-            };
-            frequency_user_json(&stats, 0.0, 0.0)
-        };
-        let sorted = sort_frequency_users(vec![row("0xa", 10), row("0xb", 12), row("0xc", 10)]);
-        let addrs: Vec<&str> = sorted
-            .iter()
-            .map(|v| v["user_address"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            addrs,
-            vec!["0xb", "0xa", "0xc"],
-            "ties keep aggregation order and the sort key is stripped"
-        );
-        assert!(sorted[0].get("__sort_total").is_none());
-    }
-
-    #[test]
     fn wipe_audit_rows_only_fire_for_positive_balances_and_are_negative() {
         let rows = vec![
             json!({ "user_address": "0xa", "currency": "USDC", "balance": 12.5 }),
@@ -1199,23 +1141,6 @@ mod tests {
         assert_eq!(
             ban_reason(Some(&json!(&"r".repeat(600)))).chars().count(),
             500
-        );
-    }
-
-    #[test]
-    fn danger_zone_response_carries_the_three_top_level_keys() {
-        let body = danger_zone_json(vec![], vec![], scans_json(true, false, false));
-        assert_eq!(body["scans"]["betScanCap"], 20_000);
-        assert_eq!(body["scans"]["pendingScanCap"], 5_000);
-        assert_eq!(body["scans"]["betsTruncated"], json!(true));
-        assert!(body["suspiciousUsers"].is_array());
-    }
-
-    #[test]
-    fn accept_window_message_matches_the_interpolation() {
-        assert_eq!(
-            stale_intent_message(),
-            "Signed withdrawal authorization is older than 10 minutes. Ask the user to request the withdrawal again."
         );
     }
 

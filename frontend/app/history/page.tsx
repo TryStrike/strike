@@ -2,6 +2,7 @@
 
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -59,6 +60,8 @@ import {
 } from '@/lib/store/historySlice';
 import { useArkivSeals } from '@/lib/arkiv';
 import { ArkivSummary } from '@/components/arkiv/ArkivSummary';
+
+const EpochStrip = dynamic(() => import('@/components/history/EpochStrip'), { ssr: false });
 
 interface LoadedPage {
   wallet: string;
@@ -398,6 +401,8 @@ function HistoryPageInner() {
               </>
             )}
           </section>
+
+          <EpochStrip />
 
         </div>
       </main>

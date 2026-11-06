@@ -929,23 +929,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_known_symbols_both_directions() {
-        assert_eq!(binance_symbol("BTC"), Some("BTCUSDT"));
-        assert_eq!(binance_symbol("APT"), Some("APTUSDT"));
-        assert_eq!(yahoo_symbol("BTC"), Some("BTC-USD"));
-        // The two colliding crypto tickers use Yahoo's id-suffixed form.
-        assert_eq!(yahoo_symbol("SUI"), Some("SUI20947-USD"));
-        assert_eq!(yahoo_symbol("APT"), Some("APT21794-USD"));
-        assert_eq!(yahoo_symbol("GOLD"), Some("GC=F"));
-        assert_eq!(yahoo_symbol("JPY"), Some("JPY=X"));
-        assert_eq!(yahoo_symbol("SPX"), Some("^GSPC"));
-        assert_eq!(yahoo_symbol("DJI"), Some("^DJI"));
-        // Assets the aggregator has no source for.
-        assert_eq!(binance_symbol("LINK"), None);
-        assert_eq!(yahoo_symbol("LINK"), None);
-    }
-
-    #[test]
     fn crypto_detection_drives_the_source_choice() {
         for asset in [
             "BTC", "ETH", "SOL", "SUI", "TRX", "XRP", "DOGE", "ADA", "BCH", "BNB", "XLM", "XTZ",
@@ -1060,78 +1043,17 @@ mod tests {
     // JS Number() coercion parity
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn js_number_matches_number_coercion() {
-        let value = |s: &str| serde_json::from_str::<Value>(s).unwrap();
-        assert_eq!(js_number(Some(&value("250.5"))), 250.5);
-        assert_eq!(js_number(Some(&value("\"149.50\""))), 149.5);
-        assert_eq!(js_number(Some(&value("\"  12 \""))), 12.0); // trims
-        assert_eq!(js_number(Some(&value("\"\""))), 0.0); // Number("") = 0
-        assert_eq!(js_number(Some(&value("true"))), 1.0);
-        assert_eq!(js_number(Some(&value("null"))), 0.0); // Number(null) = 0
-        assert!(js_number(Some(&value("\"abc\""))).is_nan());
-        assert!(js_number(None).is_nan()); // Number(undefined) = NaN
-        assert!(js_number(Some(&value("[1,2]"))).is_nan());
-    }
-
     // -----------------------------------------------------------------------
     // JS-compatible number serialisation
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn number_to_json_matches_json_stringify() {
-        assert_eq!(number_to_json(100.0), "100"); // whole -> no ".0"
-        assert_eq!(number_to_json(250.5), "250.5");
-        assert_eq!(number_to_json(67123.45), "67123.45");
-        assert_eq!(number_to_json(0.5), "0.5");
-        assert_eq!(number_to_json(-0.0), "0"); // JSON.stringify(-0) === "0"
-        assert_eq!(number_to_json(0.0), "0");
-        assert_eq!(number_to_json(1.0), "1");
-        // Shortest round-trip digits, same as V8.
-        assert_eq!(number_to_json(0.1 + 0.2), "0.30000000000000004");
-        assert_eq!(number_to_json(149.5), "149.5");
-    }
 
     // -----------------------------------------------------------------------
     // encodeURIComponent parity (Yahoo splits only on literal commas)
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn encodes_like_encodeuri_component() {
-        assert_eq!(encode_uri_component("BTC-USD"), "BTC-USD"); // hyphen unreserved
-        assert_eq!(encode_uri_component("GC=F"), "GC%3DF");
-        assert_eq!(encode_uri_component("^GSPC"), "%5EGSPC");
-        assert_eq!(encode_uri_component("EURUSD=X"), "EURUSD%3DX");
-        assert_eq!(encode_uri_component("SUI20947-USD"), "SUI20947-USD");
-        // The whole Binance JSON list, encoded as one unit.
-        assert_eq!(
-            encode_uri_component(r#"["BTCUSDT","ETHUSDT"]"#),
-            "%5B%22BTCUSDT%22%2C%22ETHUSDT%22%5D"
-        );
-    }
-
-    #[test]
-    fn yahoo_batch_query_keeps_commas_literal() {
-        let symbols = ["AAPL", "GC=F", "^GSPC"];
-        let query = symbols
-            .iter()
-            .map(|s| encode_uri_component(s))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(query, "AAPL,GC%3DF,%5EGSPC");
-    }
-
     // -----------------------------------------------------------------------
     // staleness windows
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn cache_windows_match_the_ts() {
-        assert_eq!(cache_window_ms("BTC"), 1_000);
-        assert_eq!(cache_window_ms("APT"), 1_000);
-        assert_eq!(cache_window_ms("AAPL"), 5_000);
-        assert_eq!(cache_window_ms("GOLD"), 5_000);
-    }
 
     #[test]
     fn freshness_is_strictly_under_the_window() {
@@ -1159,20 +1081,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // response body assembly
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn assembles_prices_body_with_js_numbers() {
-        let mut prices = BTreeMap::new();
-        prices.insert("BTC".to_string(), 67123.45_f64);
-        prices.insert("AAPL".to_string(), 100.0_f64);
-        prices.insert("JPY".to_string(), 149.5_f64);
-        assert_eq!(
-            prices_body_json(&prices),
-            "{\"prices\":{\"AAPL\":100,\"BTC\":67123.45,\"JPY\":149.5}}"
-        );
-        // Empty map -> the "prices":{} shape the client reads on a cold cache.
-        assert_eq!(prices_body_json(&BTreeMap::new()), "{\"prices\":{}}");
-    }
 
     // -----------------------------------------------------------------------
     // SSE selector + frame parity

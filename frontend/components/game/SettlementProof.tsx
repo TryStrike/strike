@@ -10,6 +10,8 @@ const ArkivSeal = dynamic(() => import('@/components/arkiv/ArkivSeal'), {
   ssr: false,
 });
 
+const OnchainProof = dynamic(() => import('./OnchainProof'), { ssr: false });
+
 export interface SettlementTick {
   timestamp: number;
   price: number;
@@ -457,6 +459,7 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
           </div>
 
           {!demo ? <ArkivSeal betId={bet.betId} ledgerPayout={proof.payout} /> : null}
+          {!demo && <OnchainProof betId={bet.betId} />}
 
           <div className="mt-3 flex items-center justify-between gap-2 rounded-3xl bg-ink/[0.03] px-4 py-3">
             <div className="min-w-0">

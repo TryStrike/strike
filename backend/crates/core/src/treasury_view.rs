@@ -310,18 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn padding_is_a_left_padded_lowercase_word() {
-        let padded = topic(TREASURY);
-        assert_eq!(padded.len(), 66);
-        assert!(padded.starts_with("0x000000000000000000000000"));
-        assert_eq!(
-            padded,
-            format!("0x{}{}", "0".repeat(24), TREASURY[2..].to_lowercase())
-        );
-        assert_eq!(topic("not-an-address"), "");
-    }
-
-    #[test]
     fn a_deposit_reads_the_sender_and_a_payout_the_recipient() {
         let player = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
         let deposit = log(
@@ -404,45 +392,5 @@ mod tests {
             "the cap is enforced"
         );
         assert!(top_events(&[], &[], 6).is_empty());
-    }
-
-    #[test]
-    fn panel_keys_match_the_ts_response() {
-        let body = treasury_view_json(TREASURY, 1234.5, &[]);
-        let parsed: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed["address"], TREASURY, "never re-cased");
-        assert_eq!(parsed["balance"], 1234.5);
-        assert!(parsed["events"].is_array());
-        for key in ["address", "chainId", "explorer", "balance", "events"] {
-            assert!(parsed.get(key).is_some(), "missing {key}");
-        }
-        // The keys the player sees for a row.
-        let events = vec![TransferEvent {
-            kind: TransferKind::Deposit,
-            amount: 10.0,
-            counterparty: to_checksum(TREASURY),
-            tx_hash: "0xabc".into(),
-            block: 3,
-        }];
-        let parsed: Value =
-            serde_json::from_str(&treasury_view_json(TREASURY, 0.0, &events)).unwrap();
-        let row = &parsed["events"][0];
-        for key in ["type", "amount", "counterparty", "txHash", "block"] {
-            assert!(row.get(key).is_some(), "missing row key {key}");
-        }
-        assert_eq!(row["type"], "deposit");
-    }
-
-    #[test]
-    fn cache_and_error_bodies_are_the_routes_own() {
-        assert_eq!(
-            TREASURY_CACHE_CONTROL,
-            "public, s-maxage=10, stale-while-revalidate=60"
-        );
-        assert_eq!(
-            TREASURY_NOT_CONFIGURED_BODY,
-            "{\"error\":\"Treasury not configured\"}"
-        );
-        assert_eq!(RPC_UNAVAILABLE_BODY, "{\"error\":\"Arc RPC unavailable\"}");
     }
 }

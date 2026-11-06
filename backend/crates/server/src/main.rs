@@ -46,6 +46,11 @@ async fn main() -> anyhow::Result<()> {
         supervise("binance stream", strike_core::binance_ws::run());
     }
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    if !strike_core::world::enabled() {
+        tracing::warn!(
+            "NEXT_PUBLIC_WORLD_APP_ID is unset: YOLO agents start without a World ID check"
+        );
+    }
     if !strike_core::jev::enabled() {
         tracing::warn!("OPENROUTER_API_KEY is unset: the jev gate is off, the rule decides alone");
     }
@@ -55,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("ARKIV_PRIVATE_KEY is unset: settled rounds are not sealed on Arkiv")
         }
     }
+    if config().treasury_secret_key.is_some() {
+        supervise("round committer", strike_core::proofs::run_committer());
+    }
 
     let bind = config().bind_addr.clone();
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -63,7 +71,14 @@ async fn main() -> anyhow::Result<()> {
     let app = http::with_api_headers(routes::router(), config().app_url.as_deref())
         .layer(middleware::from_fn(log_server_errors))
         .layer(CatchPanicLayer::new())
-        .layer(TraceLayer::new_for_http().on_failure(()));
+        .layer(
+            TraceLayer::new_for_http()
+                // The path only: a query can carry a World ID code or state.
+                .make_span_with(|req: &Request| {
+                    tracing::debug_span!("request", method = %req.method(), path = %req.uri().path())
+                })
+                .on_failure(()),
+        );
 
     axum::serve(
         listener,

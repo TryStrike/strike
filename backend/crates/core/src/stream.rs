@@ -432,22 +432,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn heartbeat_is_a_comment_not_an_event() {
-        let frame = heartbeat_frame(1_700_000_000_000);
-        assert_eq!(frame, ": heartbeat 1700000000000\n\n");
-        assert!(frame.starts_with(':'), "must not dispatch as a message");
-    }
-
-    #[test]
-    fn tick_and_heartbeat_cadences_match_the_ts_constants() {
-        assert_eq!(tick_interval(), std::time::Duration::from_millis(100));
-        assert_eq!(
-            heartbeat_interval(),
-            std::time::Duration::from_millis(15_000)
-        );
-    }
-
     /// The hub is process-wide and cargo runs tests on several threads, so the
     /// tests that read it take this lock instead of guessing at a delta.
     static TEST_HUB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

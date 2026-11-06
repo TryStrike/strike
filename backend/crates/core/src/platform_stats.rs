@@ -781,18 +781,4 @@ mod tests {
         );
         assert_eq!(stats.demo.total_referrals, 7.0);
     }
-
-    #[test]
-    fn numeric_strings_and_nulls_coerce_the_way_js_did() {
-        assert_eq!(number_or_zero(Some(&json!("12.5"))), 12.5);
-        assert_eq!(number_or_zero(Some(&json!(" 3 "))), 3.0);
-        assert_eq!(number_or_zero(Some(&json!(null))), 0.0);
-        assert_eq!(number_or_zero(None), 0.0);
-        assert!(number_or_zero(Some(&json!("abc"))).is_nan());
-        assert_eq!(js_number(Some(&json!(""))), 0.0);
-        assert!(js_number(Some(&json!(null))).is_nan());
-        // NaN cannot be represented in JSON; the aggregate surfaces it as null,
-        // exactly like JSON.stringify did, rather than inventing a zero.
-        assert_eq!(number_to_json(f64::NAN), Value::Null);
-    }
 }

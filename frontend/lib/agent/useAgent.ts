@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RpContext } from '@worldcoin/idkit';
 import { useAccount, useSignMessage } from 'wagmi';
 import { getArcConfig } from '@/lib/arc/config';
 import { ensureBalanceSession } from '@/lib/balance/balanceClientHeaders';
@@ -48,6 +49,27 @@ export interface StartLimits {
   minutes: number;
 }
 
+export interface WorldAttempt {
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'mismatch' | 'failed' | 'unknown';
+  reason: string;
+  acr: string | null;
+  kind?: 'start' | 'checkpoint';
+}
+
+/** The IDKit step-up challenge a 401 carries when the server runs World ID through IDKit. */
+export interface WorldChallenge {
+  attempt: string;
+  world: {
+    app_id: `app_${string}`;
+    action: string;
+    signal: string;
+    environment: 'production' | 'staging';
+    preset: 'selfie' | 'orb';
+    require_user_presence: boolean;
+    rp_context: RpContext;
+  };
+}
+
 const START_VALID_MS = 5 * 60_000;
 const KEEP = 100;
 
@@ -73,6 +95,19 @@ async function errorOf(res: Response): Promise<string> {
   return body?.error ?? `Request failed with ${res.status}`;
 }
 
+/** Reads a World attempt reply. 404 means it belongs to another browser or never existed. */
+export async function attemptOf(res: Response): Promise<WorldAttempt> {
+  if (res.status === 404) {
+    return {
+      status: 'unknown',
+      reason: 'Open the World App link in the browser where you started, then sign again',
+      acr: null,
+    };
+  }
+  if (!res.ok) return { status: 'failed', reason: await errorOf(res), acr: null };
+  return res.json();
+}
+
 /** The trader's agent session, live from the decisions feed. */
 export function useAgent() {
   const { address } = useAccount();
@@ -82,7 +117,24 @@ export function useAgent() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedKey, setFeedKey] = useState(0);
+  const [challenge, setChallenge] = useState<WorldChallenge | null>(null);
   const proofSession = useRef(false);
+
+  /** Takes a 401 step-up to the IDKit widget. `false` when the reply was anything else. */
+  const toWorld = useCallback((res: Response, body: Partial<WorldChallenge> | null) => {
+    if (res.status !== 401 || !body?.attempt || !body.world) return false;
+    setChallenge({ attempt: body.attempt, world: body.world });
+    return true;
+  }, []);
+
+  /** The IDKit check settled. An approved start set the agent cookie, so the feed reconnects to pick it up. */
+  const settle = useCallback((a: WorldAttempt) => {
+    setChallenge(null);
+    setBusy(false);
+    if (a.status !== 'approved') return;
+    if (a.kind === 'start') setDecisions([]);
+    setFeedKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     const source = new EventSource('/api/agent/decisions');
@@ -115,6 +167,7 @@ export function useAgent() {
       }
       setBusy(true);
       setError(null);
+      let leaving = false;
       try {
         const nonce = crypto.randomUUID().replaceAll('-', '');
         const message = startMessage(address, limits, Date.now() + START_VALID_MS, nonce);
@@ -125,7 +178,12 @@ export function useAgent() {
           body: JSON.stringify({ message, signature }),
         });
         if (!res.ok) {
-          setError(await errorOf(res));
+          const body = await res.json().catch(() => null);
+          if (toWorld(res, body)) {
+            leaving = true;
+            return;
+          }
+          setError(body?.error ?? `Request failed with ${res.status}`);
           return;
         }
         setSession((await res.json()).session);
@@ -134,10 +192,10 @@ export function useAgent() {
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Signing failed');
       } finally {
-        setBusy(false);
+        if (!leaving) setBusy(false);
       }
     },
-    [address, signMessageAsync]
+    [address, signMessageAsync, toWorld]
   );
 
   const stop = useCallback(async () => {
@@ -152,6 +210,24 @@ export function useAgent() {
     }
   }, []);
 
+  /** A paused YOLO agent resumes only after the same human steps up in World App. */
+  const checkpoint = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    let leaving = false;
+    try {
+      const res = await fetch('/api/agent/checkpoint', { method: 'POST' });
+      const body = await res.json().catch(() => null);
+      if (toWorld(res, body)) {
+        leaving = true;
+        return;
+      }
+      setError(body?.error ?? `Request failed with ${res.status}`);
+    } finally {
+      if (!leaving) setBusy(false);
+    }
+  }, [toWorld]);
+
   /** Approve or reject a proposal. The feed carries the result to every tab. */
   const answer = useCallback(async (id: string, action: 'approve' | 'reject') => {
     setError(null);
@@ -164,5 +240,28 @@ export function useAgent() {
     setDecisions((all) => all.map((d) => (d.id === decision.id ? decision : d)));
   }, []);
 
-  return { session, decisions, error, busy, start, stop, answer };
+  return { session, decisions, error, busy, start, stop, answer, checkpoint, challenge, settle };
+}
+
+/** Outcome of the World ID check the callback redirected back with as `?world=<attempt>`. Read once, never polled. */
+export function useWorldAttempt() {
+  const [attempt, setAttempt] = useState<WorldAttempt | null>(null);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const id = url.searchParams.get('world');
+    if (!id) return;
+    url.searchParams.delete('world');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    if (id === 'unknown') {
+      setAttempt({ status: 'unknown', reason: 'This approval link was already used', acr: null });
+      return;
+    }
+    fetch(`/api/world/attempts/${encodeURIComponent(id)}`)
+      .then(attemptOf)
+      .then(setAttempt)
+      .catch((e) => setAttempt({ status: 'failed', reason: `Could not read the human check: ${e.message}`, acr: null }));
+  }, []);
+
+  return [attempt, setAttempt] as const;
 }

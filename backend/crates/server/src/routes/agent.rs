@@ -5,7 +5,8 @@ use std::convert::Infallible;
 
 use axum::body::Bytes;
 use axum::extract::Path;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::WWW_AUTHENTICATE;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,15 +15,18 @@ use tokio::sync::broadcast::error::RecvError;
 
 use strike_core::agent;
 use strike_core::bets::now_ms;
+use strike_core::config::config;
 use strike_core::crypto::{self, AgentClaims, AGENT_COOKIE};
-use strike_core::db;
+use strike_core::db::{self, Db};
 use strike_core::error::ApiError;
 use strike_core::eth;
 use strike_core::ledger::Rejection;
 use strike_core::prices;
 use strike_core::stream;
+use strike_core::world::{self, HumanGrant};
 
 use crate::agent as live;
+use crate::bans;
 use crate::http::{self, Cookie};
 use crate::routes::stream::sse_headers;
 
@@ -31,11 +35,13 @@ const REPLAY: i64 = 50;
 /// The cookie outlives the session by an hour so the trader can still read
 /// how it ended.
 const COOKIE_GRACE_SECONDS: i64 = 3_600;
+pub(crate) const AGENTS_NOT_CONFIGURED: &str = "Agent sessions are not configured on this server";
 
 pub fn routes() -> Router {
     Router::new()
         .route("/api/agent/start", post(start))
         .route("/api/agent/stop", post(stop))
+        .route("/api/agent/checkpoint", post(checkpoint))
         .route("/api/agent/decisions", get(decisions))
         .route("/api/agent/decisions/{id}/approve", post(approve))
         .route("/api/agent/decisions/{id}/reject", post(reject_proposal))
@@ -81,26 +87,84 @@ async fn start_run(raw: &[u8]) -> Result<Response, ApiError> {
     if let Err(rejection) = agent::check_start(&terms, now) {
         return Ok(reject(rejection));
     }
-    let ttl = terms.minutes * 60 + COOKIE_GRACE_SECONDS;
-    let session = match agent::create_session(db::db().await?, terms, now).await? {
-        Ok(session) => session,
-        Err(rejection) => return Ok(reject(rejection)),
-    };
-    let token = crypto::mint_agent_token(&session.id, &session.wallet, ttl).map_err(|err| {
-        tracing::error!("[agent] token not minted: {err}");
-        ApiError::unavailable("Agent sessions are not configured on this server")
-    })?;
-    live::spawn(session.clone());
-    Ok(http::json_with_cookie(
-        json!({ "session": session.to_json() }),
+    if bans::is_globally_banned(&terms.wallet).await {
+        return Err(ApiError::json(StatusCode::FORBIDDEN, "Wallet is banned"));
+    }
+    if !config().is_settlement_signing_configured() {
+        return Err(ApiError::unavailable(AGENTS_NOT_CONFIGURED));
+    }
+    let database = db::db().await?;
+    if terms.mode == "yolo" && world::enabled() {
+        return Ok(match world::begin(database, &terms, message, now).await? {
+            Ok(challenge) => human_check(&challenge),
+            Err(rejection) => reject(rejection),
+        });
+    }
+    Ok(match start_session(database, terms, now, None).await? {
+        Ok((session, cookie)) => http::json_with_cookie(json!({ "session": session }), cookie),
+        Err(rejection) => reject(rejection),
+    })
+}
+
+/// Its own task: a client hanging up after the row commits must not leave a
+/// running session with no task and no cookie.
+pub(crate) async fn start_session(
+    database: &'static Db,
+    terms: agent::StartTerms,
+    now: i64,
+    human: Option<HumanGrant>,
+) -> Result<Result<(Value, Cookie), Rejection>, ApiError> {
+    tokio::spawn(async move {
+        Ok(
+            match agent::create_session(database, terms, now, human).await? {
+                Ok(session) => Ok((session.to_json(), started(session)?)),
+                Err(rejection) => Err(rejection),
+            },
+        )
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!("[agent] start task failed: {err}");
+        ApiError::internal("Agent start failed")
+    })?
+}
+
+/// RFC 9470 step-up: the browser goes to `verifyUrl`, and only this browser,
+/// holding the `strike_world` cookie, can finish the attempt.
+fn human_check(challenge: &world::Challenge) -> Response {
+    let mut response = http::json_with_cookie(
+        challenge.to_json(),
         Cookie {
-            name: AGENT_COOKIE,
-            value: token,
-            max_age: ttl,
+            name: world::WORLD_COOKIE,
+            value: challenge.browser_secret.clone(),
+            max_age: world::ATTEMPT_TTL_MS / 1_000,
             same_site: "Lax",
             http_only: true,
         },
-    ))
+    );
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    if let Ok(value) = HeaderValue::from_str(&challenge.www_authenticate()) {
+        response.headers_mut().insert(WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+/// Runs a created session and returns the cookie that reads and stops it.
+/// Both starts refuse before any write when the cookie can't be minted.
+pub(crate) fn started(session: agent::Session) -> Result<Cookie, ApiError> {
+    let ttl = (session.ends_at_ms - session.starts_at_ms) / 1_000 + COOKIE_GRACE_SECONDS;
+    let token = crypto::mint_agent_token(&session.id, &session.wallet, ttl).map_err(|err| {
+        tracing::error!("[agent] token not minted: {err}");
+        ApiError::unavailable(AGENTS_NOT_CONFIGURED)
+    })?;
+    live::spawn(session);
+    Ok(Cookie {
+        name: AGENT_COOKIE,
+        value: token,
+        max_age: ttl,
+        same_site: "Lax",
+        http_only: true,
+    })
 }
 
 async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
@@ -117,6 +181,25 @@ async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
         .await?
         .ok_or_else(no_session)?;
     Ok(Json(json!({ "session": session.to_json() })))
+}
+
+/// The step-up that resumes a YOLO agent paused for its human, in the same
+/// 401 challenge shape as a YOLO start.
+async fn checkpoint(headers: HeaderMap) -> Result<Response, ApiError> {
+    let claims = claims(&headers)?;
+    let database = db::db().await?;
+    let session = agent::session_for(database, &claims.session_id, &claims.wallet)
+        .await?
+        .ok_or_else(no_session)?;
+    let Some(until) = live::paused_until(&session.id) else {
+        return Err(ApiError::conflict(world::NOT_PAUSED));
+    };
+    Ok(
+        match world::begin_checkpoint(database, &session, until, now_ms()).await? {
+            Ok(challenge) => human_check(&challenge),
+            Err(rejection) => reject(rejection),
+        },
+    )
 }
 
 fn no_session() -> ApiError {

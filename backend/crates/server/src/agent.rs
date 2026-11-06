@@ -16,6 +16,7 @@ use strike_core::jev::{self, Gate};
 use strike_core::ledger::BetOutcome;
 use strike_core::settlement::binomo_multiplier;
 use strike_core::ticks;
+use strike_core::world;
 
 use crate::routes::balance_mutations::place_bet;
 
@@ -26,6 +27,9 @@ struct Live {
     frames: broadcast::Sender<String>,
     stop: watch::Sender<bool>,
     approval: Approval,
+    /// Set while a YOLO agent waits for its human, until this time.
+    paused_until: Option<i64>,
+    resumed: Arc<Notify>,
 }
 
 /// Held by whoever answers a proposal, the trader or the expiry, so a second
@@ -73,6 +77,25 @@ pub fn approval(session_id: &str) -> Option<Approval> {
     live().get(session_id).map(|l| l.approval.clone())
 }
 
+/// When the paused agent gives up on its human. `None` when it isn't paused.
+pub fn paused_until(session_id: &str) -> Option<i64> {
+    live().get(session_id).and_then(|l| l.paused_until)
+}
+
+/// Wakes a paused agent to read its checkpoint.
+pub fn resume(session_id: &str) {
+    if let Some(l) = live().get(session_id) {
+        l.resumed.notify_one();
+    }
+}
+
+fn set_paused(session_id: &str, until: Option<i64>) -> Option<Arc<Notify>> {
+    live().get_mut(session_id).map(|l| {
+        l.paused_until = until;
+        l.resumed.clone()
+    })
+}
+
 pub fn spawn(session: Session) {
     let (frames, _) = broadcast::channel(256);
     let (stop, stopped) = watch::channel(false);
@@ -86,6 +109,8 @@ pub fn spawn(session: Session) {
             frames,
             stop,
             approval: approval.clone(),
+            paused_until: None,
+            resumed: Arc::default(),
         },
     );
     tokio::spawn(run(session, stopped, approval));
@@ -133,6 +158,7 @@ async fn run_on(
     approval: &Approval,
 ) -> ApiResult<Option<String>> {
     let mut open: Option<String> = None;
+    let mut human_checked = false;
     loop {
         if let Some(decision_id) = &open {
             match agent::record_result(database, decision_id).await? {
@@ -151,8 +177,15 @@ async fn run_on(
         if *stopped.borrow() {
             return Ok(None);
         }
-        match check(database, session, stopped).await? {
+        match check(database, session, stopped, human_checked).await? {
             Placement::Stop(reason) => return Ok(Some(reason)),
+            Placement::Pause => {
+                if let Some(reason) = pause(database, session, stopped).await? {
+                    return Ok(Some(reason));
+                }
+                human_checked = true;
+                continue;
+            }
             Placement::Opened(decision_id) => {
                 open = Some(decision_id);
                 continue;
@@ -182,6 +215,8 @@ pub enum Placement {
     Stop(String),
     /// A proposal someone else answered first.
     Gone,
+    /// The YOLO agent lost half its stop-loss and waits for its human.
+    Pause,
 }
 
 fn jev_proposal(
@@ -213,6 +248,7 @@ async fn check(
     database: &Db,
     session: &mut Session,
     stopped: &watch::Receiver<bool>,
+    human_checked: bool,
 ) -> ApiResult<Placement> {
     let now = now_ms();
     if now >= session.ends_at_ms {
@@ -222,6 +258,9 @@ async fn check(
         Ok(stake) => stake,
         Err(reason) => return Ok(Placement::Stop(reason.into())),
     };
+    if world::enabled() && !human_checked && agent::needs_human(session) {
+        return Ok(Placement::Pause);
+    }
     let (direction, strike, reason, proposal) =
         match agent::signal(ticks::buffer(), &session.asset, now) {
             Signal::Skip(why) => return note(database, session, "skipped", why).await,
@@ -281,6 +320,46 @@ async fn check(
         confidence,
     };
     place(database, session, trade).await
+}
+
+/// Places nothing until the session's human steps up again through
+/// `/api/agent/checkpoint`. `Some(reason)` when the wait ran out, `None` when
+/// the human approved or the session was stopped.
+async fn pause(
+    database: &Db,
+    session: &Session,
+    stopped: &mut watch::Receiver<bool>,
+) -> ApiResult<Option<String>> {
+    let until = (now_ms() + agent::HUMAN_WAIT_MS).min(session.ends_at_ms);
+    let Some(resumed) = set_paused(&session.id, Some(until)) else {
+        return Ok(None);
+    };
+    note(database, session, "blocked", agent::WAITING_FOR_HUMAN).await?;
+    let ended = loop {
+        let left = Duration::from_millis((until - now_ms()).max(0) as u64);
+        tokio::select! {
+            _ = resumed.notified() => {}
+            _ = stopped.changed() => {}
+            _ = tokio::time::sleep(left) => {}
+        }
+        if *stopped.borrow() {
+            break None;
+        }
+        let now = now_ms();
+        let out_of_time = now >= until;
+        if world::checkpoint_passed(database, &session.id, out_of_time, now).await? {
+            break None;
+        }
+        if out_of_time {
+            break Some(if now >= session.ends_at_ms {
+                agent::TIME_UP
+            } else {
+                agent::HUMAN_CHECK_DENIED
+            });
+        }
+    };
+    set_paused(&session.id, None);
+    Ok(ended.map(str::to_string))
 }
 
 /// Waits for the trader's answer or the expiry. Returns the decision id when

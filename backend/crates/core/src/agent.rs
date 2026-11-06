@@ -14,6 +14,7 @@ use crate::money::{from_fixed, to_fixed, MONEY_SCALE};
 use crate::prices;
 use crate::settlement::binomo_multiplier;
 use crate::ticks::TickBuffer;
+use crate::world::{self, HumanGrant};
 
 pub const CHECK_EVERY_MS: u64 = 5_000;
 /// How long a normal mode proposal waits for the trader's tap.
@@ -34,6 +35,10 @@ pub const BUDGET_SPENT: &str = "budget spent";
 pub const STOP_LOSS_REACHED: &str = "stop-loss reached";
 pub const HOUSE_LIMIT: &str = "House agent limit reached";
 pub const SERVER_RESTART: &str = "server restart";
+pub const WAITING_FOR_HUMAN: &str = "Waiting for a human";
+pub const HUMAN_CHECK_DENIED: &str = "human check denied";
+/// How long a paused YOLO agent waits for its human to step up.
+pub const HUMAN_WAIT_MS: i64 = 2 * 60 * 1000;
 
 fn stake_floor() -> Decimal {
     Decimal::new(10, 2)
@@ -76,7 +81,7 @@ fn malformed() -> Rejection {
     refuse(400, "Malformed start message")
 }
 
-fn refuse(status: u16, message: &str) -> Rejection {
+pub(crate) fn refuse(status: u16, message: &str) -> Rejection {
     (status, json!({ "error": message }))
 }
 
@@ -120,6 +125,9 @@ pub fn parse_start(message: &str) -> Result<StartTerms, Rejection> {
 /// rows that already exist.
 pub fn check_start(t: &StartTerms, now_ms: i64) -> Result<(), Rejection> {
     let cfg = config();
+    if !t.wallet.starts_with("0x") || !crate::address::is_address(&t.wallet) {
+        return Err(refuse(400, "Wallet must be a 0x address"));
+    }
     if t.chain_id != cfg.arc_chain_id {
         return Err(refuse(400, "Start message is for another chain"));
     }
@@ -270,6 +278,11 @@ pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> 
         return Err(LIMIT_REACHED);
     }
     Ok(stake)
+}
+
+/// A YOLO agent that has lost half its stop-loss pauses for its human.
+pub fn needs_human(session: &Session) -> bool {
+    session.mode == "yolo" && -session.realized_pnl * Decimal::TWO >= session.stop_loss
 }
 
 /// The body the manual bet route takes, with the strike from the server tick.
@@ -450,12 +463,42 @@ fn load_decision(conn: &Connection, id: &str) -> ApiResult<Decision> {
     )?)
 }
 
+/// Why the rows that exist refuse a start, or `None`.
+pub(crate) fn start_blocked(
+    conn: &Connection,
+    nonce: &str,
+    wallet: &str,
+) -> rusqlite::Result<Option<Rejection>> {
+    let used: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE nonce = ?1)",
+        [nonce],
+        |r| r.get(0),
+    )?;
+    if used {
+        return Ok(Some(refuse(409, "Start message already used")));
+    }
+    let active: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE wallet = ?1 AND status = 'running')",
+        [wallet],
+        |r| r.get(0),
+    )?;
+    if active {
+        return Ok(Some(refuse(
+            409,
+            "This wallet already has an active agent session",
+        )));
+    }
+    Ok(None)
+}
+
 /// Creates the session, or says why it can't. The checks and the insert share
-/// the single writer, so two starts can't both pass them.
+/// the single writer, so two starts can't both pass them. A YOLO session
+/// carries the human that approved it, whose attempt is spent in the same write.
 pub async fn create_session(
     db: &Db,
     t: StartTerms,
     now_ms: i64,
+    human: Option<HumanGrant>,
 ) -> ApiResult<Result<Session, Rejection>> {
     let id = uuid::Uuid::new_v4().to_string();
     let wallet = crate::address::canonical(&t.wallet);
@@ -464,26 +507,19 @@ pub async fn create_session(
         fixed(t.max_per_trade)?,
         fixed(t.stop_loss)?,
     );
+    if t.mode == "yolo" && human.is_none() && world::enabled() {
+        return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
+    }
     db.write(move |conn| {
-        let used: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE nonce = ?1)",
-            [&t.nonce],
-            |r| r.get(0),
-        )?;
-        if used {
-            return Ok(Err(refuse(409, "Start message already used")));
-        }
-        let active: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM agent_sessions WHERE wallet = ?1 AND status = 'running')",
-            [&wallet],
-            |r| r.get(0),
-        )?;
-        if active {
-            return Ok(Err(refuse(409, "This wallet already has an active agent session")));
+        let refused = match &human {
+            Some(grant) => world::claim(conn, grant, &wallet, &t.nonce, now_ms)?,
+            None => start_blocked(conn, &t.nonce, &wallet)?,
+        };
+        if let Some(refused) = refused {
+            return Ok(Err(refused));
         }
         conn.execute(
-            "INSERT INTO agent_sessions (id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
-             starts_at, ends_at, nonce, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')",
+            "INSERT INTO agent_sessions (id, wallet, asset, mode, budget, max_per_trade, stop_loss,              starts_at, ends_at, nonce, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')",
             params![
                 id,
                 wallet,
@@ -497,6 +533,9 @@ pub async fn create_session(
                 t.nonce
             ],
         )?;
+        if let Some(grant) = &human {
+            world::approve(conn, grant, &wallet, &id, now_ms)?;
+        }
         Ok(Ok(load_session(conn, &id)?))
     })
     .await
@@ -938,6 +977,40 @@ mod tests {
             message.replace("Strike agent session", "Strike"),
         ] {
             assert_eq!(parse_start(&forged).unwrap_err().0, 400, "{forged}");
+        }
+    }
+
+    #[test]
+    fn half_the_stop_loss_lost_pauses_yolo_only() {
+        let session = |mode: &str, pnl: i64| Session {
+            id: "s".into(),
+            wallet: "w".into(),
+            asset: "BTC".into(),
+            mode: mode.into(),
+            budget: Decimal::from(20),
+            max_per_trade: Decimal::from(5),
+            stop_loss: Decimal::from(10),
+            starts_at_ms: 0,
+            ends_at_ms: 1,
+            status: "running".into(),
+            stopped_reason: None,
+            spent: Decimal::ZERO,
+            realized_pnl: Decimal::from(pnl),
+        };
+        assert!(!needs_human(&session("yolo", -4)));
+        assert!(needs_human(&session("yolo", -5)));
+        assert!(!needs_human(&session("yolo", 3)));
+        assert!(!needs_human(&session("normal", -9)));
+    }
+
+    #[test]
+    fn only_a_0x_wallet_starts() {
+        let now = terms().expires_ms - 60_000;
+        assert!(check_start(&terms(), now).is_ok());
+        let body = "1111111111111111111111111111111111111111";
+        for wallet in [format!("0X{body}"), body.to_string(), "0x1111".to_string()] {
+            let t = StartTerms { wallet, ..terms() };
+            assert_eq!(check_start(&t, now).unwrap_err().0, 400, "{}", t.wallet);
         }
     }
 }
