@@ -68,7 +68,9 @@ function readPalette(el: HTMLElement): {
   const css = getComputedStyle(el);
   const color = (name: string) => css.getPropertyValue(name).trim();
   return {
-    fontFamily: color("--font-jet"),
+    // --font-jet is a Tailwind theme token, not a runtime variable, so read the
+    // next/font family directly. An empty family makes every canvas font invalid.
+    fontFamily: `${color("--font-jetbrains-mono") || '"JetBrains Mono"'}, ui-monospace, monospace`,
     palette: {
       background: color("--paper"),
       grid: color("--line"),
