@@ -107,6 +107,10 @@ pub struct Config {
     pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
     pub agent_max_open_stake: rust_decimal::Decimal,
+    /// The largest single bet, manual or agent.
+    pub max_stake: rust_decimal::Decimal,
+    /// The most one wallet may have riding on unsettled rounds.
+    pub max_wallet_open_stake: rust_decimal::Decimal,
     /// World ID step-up for YOLO starts. Unset, YOLO starts need no human check.
     pub world_idkit: Option<IdkitApp>,
     /// Budgets up to this take a selfie check, up to `world_orb_max` an Orb,
@@ -201,6 +205,9 @@ impl Config {
                 .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")
                 .unwrap_or(rust_decimal::Decimal::from(200)),
+            max_stake: parse_num("MAX_STAKE").unwrap_or(rust_decimal::Decimal::from(100)),
+            max_wallet_open_stake: parse_num("MAX_WALLET_OPEN_STAKE")
+                .unwrap_or(rust_decimal::Decimal::from(300)),
             world_idkit: IdkitApp::from_env(),
             world_selfie_max: parse_num("WORLD_SELFIE_MAX")
                 .unwrap_or(rust_decimal::Decimal::from(10)),

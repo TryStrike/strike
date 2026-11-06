@@ -2,10 +2,8 @@
 //! answer deltas, `action` frames carry typed UI actions, then `done` or `error`.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
 
 use axum::body::Bytes;
-use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -32,14 +30,14 @@ pub fn routes() -> Router {
     Router::new().route("/api/copilot", post(ask))
 }
 
-async fn ask(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    raw: Bytes,
-) -> Response {
+async fn ask(headers: HeaderMap, raw: Bytes) -> Response {
     let Some(key) = config().anthropic_api_key.clone() else {
         return ApiError::unavailable("The copilot is not configured on this server")
             .into_response();
+    };
+    let Some(claims) = crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref())
+    else {
+        return ApiError::unauthorized(copilot::NEEDS_SESSION).into_response();
     };
     let Ok(body) = serde_json::from_slice::<Value>(&raw) else {
         return ApiError::bad_request("Body must be JSON with messages").into_response();
@@ -48,21 +46,12 @@ async fn ask(
         Ok(messages) => messages,
         Err(why) => return ApiError::bad_request(why).into_response(),
     };
-    let claims = crypto::verify_agent_token(http::cookie(&headers, AGENT_COOKIE).as_deref());
-    let asker = match &claims {
-        Some(claims) => format!("wallet:{}", claims.wallet),
-        None => format!("ip:{}", http::client_ip(&headers, peer.ip())),
-    };
-    if !copilot::take_question(&asker, now_ms()) {
+    if !copilot::take_question(&claims.wallet, now_ms()) {
         return http::too_many(copilot::RATE_LIMITED, 60);
     }
 
-    let ticket_open = body
-        .get("ticketOpen")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(answer(key, messages, ticket_open, claims, tx));
+    tokio::spawn(answer(key, messages, claims, tx));
     let frames = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
@@ -84,14 +73,12 @@ fn send(tx: &Frames, event: &str, data: Value) -> Result<(), String> {
         .map_err(|_| "client disconnected".to_string())
 }
 
-async fn answer(
-    key: String,
-    mut messages: Vec<Value>,
-    ticket_open: bool,
-    claims: Option<AgentClaims>,
-    tx: Frames,
-) {
-    let (event, data) = match converse(&key, &mut messages, ticket_open, claims, &tx).await {
+async fn answer(key: String, mut messages: Vec<Value>, claims: AgentClaims, tx: Frames) {
+    let sink = |event: &str, data: Value| match event {
+        "thinking" => Ok(()),
+        event => send(&tx, event, data),
+    };
+    let (event, data) = match converse(&key, &mut messages, &claims, copilot::request, sink).await {
         Ok(()) => ("done", json!({})),
         Err(why) => {
             tracing::warn!("[copilot] {why}");
@@ -102,21 +89,20 @@ async fn answer(
     let _ = send(&tx, event, data);
 }
 
-async fn converse(
+/// The tool loop. `build` shapes each request and `sink` gets every `thinking`,
+/// `text`, `tool` and `action` frame, and its `Err` ends the loop.
+pub async fn converse(
     key: &str,
     messages: &mut Vec<Value>,
-    ticket_open: bool,
-    claims: Option<AgentClaims>,
-    tx: &Frames,
+    claims: &AgentClaims,
+    build: impl Fn(&[Value]) -> Value,
+    sink: impl Fn(&str, Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut desk = copilot::Desk::new(ticks::buffer(), now_ms(), ticket_open);
-    let context = copilot::Context {
-        ticket_open,
-        has_session: claims.is_some(),
-    };
+    let mut desk = copilot::Desk::new(ticks::buffer(), now_ms());
     for turn_number in 0..=copilot::MAX_TOOL_TURNS {
-        let turn = copilot::stream_turn(key, messages, context, |text| {
-            send(tx, "text", json!({ "text": text }))
+        let turn = copilot::stream_turn(key, &build(messages), |delta| match delta {
+            copilot::Delta::Text(text) => sink("text", json!({ "text": text })),
+            copilot::Delta::Thinking(text) => sink("thinking", json!({ "thinking": text })),
         })
         .await?;
         match turn.stop_reason.as_deref() {
@@ -132,13 +118,20 @@ async fn converse(
         let mut results = Vec::new();
         for tool in turn.tool_uses() {
             let ran = if copilot::PERSONAL.contains(&tool.name.as_str()) {
-                personal(&tool, claims.as_ref()).await
+                personal(&tool, claims).await
             } else {
                 desk.run(&tool)
             };
             if let Some(action) = ran.action {
-                send(tx, "action", action)?;
+                sink("action", action)?;
             }
+            let label = copilot::step_label(&tool.name);
+            let step = if ran.is_error {
+                json!({ "label": label, "ok": false, "error": ran.content })
+            } else {
+                json!({ "label": label, "ok": true })
+            };
+            sink("tool", step)?;
             results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool.id,
@@ -159,10 +152,7 @@ const HISTORY_READ: i64 = 20;
 
 /// A personal tool, scoped to the token's own wallet and session. The model
 /// never names a wallet or a session: both come from the cookie.
-async fn personal(tool: &ToolUse, claims: Option<&AgentClaims>) -> Ran {
-    let Some(claims) = claims else {
-        return refused(copilot::NO_SESSION);
-    };
+async fn personal(tool: &ToolUse, claims: &AgentClaims) -> Ran {
     match read_personal(tool, claims).await {
         Ok(value) => Ran {
             content: value.to_string(),

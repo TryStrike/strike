@@ -1,19 +1,22 @@
-'use client';
+"use client";
 
-import { useEffect, useRef, useState } from 'react';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { ShareNetwork } from '@phosphor-icons/react';
-import { useStore } from '@/lib/store';
-import { BRAND } from '@/lib/brand';
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { ShareNetwork } from "@phosphor-icons/react";
+import { useStore } from "@/lib/store";
+import { BRAND } from "@/lib/brand";
+import { isRealWin } from "@/lib/types/bet";
 
 const CANNON_MS = 1500;
 const GRAVITY = 0.35;
 
 function fireSideCannons(canvas: HTMLCanvasElement) {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext("2d");
   if (!ctx) return () => {};
   const css = getComputedStyle(document.documentElement);
-  const colors = ['--up', '--ink', '--down', '--muted'].map((v) => css.getPropertyValue(v).trim() || '#2151f5');
+  const colors = ["--up", "--ink", "--down", "--muted"].map(
+    (v) => css.getPropertyValue(v).trim() || "#2151f5",
+  );
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
@@ -21,10 +24,20 @@ function fireSideCannons(canvas: HTMLCanvasElement) {
   canvas.height = h * dpr;
   ctx.scale(dpr, dpr);
 
-  type P = { x: number; y: number; vx: number; vy: number; rot: number; spin: number; color: string; life: number };
+  type P = {
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    rot: number;
+    spin: number;
+    color: string;
+    life: number;
+  };
   const parts: P[] = [];
   const spawn = (fromLeft: boolean) => {
-    const angle = ((fromLeft ? 60 : 120) + (Math.random() - 0.5) * 55) * (Math.PI / 180);
+    const angle =
+      ((fromLeft ? 60 : 120) + (Math.random() - 0.5) * 55) * (Math.PI / 180);
     const speed = 11 + Math.random() * 7;
     parts.push({
       x: fromLeft ? 0 : w,
@@ -41,7 +54,11 @@ function fireSideCannons(canvas: HTMLCanvasElement) {
   const end = performance.now() + CANNON_MS;
   let frame = 0;
   const tick = (now: number) => {
-    if (now < end) for (let i = 0; i < 2; i++) { spawn(true); spawn(false); }
+    if (now < end)
+      for (let i = 0; i < 2; i++) {
+        spawn(true);
+        spawn(false);
+      }
     ctx.clearRect(0, 0, w, h);
     for (let i = parts.length - 1; i >= 0; i--) {
       const p = parts[i];
@@ -51,7 +68,10 @@ function fireSideCannons(canvas: HTMLCanvasElement) {
       p.y += p.vy;
       p.rot += p.spin;
       p.life -= 0.008;
-      if (p.life <= 0 || p.y > h + 20) { parts.splice(i, 1); continue; }
+      if (p.life <= 0 || p.y > h + 20) {
+        parts.splice(i, 1);
+        continue;
+      }
       ctx.save();
       ctx.globalAlpha = Math.min(1, p.life * 2);
       ctx.translate(p.x, p.y);
@@ -88,7 +108,8 @@ export function WinBurst() {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unsubscribe = useStore.subscribe((state, prev) => {
       const latest = state.bets[0];
-      if (!latest || latest.id === prev.bets[0]?.id || !latest.won) return;
+      if (!latest || latest.id === prev.bets[0]?.id || !isRealWin(latest))
+        return;
       setWin({ id: latest.id, payout: parseFloat(latest.payout) || 0 });
       clearTimeout(timer);
       timer = setTimeout(() => setWin(null), 2600);
@@ -122,11 +143,15 @@ export function WinBurst() {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
         >
-          <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-hidden />
+          <canvas
+            ref={canvasRef}
+            className="absolute inset-0 h-full w-full"
+            aria-hidden
+          />
           <motion.div
             role="status"
             initial={{ scale: 0.9, y: 8 }}
-            animate={{ scale: 1, y: gameMode === 'box' ? -110 : 0 }}
+            animate={{ scale: 1, y: gameMode === "box" ? -110 : 0 }}
             className="pointer-events-auto flex flex-col items-center rounded-[28px] bg-white/80 px-8 py-6 font-tight shadow-[0_30px_80px_-30px_rgba(33,81,245,0.45)] ring-1 ring-ink/[0.06] backdrop-blur-xl"
           >
             <span className="text-sm text-subtle">You called it</span>

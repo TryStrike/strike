@@ -1,5 +1,4 @@
-
-import { TargetCell } from './game';
+import { TargetCell } from "./game";
 
 export interface BetRecord {
   id: string;
@@ -15,3 +14,7 @@ export interface BetRecord {
   endTime?: number | null;
   strikePrice?: number | null;
 }
+
+/** History keeps `won` true on a tie or refund, which returns only the stake. */
+export const isRealWin = (bet: BetRecord) =>
+  bet.won && parseFloat(bet.payout) > parseFloat(bet.amount);

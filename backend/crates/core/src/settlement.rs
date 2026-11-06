@@ -55,8 +55,15 @@ const BAND_WIDTH_WINDOW_MS: i64 = 300_000;
 /// The narrowest window a chart fits its axis to; slow assets print 4 ticks in it.
 const FAST_RANGE_WINDOW_MS: i64 = 30_000;
 const SLOW_RANGE_WINDOW_MS: i64 = 120_000;
+/// `quoteCell` in LiveChart.tsx: the share of the axis a cell's distance is
+/// measured against, its largest time bonus, and its cap.
+const CHART_DISTANCE_SPAN: f64 = 0.8;
+const CHART_TIME_BONUS: f64 = 0.29;
+const CHART_MAX_MULTIPLIER: f64 = 10.0;
+/// The most a band may return per unit staked on average.
+const BAND_MAX_RETURN: f64 = 0.95;
 /// The grid's in-row 1.01 plus its largest time bonus.
-const IN_BAND_CEILING: f64 = 1.30;
+const IN_BAND_CEILING: f64 = 1.01 + CHART_TIME_BONUS;
 
 /// The classic game's fixed payout table (`getMultiplier` in GameBoard.tsx).
 pub fn binomo_multiplier(seconds: i64) -> Option<Decimal> {
@@ -96,7 +103,7 @@ fn refuse(status: u16, code: &str, message: &str) -> Rejection {
 }
 
 /// Text first, so the fixed point holds the decimal the double was written as.
-fn fixed_price(price: f64) -> Option<i64> {
+pub(crate) fn fixed_price(price: f64) -> Option<i64> {
     to_fixed(parse_decimal(&format!("{price}")).ok()?, PRICE_SCALE).ok()
 }
 
@@ -128,23 +135,36 @@ pub fn max_band_width(ring: &TickBuffer, asset: &str, now_ms: i64) -> f64 {
     ring.range(asset, now_ms - BAND_WIDTH_WINDOW_MS) * BAND_MAX_WIDTH
 }
 
-/// The highest multiplier a band may be offered at, whatever the chart showed.
+/// The chance `end` lands in the band, from a random walk whose spread is read
+/// off the recent `range`: the expected range of a walk is 1.6 standard deviations.
+fn band_odds(strike: f64, top: f64, bottom: f64, range: f64, window_ms: i64, left_ms: i64) -> f64 {
+    let spread = range / 1.6 * (left_ms as f64 / window_ms as f64).sqrt();
+    let below = |price: f64| 1.0 / (1.0 + (-1.702 * (price - strike) / spread).exp());
+    below(top) - below(bottom)
+}
+
+/// The highest multiplier a band may be offered at, whatever the client sent.
 ///
-/// A chart's multiplier depends on its own axis, which the server cannot see, so
-/// this is the draw formula at its most generous size bonus, measured against
-/// `range`, a span no wider than the axis. It only has to stop a band being paid
-/// like a long shot while sitting on the price.
+/// The lower of two caps. The chart's cell quote at its largest time bonus,
+/// measured against `range`, stops a near band being paid like a far one. The
+/// band's odds keep a player's expected return under [`BAND_MAX_RETURN`].
 ///
-/// ponytail: not a fair price. A real ceiling needs a volatility model and a
-/// server-owned quote; until then the house edge on bands is whatever these
-/// curves give.
-pub fn band_multiplier_ceiling(strike: f64, top: f64, bottom: f64, range: f64) -> f64 {
-    if strike >= bottom && strike <= top {
-        return IN_BAND_CEILING;
-    }
-    let distance = (strike - top).abs().min((strike - bottom).abs());
-    let normalized = (distance / range).min(1.0);
-    ((1.0 + normalized.powf(0.7) * 6.0) * 2.0 + 0.3).min(20.0)
+/// ponytail: a cap, not a quote. Chart cells above it are refused at bet time
+/// until the server owns the price.
+pub fn band_multiplier_ceiling(
+    strike: f64,
+    (top, bottom): (f64, f64),
+    range: f64,
+    window_ms: i64,
+    left_ms: i64,
+) -> f64 {
+    let chart = if strike >= bottom && strike <= top {
+        IN_BAND_CEILING
+    } else {
+        let distance = ((top + bottom) / 2.0 - strike).abs() / (range * CHART_DISTANCE_SPAN);
+        (1.05 + distance.min(1.0).powf(1.3) * 3.95 + CHART_TIME_BONUS).min(CHART_MAX_MULTIPLIER)
+    };
+    chart.min(BAND_MAX_RETURN / band_odds(strike, top, bottom, range, window_ms, left_ms))
 }
 
 /// `(end_ms, top, bottom)` of a band round.
@@ -196,7 +216,8 @@ fn freeze_band(
     if top - bottom > max_band_width(ring, asset, now_ms) {
         return Err(refuse(400, "band_too_wide", "Price band is too wide"));
     }
-    if multiplier > band_multiplier_ceiling(strike, top, bottom, range) {
+    let ceiling = band_multiplier_ceiling(strike, (top, bottom), range, window, end_ms - now_ms);
+    if multiplier > ceiling {
         return Err(refuse(
             400,
             "multiplier_not_offered",
@@ -214,6 +235,13 @@ pub fn freeze_bet(
     ring: &TickBuffer,
     now_ms: i64,
 ) -> Result<Frozen, Rejection> {
+    if stake > config().max_stake {
+        return Err(refuse(
+            400,
+            "stake_too_large",
+            &format!("The largest bet is {} USDC", config().max_stake),
+        ));
+    }
     let asset = body
         .get("asset")
         .and_then(Value::as_str)
@@ -670,13 +698,25 @@ mod tests {
     }
 
     #[test]
+    fn a_band_never_returns_more_than_its_odds() {
+        // Right beside the price, and wide enough to be a sure thing.
+        let ceiling = |top, bottom| {
+            band_multiplier_ceiling(100.0, (top, bottom), 4.0, FAST_RANGE_WINDOW_MS, 4_000)
+        };
+        assert!(ceiling(101.6, 100.1) < 2.4);
+        assert!(ceiling(110.0, 90.0) < 1.0);
+    }
+
+    #[test]
     fn what_the_chart_offers_passes_the_ceiling() {
-        // Grid row at the far edge of a 4-wide axis, boosted by blitz, and a drawn box.
+        // Grid row at the far edge of a 4-wide axis, a near one, and the row on the price.
         let range = 4.0;
-        let row = (1.05 + 3.95_f64) * 2.0;
-        assert!(row <= band_multiplier_ceiling(100.0, 104.4, 104.0, range));
-        assert!(1.06 <= band_multiplier_ceiling(100.0, 100.8, 100.4, range));
-        assert!(1.21 <= band_multiplier_ceiling(100.0, 100.2, 99.8, range));
+        let ceiling = |top, bottom| {
+            band_multiplier_ceiling(100.0, (top, bottom), range, FAST_RANGE_WINDOW_MS, 10_000)
+        };
+        assert!(5.0 <= ceiling(104.4, 104.0));
+        assert!(1.06 <= ceiling(100.8, 100.4));
+        assert!(1.21 <= ceiling(100.2, 99.8));
     }
 
     #[test]

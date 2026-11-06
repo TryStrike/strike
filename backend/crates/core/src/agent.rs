@@ -21,6 +21,8 @@ pub const CHECK_EVERY_MS: u64 = 5_000;
 pub const PROPOSAL_MS: i64 = 5_000;
 pub const PROPOSAL_EXPIRED: &str = "Proposal expired";
 pub const ROUND_SECONDS: i64 = 30;
+/// No new trade once a 30 s round could outlive the session.
+pub const CLOSING_MS: i64 = 35_000;
 const LOOKBACK_MS: i64 = 15_000;
 const RANGE_MS: i64 = 120_000;
 /// The 15 s move has to be at least this share of the 2 minute range.
@@ -252,6 +254,12 @@ pub fn signal(ring: &TickBuffer, asset: &str, now_ms: i64) -> Signal {
     }
 }
 
+/// Stop-loss minus realized net loss minus open stakes. Profit never widens it.
+pub fn stop_loss_headroom(session: &Session, open: Decimal) -> Decimal {
+    let realized_loss = (-session.realized_pnl).max(Decimal::ZERO);
+    session.stop_loss - realized_loss - open
+}
+
 /// The smallest of mode size, budget left and stop-loss headroom, floored to
 /// USDC's 6 decimals. `Err` carries the reason the session has to stop.
 /// Headroom counts open stakes, so a loss in flight can't overshoot it.
@@ -265,8 +273,7 @@ pub fn stake(session: &Session, open: Decimal) -> Result<Decimal, &'static str> 
     if left <= Decimal::ZERO {
         return Err(BUDGET_SPENT);
     }
-    let realized_loss = (-session.realized_pnl).max(Decimal::ZERO);
-    let headroom = session.stop_loss - realized_loss - open;
+    let headroom = stop_loss_headroom(session, open);
     if headroom <= Decimal::ZERO {
         return Err(STOP_LOSS_REACHED);
     }
@@ -345,6 +352,7 @@ pub struct Decision {
     pub pnl: Option<Decimal>,
     pub expires_at_ms: Option<i64>,
     pub confidence: Option<f64>,
+    pub trace: Option<Value>,
 }
 
 fn money_json(value: Decimal) -> Value {
@@ -387,14 +395,25 @@ impl Decision {
             "result": self.result,
             "pnl": self.pnl.map(money_json),
             "expiresAt": self.expires_at_ms,
+            "trace": self.trace,
         })
     }
+}
+
+/// The numbers behind a proposal, as they stood when it was decided.
+pub fn trace(session: &Session, signal: &str, jev_needed: Option<f64>) -> Value {
+    json!({
+        "signal": signal,
+        "jevNeeded": jev_needed,
+        "budgetLeft": money_json(session.budget - session.spent),
+        "stopLossRoom": money_json(stop_loss_headroom(session, Decimal::ZERO)),
+    })
 }
 
 const SESSION_COLUMNS: &str = "id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
      starts_at, ends_at, status, stopped_reason, spent, realized_pnl";
 const DECISION_COLUMNS: &str =
-    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at, confidence";
+    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at, confidence, trace";
 
 /// Stored like a multiplier, at 4 decimals.
 fn confidence_fixed(confidence: f64) -> i64 {
@@ -444,6 +463,17 @@ fn decision_row(row: &Row) -> rusqlite::Result<Decision> {
         confidence: row
             .get::<_, Option<i64>>(12)?
             .map(|fixed| fixed as f64 / 10_000.0),
+        trace: row
+            .get::<_, Option<String>>(13)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?,
     })
 }
 
@@ -507,8 +537,13 @@ pub async fn create_session(
         fixed(t.max_per_trade)?,
         fixed(t.stop_loss)?,
     );
-    if t.mode == "yolo" && human.is_none() && world::enabled() {
-        return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
+    if t.mode == "yolo" && human.is_none() {
+        if world::enabled() {
+            return Ok(Err(refuse(401, "A YOLO agent needs a human check")));
+        }
+        if config().production {
+            return Ok(Err(refuse(503, world::NOT_CONFIGURED)));
+        }
     }
     db.write(move |conn| {
         let refused = match &human {
@@ -633,6 +668,13 @@ pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     .await
 }
 
+/// A proposed trade and the numbers behind it.
+pub struct Proposed {
+    pub direction: &'static str,
+    pub stake: Decimal,
+    pub trace: Value,
+}
+
 /// A skip or a block, folded into the previous row when that was the same one.
 pub async fn record_note(
     db: &Db,
@@ -640,10 +682,19 @@ pub async fn record_note(
     verdict: &'static str,
     reason: &str,
     confidence: Option<f64>,
+    proposed: Option<Proposed>,
     now_ms: i64,
 ) -> ApiResult<Decision> {
     let confidence = confidence.map(confidence_fixed);
     let (session_id, reason) = (session_id.to_string(), reason.to_string());
+    let (direction, stake, trace) = match proposed {
+        Some(p) => (
+            Some(p.direction),
+            Some(fixed(p.stake)?),
+            Some(p.trace.to_string()),
+        ),
+        None => (None, None, None),
+    };
     db.write(move |conn| {
         let last: Option<(String, String, String)> = conn
             .query_row(
@@ -657,17 +708,17 @@ pub async fn record_note(
             if last_verdict == verdict && last_reason == reason {
                 conn.execute(
                     "UPDATE agent_decisions SET skip_count = skip_count + 1, \
-                     confidence = ?2 WHERE id = ?1",
-                    params![id, confidence],
+                     confidence = ?2, direction = ?3, stake = ?4, trace = ?5 WHERE id = ?1",
+                    params![id, confidence, direction, stake, trace],
                 )?;
                 return load_decision(conn, &id);
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO agent_decisions (id, session_id, created_at, verdict, reason, confidence) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, session_id, now_ms * 1_000, verdict, reason, confidence],
+            "INSERT INTO agent_decisions (id, session_id, created_at, verdict, reason, confidence, direction, stake, trace) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, session_id, now_ms * 1_000, verdict, reason, confidence, direction, stake, trace],
         )?;
         load_decision(conn, &id)
     })
@@ -705,6 +756,7 @@ pub struct Reservation<'a> {
     pub reason: &'a str,
     pub proposal: bool,
     pub confidence: Option<f64>,
+    pub trace: Option<&'a Value>,
 }
 
 pub async fn reserve(
@@ -719,8 +771,10 @@ pub async fn reserve(
         reason,
         proposal,
         confidence,
+        trace,
     } = reservation;
     let confidence = confidence.map(confidence_fixed);
+    let trace = trace.map(Value::to_string);
     let (session_id, id, direction, reason) = (
         session_id.to_string(),
         decision_id.to_string(),
@@ -730,6 +784,9 @@ pub async fn reserve(
     let cap = config().agent_max_open_stake;
     db.write(move |conn| {
         let session = load_session(conn, &session_id)?;
+        if now_ms >= session.ends_at_ms {
+            return Ok(Reserve::Stop(TIME_UP));
+        }
         let stake = match stake(&session, open_stake(conn, Some(&session_id))?) {
             Ok(stake) => stake,
             Err(reason) => return Ok(Reserve::Stop(reason)),
@@ -749,9 +806,9 @@ pub async fn reserve(
             }
         } else {
             conn.execute(
-                "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, confidence) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6, ?7)",
-                params![id, session_id, now_ms * 1_000, direction, held, reason, confidence],
+                "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, confidence, trace) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6, ?7, ?8)",
+                params![id, session_id, now_ms * 1_000, direction, held, reason, confidence, trace],
             )?;
         }
         conn.execute(
@@ -767,13 +824,18 @@ pub async fn reserve(
 pub async fn record_proposal(
     db: &Db,
     session_id: &str,
-    direction: &str,
-    stake: Decimal,
+    proposed: Proposed,
     reason: &str,
     confidence: Option<f64>,
     now_ms: i64,
 ) -> ApiResult<Decision> {
     let confidence = confidence.map(confidence_fixed);
+    let Proposed {
+        direction,
+        stake,
+        trace,
+    } = proposed;
+    let trace = trace.to_string();
     let id = uuid::Uuid::new_v4().to_string();
     let (session_id, direction, reason) = (
         session_id.to_string(),
@@ -783,8 +845,8 @@ pub async fn record_proposal(
     let stake = fixed(stake)?;
     db.write(move |conn| {
         conn.execute(
-            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, expires_at, confidence) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting', ?6, ?7, ?8)",
+            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, expires_at, confidence, trace) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting', ?6, ?7, ?8, ?9)",
             params![
                 id,
                 session_id,
@@ -793,7 +855,8 @@ pub async fn record_proposal(
                 stake,
                 reason,
                 (now_ms + PROPOSAL_MS) * 1_000,
-                confidence
+                confidence,
+                trace
             ],
         )?;
         load_decision(conn, &id)

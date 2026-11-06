@@ -6,9 +6,12 @@ use std::time::Duration;
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use tokio::sync::{broadcast, watch, Notify};
+use tokio::sync::{broadcast, mpsc, watch, Notify};
 
-use strike_core::agent::{self, Decision, Release, Reservation, Reserve, Session, Signal};
+use serde_json::Value;
+use strike_core::agent::{
+    self, Decision, Proposed, Release, Reservation, Reserve, Session, Signal,
+};
 use strike_core::bets::now_ms;
 use strike_core::db::{self, Db};
 use strike_core::error::ApiResult;
@@ -25,6 +28,7 @@ const SETTLE_POLL_MS: u64 = 1_000;
 
 struct Live {
     frames: broadcast::Sender<String>,
+    watcher: Option<mpsc::UnboundedSender<String>>,
     stop: watch::Sender<bool>,
     approval: Approval,
     /// Set while a YOLO agent waits for its human, until this time.
@@ -61,6 +65,9 @@ pub fn subscribe(session_id: &str) -> Option<broadcast::Receiver<String>> {
 
 pub fn publish(session_id: &str, frame: String) {
     if let Some(l) = live().get(session_id) {
+        if let Some(watcher) = &l.watcher {
+            let _ = watcher.send(frame.clone());
+        }
         let _ = l.frames.send(frame);
     }
 }
@@ -103,10 +110,12 @@ pub fn spawn(session: Session) {
         lock: Arc::default(),
         answered: Arc::default(),
     };
+    let watcher = crate::watcher::spawn(&session, frames.clone());
     live().insert(
         session.id.clone(),
         Live {
             frames,
+            watcher,
             stop,
             approval: approval.clone(),
             paused_until: None,
@@ -236,7 +245,7 @@ fn jev_proposal(
         range_2m_pct,
         stake_usdc: usdc(stake),
         budget_left_usdc: usdc(session.budget - session.spent),
-        stop_loss_headroom_usdc: usdc(session.stop_loss + session.realized_pnl),
+        stop_loss_headroom_usdc: usdc(agent::stop_loss_headroom(session, Decimal::ZERO)),
         payout_multiplier: binomo_multiplier(agent::ROUND_SECONDS)
             .and_then(|multiplier| multiplier.to_f64())
             .expect("the payout table offers the agent's round length"),
@@ -278,14 +287,29 @@ async fn check(
                 jev_proposal(session, direction, stake, move_pct, range_share, range_pct),
             ),
         };
-    if jev::enabled() && session.ends_at_ms - now < jev::CLOSING_MS {
+    if session.ends_at_ms - now < agent::CLOSING_MS {
         return note(database, session, "skipped", "Session is closing").await;
     }
+    let needed = jev::enabled().then(|| jev::needed(proposal.payout_multiplier));
+    let trace = agent::trace(session, &reason, needed);
     let confidence = match jev::review(&proposal).await {
         Gate::Off => None,
         Gate::Pass(confidence) => Some(confidence),
         Gate::Block(confidence) => {
-            return note_scored(database, session, "blocked", jev::BLOCKED, Some(confidence)).await
+            let proposed = Proposed {
+                direction,
+                stake,
+                trace,
+            };
+            return note_scored(
+                database,
+                session,
+                "blocked",
+                jev::BLOCKED,
+                Some(confidence),
+                Some(proposed),
+            )
+            .await;
         }
         Gate::Failed(why) => return note(database, session, "skipped", why).await,
     };
@@ -296,8 +320,11 @@ async fn check(
         let proposal = agent::record_proposal(
             database,
             &session.id,
-            direction,
-            stake,
+            Proposed {
+                direction,
+                stake,
+                trace,
+            },
             &reason,
             confidence,
             now,
@@ -318,6 +345,7 @@ async fn check(
         reason: &reason,
         proposal: false,
         confidence,
+        trace: Some(&trace),
     };
     place(database, session, trade).await
 }
@@ -411,6 +439,7 @@ pub struct Trade<'a> {
     /// Placing an approved proposal rather than a new yolo trade.
     pub proposal: bool,
     pub confidence: Option<f64>,
+    pub trace: Option<&'a Value>,
 }
 
 /// Holds the stake under every limit, runs the locked bet path, and records
@@ -426,6 +455,7 @@ pub async fn place(database: &Db, session: &mut Session, trade: Trade<'_>) -> Ap
             reason: trade.reason,
             proposal: trade.proposal,
             confidence: trade.confidence,
+            trace: trade.trace,
         },
         now_ms(),
     )
@@ -492,7 +522,7 @@ async fn note(
     verdict: &'static str,
     why: &str,
 ) -> ApiResult<Placement> {
-    note_scored(database, session, verdict, why, None).await
+    note_scored(database, session, verdict, why, None, None).await
 }
 
 async fn note_scored(
@@ -501,9 +531,18 @@ async fn note_scored(
     verdict: &'static str,
     why: &str,
     confidence: Option<f64>,
+    proposed: Option<Proposed>,
 ) -> ApiResult<Placement> {
-    let decision =
-        agent::record_note(database, &session.id, verdict, why, confidence, now_ms()).await?;
+    let decision = agent::record_note(
+        database,
+        &session.id,
+        verdict,
+        why,
+        confidence,
+        proposed,
+        now_ms(),
+    )
+    .await?;
     publish(&session.id, decision_frame(&decision));
     Ok(Placement::Noted)
 }

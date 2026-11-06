@@ -25,6 +25,7 @@ pub mod read_auth;
 pub mod rpc;
 pub mod schema;
 pub mod settlement;
+pub mod shadow;
 pub mod stream;
 pub mod ticks;
 pub mod treasury_view;

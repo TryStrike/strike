@@ -293,6 +293,7 @@ async fn settle_proposal(
                     reason: &reason,
                     proposal: true,
                     confidence: None,
+                    trace: None,
                 };
                 if let live::Placement::Stop(why) =
                     live::place(database, &mut session, trade).await?

@@ -3,8 +3,6 @@
 //! bodies and cookie attributes here reproduce them byte for byte, because the
 //! browser bundle is unchanged during the migration.
 
-use std::net::IpAddr;
-
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -163,27 +161,6 @@ pub fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The address a limit keys on. The trusted hop is the TCP peer: the service
-/// binds loopback, so a loopback peer is Next, and Next passes on what Caddy wrote.
-/// Caddy replaces any `x-forwarded-for` a client sends, so the rightmost entry is
-/// the real client, and anything further left could be the client's own text.
-/// Any other peer is the client, whatever it claims. `x-real-ip` is ignored:
-/// nothing in the chain sets it, so only a client could.
-pub fn client_ip(headers: &HeaderMap, peer: IpAddr) -> String {
-    let forwarded = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .next_back()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit(',').next())
-        .map(str::trim)
-        .filter(|ip| !ip.is_empty());
-    match forwarded {
-        Some(ip) if peer.is_loopback() => ip.to_string(),
-        _ => peer.to_string(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Response headers
 // ---------------------------------------------------------------------------
@@ -313,29 +290,6 @@ mod tests {
         let map = headers(&[("authorization", "Bearer  sekret ")]);
         assert_eq!(bearer(&map).as_deref(), Some("sekret"));
         assert_eq!(bearer(&headers(&[])), None);
-    }
-
-    #[test]
-    fn only_a_loopback_peer_can_name_a_client() {
-        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
-        let stranger: IpAddr = "203.0.113.9".parse().unwrap();
-        let forwarded = headers(&[("x-forwarded-for", " 6.6.6.6, 1.2.3.4 ")]);
-
-        // The rightmost entry is the trusted hop's; the left is client text.
-        assert_eq!(client_ip(&forwarded, proxy), "1.2.3.4");
-        assert_eq!(client_ip(&forwarded, stranger), "203.0.113.9");
-        // No header never means a shared bucket for the world.
-        assert_eq!(client_ip(&headers(&[]), stranger), "203.0.113.9");
-        assert_eq!(client_ip(&headers(&[]), proxy), "127.0.0.1");
-        assert_eq!(
-            client_ip(&headers(&[("x-forwarded-for", ", ")]), proxy),
-            "127.0.0.1"
-        );
-        // Nothing in the chain sets x-real-ip, so only a client could.
-        assert_eq!(
-            client_ip(&headers(&[("x-real-ip", "9.9.9.9")]), proxy),
-            "127.0.0.1"
-        );
     }
 
     #[test]
