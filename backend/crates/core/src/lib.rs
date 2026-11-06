@@ -15,6 +15,7 @@ pub mod copilot;
 pub mod crypto;
 pub mod db;
 pub mod eth;
+pub mod jev;
 pub mod ledger; // TEMP-REGISTRATION ledger
 pub mod money;
 pub mod platform_stats;

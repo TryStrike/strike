@@ -4,14 +4,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, watch, Notify};
 
-use strike_core::agent::{self, Decision, Release, Reserve, Session, Signal};
+use strike_core::agent::{self, Decision, Release, Reservation, Reserve, Session, Signal};
 use strike_core::bets::now_ms;
 use strike_core::db::{self, Db};
 use strike_core::error::ApiResult;
+use strike_core::jev::{self, Gate};
 use strike_core::ledger::BetOutcome;
+use strike_core::settlement::binomo_multiplier;
 use strike_core::ticks;
 
 use crate::routes::balance_mutations::place_bet;
@@ -181,6 +184,30 @@ pub enum Placement {
     Gone,
 }
 
+fn jev_proposal(
+    session: &Session,
+    direction: &'static str,
+    stake: Decimal,
+    move_15s_pct: f64,
+    move_share_of_2m_range: f64,
+    range_2m_pct: f64,
+) -> jev::Proposal {
+    let usdc = |value: Decimal| value.to_f64().unwrap_or(0.0);
+    jev::Proposal {
+        asset: session.asset.clone(),
+        direction,
+        move_15s_pct,
+        move_share_of_2m_range,
+        range_2m_pct,
+        stake_usdc: usdc(stake),
+        budget_left_usdc: usdc(session.budget - session.spent),
+        stop_loss_headroom_usdc: usdc(session.stop_loss + session.realized_pnl),
+        payout_multiplier: binomo_multiplier(agent::ROUND_SECONDS)
+            .and_then(|multiplier| multiplier.to_f64())
+            .expect("the payout table offers the agent's round length"),
+    }
+}
+
 /// One look at the market, with no bet open.
 async fn check(
     database: &Db,
@@ -195,20 +222,48 @@ async fn check(
         Ok(stake) => stake,
         Err(reason) => return Ok(Placement::Stop(reason.into())),
     };
-    let (direction, strike, reason) = match agent::signal(ticks::buffer(), &session.asset, now) {
-        Signal::Skip(why) => return note(database, session, "skipped", why).await,
-        Signal::Trade {
-            direction,
-            strike,
-            reason,
-        } => (direction, strike, reason),
+    let (direction, strike, reason, proposal) =
+        match agent::signal(ticks::buffer(), &session.asset, now) {
+            Signal::Skip(why) => return note(database, session, "skipped", why).await,
+            Signal::Trade {
+                direction,
+                strike,
+                reason,
+                move_pct,
+                range_share,
+                range_pct,
+            } => (
+                direction,
+                strike,
+                reason,
+                jev_proposal(session, direction, stake, move_pct, range_share, range_pct),
+            ),
+        };
+    if jev::enabled() && session.ends_at_ms - now < jev::CLOSING_MS {
+        return note(database, session, "skipped", "Session is closing").await;
+    }
+    let confidence = match jev::review(&proposal).await {
+        Gate::Off => None,
+        Gate::Pass(confidence) => Some(confidence),
+        Gate::Block(confidence) => {
+            return note_scored(database, session, "blocked", jev::BLOCKED, Some(confidence)).await
+        }
+        Gate::Failed(why) => return note(database, session, "skipped", why).await,
     };
     if *stopped.borrow() {
         return Ok(Placement::Noted);
     }
     if session.mode == "normal" {
-        let proposal =
-            agent::record_proposal(database, &session.id, direction, stake, &reason, now).await?;
+        let proposal = agent::record_proposal(
+            database,
+            &session.id,
+            direction,
+            stake,
+            &reason,
+            confidence,
+            now,
+        )
+        .await?;
         publish(&session.id, decision_frame(&proposal));
         let expires_ms = proposal.expires_at_ms.unwrap_or(now + agent::PROPOSAL_MS);
         return Ok(Placement::Proposed {
@@ -223,6 +278,7 @@ async fn check(
         strike,
         reason: &reason,
         proposal: false,
+        confidence,
     };
     place(database, session, trade).await
 }
@@ -275,6 +331,7 @@ pub struct Trade<'a> {
     pub reason: &'a str,
     /// Placing an approved proposal rather than a new yolo trade.
     pub proposal: bool,
+    pub confidence: Option<f64>,
 }
 
 /// Holds the stake under every limit, runs the locked bet path, and records
@@ -284,10 +341,13 @@ pub async fn place(database: &Db, session: &mut Session, trade: Trade<'_>) -> Ap
     let reserved = agent::reserve(
         database,
         &session.id,
-        id,
-        trade.direction,
-        trade.reason,
-        trade.proposal,
+        Reservation {
+            decision_id: id,
+            direction: trade.direction,
+            reason: trade.reason,
+            proposal: trade.proposal,
+            confidence: trade.confidence,
+        },
         now_ms(),
     )
     .await?;
@@ -353,7 +413,18 @@ async fn note(
     verdict: &'static str,
     why: &str,
 ) -> ApiResult<Placement> {
-    let decision = agent::record_note(database, &session.id, verdict, why, now_ms()).await?;
+    note_scored(database, session, verdict, why, None).await
+}
+
+async fn note_scored(
+    database: &Db,
+    session: &Session,
+    verdict: &'static str,
+    why: &str,
+    confidence: Option<f64>,
+) -> ApiResult<Placement> {
+    let decision =
+        agent::record_note(database, &session.id, verdict, why, confidence, now_ms()).await?;
     publish(&session.id, decision_frame(&decision));
     Ok(Placement::Noted)
 }

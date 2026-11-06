@@ -90,6 +90,8 @@ pub struct Config {
     pub agent_max_minutes: i64,
     /// Backend only. The copilot answers 503 without it.
     pub anthropic_api_key: Option<String>,
+    pub openrouter_api_key: Option<String>,
+    pub jev_endpoint: String,
     /// Overridable so a test decides what the model says.
     pub anthropic_base_url: String,
     /// Open stake summed across every running agent.
@@ -174,6 +176,9 @@ impl Config {
                 .unwrap_or(rust_decimal::Decimal::from(100)),
             agent_max_minutes: parse_num("AGENT_MAX_MINUTES").unwrap_or(30),
             anthropic_api_key: str_var("ANTHROPIC_API_KEY"),
+            openrouter_api_key: str_var("OPENROUTER_API_KEY"),
+            jev_endpoint: str_var("JEV_ENDPOINT")
+                .unwrap_or_else(|| crate::jev::ENDPOINT.to_string()),
             anthropic_base_url: str_var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             agent_max_open_stake: parse_num("AGENT_MAX_OPEN_STAKE")

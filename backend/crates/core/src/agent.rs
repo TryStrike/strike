@@ -193,6 +193,9 @@ pub enum Signal {
         direction: &'static str,
         strike: f64,
         reason: String,
+        move_pct: f64,
+        range_share: f64,
+        range_pct: f64,
     },
     Skip(&'static str),
 }
@@ -229,6 +232,9 @@ pub fn signal(ring: &TickBuffer, asset: &str, now_ms: i64) -> Signal {
     Signal::Trade {
         direction,
         strike: now.price,
+        move_pct: moved / then.price * 100.0,
+        range_share: share,
+        range_pct: range / then.price * 100.0,
         reason: format!(
             "{} {:.2}% in 15s, {:.0}% of the 2 minute range",
             if moved > 0.0 { "up" } else { "down" },
@@ -325,6 +331,7 @@ pub struct Decision {
     pub result: Option<String>,
     pub pnl: Option<Decimal>,
     pub expires_at_ms: Option<i64>,
+    pub confidence: Option<f64>,
 }
 
 fn money_json(value: Decimal) -> Value {
@@ -362,7 +369,7 @@ impl Decision {
             "verdict": self.verdict,
             "reason": self.reason,
             "skipCount": self.skip_count,
-            "confidence": Value::Null,
+            "confidence": self.confidence,
             "betId": self.bet_id,
             "result": self.result,
             "pnl": self.pnl.map(money_json),
@@ -374,7 +381,12 @@ impl Decision {
 const SESSION_COLUMNS: &str = "id, wallet, asset, mode, budget, max_per_trade, stop_loss, \
      starts_at, ends_at, status, stopped_reason, spent, realized_pnl";
 const DECISION_COLUMNS: &str =
-    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at";
+    "id, session_id, created_at, direction, stake, verdict, reason, skip_count, bet_id, result, pnl, expires_at, confidence";
+
+/// Stored like a multiplier, at 4 decimals.
+fn confidence_fixed(confidence: f64) -> i64 {
+    (confidence * 10_000.0).round() as i64
+}
 
 fn money(fixed: i64) -> Decimal {
     from_fixed(fixed, MONEY_SCALE)
@@ -416,6 +428,9 @@ fn decision_row(row: &Row) -> rusqlite::Result<Decision> {
         result: row.get(9)?,
         pnl: row.get::<_, Option<i64>>(10)?.map(money),
         expires_at_ms: row.get::<_, Option<i64>>(11)?.map(|us| us / 1_000),
+        confidence: row
+            .get::<_, Option<i64>>(12)?
+            .map(|fixed| fixed as f64 / 10_000.0),
     })
 }
 
@@ -585,8 +600,10 @@ pub async fn record_note(
     session_id: &str,
     verdict: &'static str,
     reason: &str,
+    confidence: Option<f64>,
     now_ms: i64,
 ) -> ApiResult<Decision> {
+    let confidence = confidence.map(confidence_fixed);
     let (session_id, reason) = (session_id.to_string(), reason.to_string());
     db.write(move |conn| {
         let last: Option<(String, String, String)> = conn
@@ -600,17 +617,18 @@ pub async fn record_note(
         if let Some((id, last_verdict, last_reason)) = last {
             if last_verdict == verdict && last_reason == reason {
                 conn.execute(
-                    "UPDATE agent_decisions SET skip_count = skip_count + 1 WHERE id = ?1",
-                    [&id],
+                    "UPDATE agent_decisions SET skip_count = skip_count + 1, \
+                     confidence = ?2 WHERE id = ?1",
+                    params![id, confidence],
                 )?;
                 return load_decision(conn, &id);
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO agent_decisions (id, session_id, created_at, verdict, reason) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, session_id, now_ms * 1_000, verdict, reason],
+            "INSERT INTO agent_decisions (id, session_id, created_at, verdict, reason, confidence) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, session_id, now_ms * 1_000, verdict, reason, confidence],
         )?;
         load_decision(conn, &id)
     })
@@ -642,15 +660,28 @@ fn open_stake(conn: &Connection, session_id: Option<&str>) -> rusqlite::Result<D
 /// Sizes the trade and holds its stake in one write, so the house cap is
 /// checked and taken atomically across every agent. Open stake is every placed
 /// decision whose round hasn't settled, held ones included.
+pub struct Reservation<'a> {
+    pub decision_id: &'a str,
+    pub direction: &'a str,
+    pub reason: &'a str,
+    pub proposal: bool,
+    pub confidence: Option<f64>,
+}
+
 pub async fn reserve(
     db: &Db,
     session_id: &str,
-    decision_id: &str,
-    direction: &str,
-    reason: &str,
-    proposal: bool,
+    reservation: Reservation<'_>,
     now_ms: i64,
 ) -> ApiResult<Reserve> {
+    let Reservation {
+        decision_id,
+        direction,
+        reason,
+        proposal,
+        confidence,
+    } = reservation;
+    let confidence = confidence.map(confidence_fixed);
     let (session_id, id, direction, reason) = (
         session_id.to_string(),
         decision_id.to_string(),
@@ -679,9 +710,9 @@ pub async fn reserve(
             }
         } else {
             conn.execute(
-                "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6)",
-                params![id, session_id, now_ms * 1_000, direction, held, reason],
+                "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, confidence) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'placed', ?6, ?7)",
+                params![id, session_id, now_ms * 1_000, direction, held, reason, confidence],
             )?;
         }
         conn.execute(
@@ -700,8 +731,10 @@ pub async fn record_proposal(
     direction: &str,
     stake: Decimal,
     reason: &str,
+    confidence: Option<f64>,
     now_ms: i64,
 ) -> ApiResult<Decision> {
+    let confidence = confidence.map(confidence_fixed);
     let id = uuid::Uuid::new_v4().to_string();
     let (session_id, direction, reason) = (
         session_id.to_string(),
@@ -711,8 +744,8 @@ pub async fn record_proposal(
     let stake = fixed(stake)?;
     db.write(move |conn| {
         conn.execute(
-            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting', ?6, ?7)",
+            "INSERT INTO agent_decisions (id, session_id, created_at, direction, stake, verdict, reason, expires_at, confidence) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting', ?6, ?7, ?8)",
             params![
                 id,
                 session_id,
@@ -720,7 +753,8 @@ pub async fn record_proposal(
                 direction,
                 stake,
                 reason,
-                (now_ms + PROPOSAL_MS) * 1_000
+                (now_ms + PROPOSAL_MS) * 1_000,
+                confidence
             ],
         )?;
         load_decision(conn, &id)
