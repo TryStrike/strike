@@ -37,6 +37,18 @@ When you explain a decision, use only its trace and result. If a decision has no
 Your earlier answers were true when you gave them. The tool calls behind them are not repeated in the history, so never correct them for that. \
 Only if the trader asks you to place a bet, change a limit or move funds, say you can't.";
 
+const WATCHER: &str = "You watch a binary options trading agent for its trader. You are read only and never affect a trade. \
+In two short sentences, say what the latest event means for the trader. Use only numbers from the event or your tools, never guess. \
+Call the jev score \"jev confidence\". It is an opinion, never a win chance, an expected value or a probability. \
+Never suggest the agent has an edge.";
+/// All the watcher may call: reads, and nothing that moves the UI.
+const WATCH_TOOLS: [&str; 4] = [
+    "get_market_trend",
+    "get_agent_decisions",
+    "get_session_limits",
+    "get_trade_history",
+];
+
 /// The request for one turn. Strict schemas, so tool inputs always validate.
 /// What can change between questions. Told fresh each time instead of left for
 /// the model to remember from earlier answers.
@@ -65,6 +77,27 @@ pub fn request(messages: &[Value], context: Context) -> Value {
         "output_config": { "effort": "low" },
         "system": format!("{SYSTEM} {ticket} {session}"),
         "tools": tools(),
+        "messages": messages,
+    })
+}
+
+/// The watcher's turn. Medium effort, because low returned no thinking at all.
+pub fn watch_request(messages: &[Value]) -> Value {
+    let tools: Vec<Value> = tools()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| WATCH_TOOLS.iter().any(|name| t["name"] == *name))
+        .cloned()
+        .collect();
+    json!({
+        "model": MODEL,
+        "max_tokens": 4_000,
+        "stream": true,
+        "thinking": { "type": "adaptive", "display": "summarized" },
+        "output_config": { "effort": "medium" },
+        "system": WATCHER,
+        "tools": tools,
         "messages": messages,
     })
 }
@@ -469,6 +502,11 @@ pub struct Turn {
     pub stop_reason: Option<String>,
 }
 
+pub enum Delta {
+    Text(String),
+    Thinking(String),
+}
+
 pub struct ToolUse {
     pub id: String,
     pub name: String,
@@ -476,8 +514,8 @@ pub struct ToolUse {
 }
 
 impl Turn {
-    /// Applies one stream event. Returns a text delta to forward to the client.
-    pub fn apply(&mut self, event: &Value) -> Result<Option<String>, String> {
+    /// Applies one stream event. Returns what the turn added for the reader.
+    pub fn apply(&mut self, event: &Value) -> Result<Option<Delta>, String> {
         let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         match event.get("type").and_then(Value::as_str) {
             Some("content_block_start") => {
@@ -501,13 +539,13 @@ impl Turn {
                     Some("text_delta") => {
                         let text = delta["text"].as_str().unwrap_or_default();
                         append(block, "text", text);
-                        return Ok(Some(text.to_string()));
+                        return Ok(Some(Delta::Text(text.to_string())));
                     }
-                    Some("thinking_delta") => append(
-                        block,
-                        "thinking",
-                        delta["thinking"].as_str().unwrap_or_default(),
-                    ),
+                    Some("thinking_delta") => {
+                        let thinking = delta["thinking"].as_str().unwrap_or_default();
+                        append(block, "thinking", thinking);
+                        return Ok(Some(Delta::Thinking(thinking.to_string())));
+                    }
                     Some("signature_delta") => block["signature"] = delta["signature"].clone(),
                     Some("input_json_delta") => self.inputs[index]
                         .push_str(delta["partial_json"].as_str().unwrap_or_default()),
@@ -562,19 +600,18 @@ static CLAUDE: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("reqwest client builds")
 });
 
-/// One streamed turn. `on_text` gets each answer delta as it arrives, and its
-/// `Err` (the client hung up) ends the turn so no more tokens are paid for.
+/// One streamed turn of `body`. `on_delta` gets each piece as it arrives, and
+/// its `Err` (the client hung up) ends the turn so no more tokens are paid for.
 pub async fn stream_turn(
     key: &str,
-    messages: &[Value],
-    context: Context,
-    mut on_text: impl FnMut(&str) -> Result<(), String>,
+    body: &Value,
+    mut on_delta: impl FnMut(Delta) -> Result<(), String>,
 ) -> Result<Turn, String> {
     let mut res = CLAUDE
         .post(format!("{}/v1/messages", config().anthropic_base_url))
         .header("x-api-key", key)
         .header("anthropic-version", API_VERSION)
-        .json(&request(messages, context))
+        .json(body)
         .send()
         .await
         .map_err(|err| format!("Claude API unreachable: {err}"))?;
@@ -603,8 +640,8 @@ pub async fn stream_turn(
             };
             let event: Value = serde_json::from_str(data)
                 .map_err(|err| format!("Claude sent an unreadable event: {err}"))?;
-            if let Some(text) = turn.apply(&event)? {
-                on_text(&text)?;
+            if let Some(delta) = turn.apply(&event)? {
+                on_delta(delta)?;
             }
         }
     }

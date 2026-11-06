@@ -1300,7 +1300,10 @@ fn tool_turn(tools: &[(&str, Value)]) -> String {
     events.extend(block(
         0,
         json!({ "type": "thinking", "thinking": "", "signature": "" }),
-        &[json!({ "type": "signature_delta", "signature": "sig-1" })],
+        &[
+            json!({ "type": "thinking_delta", "thinking": "Checking the numbers." }),
+            json!({ "type": "signature_delta", "signature": "sig-1" }),
+        ],
     ));
     for (i, (name, input)) in tools.iter().enumerate() {
         let raw = input.to_string();
@@ -1323,6 +1326,9 @@ fn tool_turn(tools: &[(&str, Value)]) -> String {
 fn script(question: &str) -> Vec<(&'static str, Value)> {
     if question.contains("loop") {
         return vec![("get_market_movers", json!({}))];
+    }
+    if question.starts_with("Latest event") {
+        return vec![("get_agent_decisions", json!({}))];
     }
     if question.contains("trend") {
         return vec![("get_market_trend", json!({ "symbol": "BTC" }))];
@@ -1520,6 +1526,98 @@ async fn whats_moving_streams_an_answer_and_opens_a_table_of_real_movers() {
         results[0]["content"].as_str().unwrap().contains("BTC"),
         "{results:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_yolo_session_streams_the_watchers_thinking_and_read_only_tools() {
+    let (s, feed, claude) = copilot_server(100.0).await;
+    let trader = key(42);
+    s.fund(&address_of(&trader), 100);
+    let (_, _, cookie) = s.start_agent(&trader, &yolo(&trader)).await;
+    let mut decisions = s.feed(&cookie.unwrap()).await;
+
+    jump_after_history(&feed).await;
+    first_verdict(&mut decisions, &["placed"], 15).await;
+    let thinking = decisions
+        .until("thought", 10, |t| t["thinking"].is_string())
+        .await;
+    assert_eq!(thinking["thinking"], "Checking the numbers.", "{thinking}");
+    let step = decisions
+        .until("thought", 10, |t| t["step"].is_object())
+        .await;
+    assert_eq!(
+        step["step"],
+        json!({ "label": "Read your decisions", "ok": true }),
+        "{step}"
+    );
+    let said = decisions
+        .until("thought", 10, |t| t["text"].is_string())
+        .await;
+    assert_eq!(said["id"], thinking["id"], "one thought per event");
+
+    let body = claude.lock().unwrap()[0].clone();
+    assert_eq!(body["thinking"]["display"], "summarized", "{body}");
+    assert_eq!(body["output_config"]["effort"], "medium", "{body}");
+    let tools: Vec<&str> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            "get_market_trend",
+            "get_agent_decisions",
+            "get_session_limits",
+            "get_trade_history",
+        ],
+        "read only, and nothing that moves the UI or money"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_normal_session_has_no_watcher() {
+    let (s, feed, claude) = copilot_server(100.0).await;
+    let trader = key(43);
+    s.fund(&address_of(&trader), 100);
+    let terms = StartTerms {
+        mode: "normal".into(),
+        ..yolo(&trader)
+    };
+    let (_, _, cookie) = s.start_agent(&trader, &terms).await;
+    let cookie = cookie.unwrap();
+    let mut decisions = s.feed(&cookie).await;
+
+    jump_after_history(&feed).await;
+    let proposal = first_verdict(&mut decisions, &["awaiting"], 15).await;
+    let id = proposal["id"].as_str().unwrap();
+    s.agent_post(&format!("/api/agent/decisions/{id}/approve"), Some(&cookie))
+        .await;
+    first_verdict(&mut decisions, &["placed"], 5).await;
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+
+    assert!(claude.lock().unwrap().is_empty(), "no Claude call");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_watcher_never_touches_a_trade() {
+    let (_claude, url) = spawn_claude().await;
+    let url: &'static str = Box::leak(url.into_boxed_str());
+    let env = [
+        ("ANTHROPIC_API_KEY", "a-key-the-fake-refuses"),
+        ("ANTHROPIC_BASE_URL", url),
+    ];
+    let (s, feed, _) = Server::start_with(100.0, &env).await;
+    let trader = key(44);
+    s.fund(&address_of(&trader), 100);
+    let (_, _, cookie) = s.start_agent(&trader, &yolo(&trader)).await;
+    let mut decisions = s.feed(&cookie.unwrap()).await;
+
+    jump_after_history(&feed).await;
+    let placed = first_verdict(&mut decisions, &["placed"], 15).await;
+
+    assert!(placed["betId"].is_string(), "{placed}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

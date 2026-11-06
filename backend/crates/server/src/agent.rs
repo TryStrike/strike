@@ -106,6 +106,7 @@ pub fn spawn(session: Session) {
         lock: Arc::default(),
         answered: Arc::default(),
     };
+    crate::watcher::spawn(&session, frames.clone());
     live().insert(
         session.id.clone(),
         Live {
@@ -314,11 +315,13 @@ async fn check(
         let proposal = agent::record_proposal(
             database,
             &session.id,
-            direction,
-            stake,
+            Proposed {
+                direction,
+                stake,
+                trace,
+            },
             &reason,
             confidence,
-            &trace,
             now,
         )
         .await?;

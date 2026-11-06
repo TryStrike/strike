@@ -1,11 +1,6 @@
 import { create } from 'zustand';
+import type { ToolStep } from '@/lib/agent/agentFeed';
 import { dispatch, useCopilotView } from './actions';
-
-export interface ToolStep {
-  label: string;
-  ok: boolean;
-  error?: string;
-}
 
 export interface ChatMessage {
   role: 'user' | 'assistant';

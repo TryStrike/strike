@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle, PaperPlaneRight, Stop, StopCircle, WarningCircle } from '@phosphor-icons/react';
+import { Brain, CheckCircle, PaperPlaneRight, Stop, StopCircle, WarningCircle } from '@phosphor-icons/react';
 import { Button, Field, cx } from '@/components/ui/kit';
 import { DecisionRow } from '@/components/agent/DecisionRow';
-import { WHY_REACH, useAgentFeed, type AgentSession, type Decision } from '@/lib/agent/agentFeed';
+import { WHY_REACH, useAgentFeed, type AgentSession, type Decision, type Thought, type ToolStep } from '@/lib/agent/agentFeed';
 import { useCopilot, type ChatMessage } from '@/lib/copilot/useCopilot';
 
 function SessionStrip({ session }: { session: AgentSession }) {
@@ -36,14 +36,35 @@ function SessionStrip({ session }: { session: AgentSession }) {
   );
 }
 
+function Step({ step }: { step: ToolStep }) {
+  return (
+    <p className={cx('mb-1 flex items-center gap-1.5 text-xs', step.ok ? 'text-subtle' : 'text-down')}>
+      {step.ok ? <CheckCircle size={13} weight="fill" className="text-up" /> : <WarningCircle size={13} weight="fill" />}
+      {step.ok ? step.label : `${step.label} failed: ${step.error}`}
+    </p>
+  );
+}
+
+function ThoughtRow({ t }: { t: Thought }) {
+  return (
+    <div className="rounded-2xl bg-surface px-3 py-2 text-xs text-muted">
+      <p className="mb-1 flex items-center gap-1 font-jet text-[10px] uppercase tracking-wider text-faint">
+        <Brain size={12} /> Watcher, read only
+      </p>
+      {t.steps.map((step, i) => (
+        <Step key={i} step={step} />
+      ))}
+      {t.thinking && <p className="whitespace-pre-wrap text-subtle">{t.thinking}</p>}
+      {t.text && <p className="mt-1 whitespace-pre-wrap text-ink">{t.text}</p>}
+    </div>
+  );
+}
+
 function Message({ m }: { m: ChatMessage }) {
   return (
     <div className={cx('w-fit max-w-[90%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm', m.role === 'user' ? 'ml-auto bg-ink text-white' : 'bg-surface')}>
       {m.steps?.map((step, i) => (
-        <p key={i} className={cx('mb-1 flex items-center gap-1.5 text-xs', step.ok ? 'text-subtle' : 'text-down')}>
-          {step.ok ? <CheckCircle size={13} weight="fill" className="text-up" /> : <WarningCircle size={13} weight="fill" />}
-          {step.ok ? step.label : `${step.label} failed: ${step.error}`}
-        </p>
+        <Step key={i} step={step} />
       ))}
       {m.label ?? m.content}
       {m.role === 'assistant' && !m.content && !m.steps?.length && '…'}
@@ -51,7 +72,10 @@ function Message({ m }: { m: ChatMessage }) {
   );
 }
 
-type Row = { at: number; key: string; decision: Decision; index: number } | { at: number; key: string; message: ChatMessage };
+type Row =
+  | { at: number; key: string; decision: Decision; index: number }
+  | { at: number; key: string; message: ChatMessage }
+  | { at: number; key: string; thought: Thought };
 
 /** One line of everything a session did: decisions, tool steps, chat, and how it ended. */
 export default function AgentStream({
@@ -64,6 +88,7 @@ export default function AgentStream({
   footer?: React.ReactNode;
 }) {
   const decisions = useAgentFeed((s) => s.decisions);
+  const thoughts = useAgentFeed((s) => s.thoughts);
   const { messages, busy, error, send } = useCopilot();
   const [draft, setDraft] = useState('');
   const [stopError, setStopError] = useState<string | null>(null);
@@ -73,9 +98,10 @@ export default function AgentStream({
   const rows: Row[] = [
     ...byTime.map((decision, index) => ({ at: decision.createdAt, key: decision.id, decision, index })),
     ...messages.map((message, i) => ({ at: message.at, key: `chat-${i}`, message })),
+    ...thoughts.map((thought) => ({ at: thought.at, key: thought.id, thought })),
   ].sort((a, b) => a.at - b.at);
   const newest = byTime.find((d) => d.verdict !== 'skipped');
-  const tail = rows.length + messages.reduce((n, m) => n + m.content.length, 0) + (byTime[0]?.skipCount ?? 0);
+  const tail = rows.length + messages.reduce((n, m) => n + m.content.length, 0) + (byTime[0]?.skipCount ?? 0) + thoughts.reduce((n, t) => n + t.thinking.length + t.text.length, 0);
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'nearest' });
   }, [tail, session.status]);
@@ -125,6 +151,8 @@ export default function AgentStream({
                 onWhy={why}
                 onAnswer={onAnswer}
               />
+            ) : 'thought' in row ? (
+              <ThoughtRow t={row.thought} />
             ) : (
               <Message m={row.message} />
             )}

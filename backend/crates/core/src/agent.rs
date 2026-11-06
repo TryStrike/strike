@@ -668,7 +668,7 @@ pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     .await
 }
 
-/// The trade a jev block stopped.
+/// A proposed trade and the numbers behind it.
 pub struct Proposed {
     pub direction: &'static str,
     pub stake: Decimal,
@@ -824,14 +824,17 @@ pub async fn reserve(
 pub async fn record_proposal(
     db: &Db,
     session_id: &str,
-    direction: &str,
-    stake: Decimal,
+    proposed: Proposed,
     reason: &str,
     confidence: Option<f64>,
-    trace: &Value,
     now_ms: i64,
 ) -> ApiResult<Decision> {
     let confidence = confidence.map(confidence_fixed);
+    let Proposed {
+        direction,
+        stake,
+        trace,
+    } = proposed;
     let trace = trace.to_string();
     let id = uuid::Uuid::new_v4().to_string();
     let (session_id, direction, reason) = (

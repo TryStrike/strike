@@ -91,7 +91,25 @@ async fn answer(
     claims: Option<AgentClaims>,
     tx: Frames,
 ) {
-    let (event, data) = match converse(&key, &mut messages, ticket_open, claims, &tx).await {
+    let context = copilot::Context {
+        ticket_open,
+        has_session: claims.is_some(),
+    };
+    let build = |messages: &[Value]| copilot::request(messages, context);
+    let sink = |event: &str, data: Value| match event {
+        "thinking" => Ok(()),
+        event => send(&tx, event, data),
+    };
+    let (event, data) = match converse(
+        &key,
+        &mut messages,
+        ticket_open,
+        claims.as_ref(),
+        build,
+        sink,
+    )
+    .await
+    {
         Ok(()) => ("done", json!({})),
         Err(why) => {
             tracing::warn!("[copilot] {why}");
@@ -102,21 +120,21 @@ async fn answer(
     let _ = send(&tx, event, data);
 }
 
-async fn converse(
+/// The tool loop. `build` shapes each request and `sink` gets every `thinking`,
+/// `text`, `tool` and `action` frame, and its `Err` ends the loop.
+pub async fn converse(
     key: &str,
     messages: &mut Vec<Value>,
     ticket_open: bool,
-    claims: Option<AgentClaims>,
-    tx: &Frames,
+    claims: Option<&AgentClaims>,
+    build: impl Fn(&[Value]) -> Value,
+    sink: impl Fn(&str, Value) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut desk = copilot::Desk::new(ticks::buffer(), now_ms(), ticket_open);
-    let context = copilot::Context {
-        ticket_open,
-        has_session: claims.is_some(),
-    };
     for turn_number in 0..=copilot::MAX_TOOL_TURNS {
-        let turn = copilot::stream_turn(key, messages, context, |text| {
-            send(tx, "text", json!({ "text": text }))
+        let turn = copilot::stream_turn(key, &build(messages), |delta| match delta {
+            copilot::Delta::Text(text) => sink("text", json!({ "text": text })),
+            copilot::Delta::Thinking(text) => sink("thinking", json!({ "thinking": text })),
         })
         .await?;
         match turn.stop_reason.as_deref() {
@@ -132,12 +150,12 @@ async fn converse(
         let mut results = Vec::new();
         for tool in turn.tool_uses() {
             let ran = if copilot::PERSONAL.contains(&tool.name.as_str()) {
-                personal(&tool, claims.as_ref()).await
+                personal(&tool, claims).await
             } else {
                 desk.run(&tool)
             };
             if let Some(action) = ran.action {
-                send(tx, "action", action)?;
+                sink("action", action)?;
             }
             let label = copilot::step_label(&tool.name);
             let step = if ran.is_error {
@@ -145,7 +163,7 @@ async fn converse(
             } else {
                 json!({ "label": label, "ok": true })
             };
-            send(tx, "tool", step)?;
+            sink("tool", step)?;
             results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool.id,

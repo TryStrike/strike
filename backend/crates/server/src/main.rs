@@ -5,6 +5,7 @@ mod bans;
 mod http;
 mod routes;
 mod sql;
+mod watcher;
 
 use std::net::SocketAddr;
 use std::path::Path;
