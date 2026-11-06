@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
@@ -64,11 +64,13 @@ function stepsOf(d: Decision) {
     }
   }
   const placed = d.verdict === "placed";
-  steps.push({
-    name: "Verdict",
-    text: placed ? `placed ${d.direction}` : d.reason,
-    bad: d.verdict === "blocked" || d.verdict === "rejected",
-  });
+  if (d.verdict !== "awaiting") {
+    steps.push({
+      name: "Verdict",
+      text: placed ? `placed ${d.direction}` : d.reason,
+      bad: d.verdict === "blocked" || d.verdict === "rejected",
+    });
+  }
   if (d.result) {
     const pnl =
       d.pnl === null ? "" : ` ${d.pnl >= 0 ? "+" : ""}${d.pnl.toFixed(2)}`;
@@ -80,6 +82,21 @@ function stepsOf(d: Decision) {
   }
   return steps;
 }
+
+function Countdown({ until }: { until: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <span className="ml-auto font-jet text-xs tabular-nums text-down">
+      {(Math.max(0, until - now) / 1000).toFixed(1)}s
+    </span>
+  );
+}
+
+const WON_BACK = new Set(["win", "tie", "refund_no_price"]);
 
 export function DecisionRow({
   d,
@@ -197,6 +214,13 @@ export function DecisionRow({
                   mode: "binomo",
                   direction: d.direction,
                   stake: d.stake,
+                  won: d.result
+                    ? WON_BACK.has(d.result) || (d.result === "loss" ? false : null)
+                    : null,
+                  payout:
+                    d.result && d.pnl !== null && d.stake !== null
+                      ? d.stake + d.pnl
+                      : null,
                 }}
               />
             )}
@@ -205,7 +229,7 @@ export function DecisionRow({
       )}
       {d.verdict === "awaiting" &&
         (onAnswer ? (
-          <div className="mt-2 flex gap-2">
+          <div className="mt-2 flex items-center gap-2">
             <Button size="sm" onClick={() => onAnswer(d.id, "approve")}>
               Approve
             </Button>
@@ -216,6 +240,7 @@ export function DecisionRow({
             >
               Reject
             </Button>
+            {d.expiresAt !== null && <Countdown until={d.expiresAt} />}
           </div>
         ) : (
           <Link

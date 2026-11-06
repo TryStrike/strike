@@ -143,13 +143,27 @@ export default function AgentStream({
   const following = useRef(true);
 
   const byTime = [...decisions].sort((a, b) => b.createdAt - a.createdAt);
+  const pending =
+    session.status === "running"
+      ? byTime.find((d) => d.verdict === "awaiting")
+      : undefined;
+  const rowOf = (decision: Decision, index: number) => (
+    <DecisionRow
+      d={decision}
+      session={session}
+      newest={decision.id === newest?.id}
+      later={index > 0}
+      canWhy={index < WHY_REACH && !busy}
+      onWhy={why}
+      onAnswer={onAnswer}
+    />
+  );
   const rows: Row[] = [
-    ...byTime.map((decision, index) => ({
-      at: decision.createdAt,
-      key: decision.id,
-      decision,
-      index,
-    })),
+    ...byTime.flatMap((decision, index) =>
+      decision.id === pending?.id
+        ? []
+        : [{ at: decision.createdAt, key: decision.id, decision, index }],
+    ),
     ...messages.map((message, i) => ({
       at: message.at,
       key: `chat-${i}`,
@@ -239,15 +253,7 @@ export default function AgentStream({
         {rows.map((row) => (
           <li key={row.key}>
             {"decision" in row ? (
-              <DecisionRow
-                d={row.decision}
-                session={session}
-                newest={row.decision.id === newest?.id}
-                later={row.index > 0}
-                canWhy={row.index < WHY_REACH && !busy}
-                onWhy={why}
-                onAnswer={onAnswer}
-              />
+              rowOf(row.decision, row.index)
             ) : "thought" in row ? (
               <ThoughtRow t={row.thought} />
             ) : (
@@ -280,6 +286,7 @@ export default function AgentStream({
           {error}
         </p>
       )}
+      {pending && rowOf(pending, byTime.indexOf(pending))}
       {session.status === "running" && footer}
       <form onSubmit={submit} className="flex items-center gap-2">
         <Field
