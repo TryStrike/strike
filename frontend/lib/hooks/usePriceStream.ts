@@ -2,7 +2,7 @@
 
 
 import { useEffect, useRef, useState } from 'react';
-import { startPricePolling } from '@/lib/utils/priceFeed';
+import { rememberPrices, startPricePolling } from '@/lib/utils/priceFeed';
 
 export type PriceFeedMode = 'stream' | 'poll';
 
@@ -18,6 +18,8 @@ export interface UsePriceStreamOptions {
 
 const DEFAULT_STREAM_PATH = '/api/prices/stream';
 const DEFAULT_FIRST_TICK_TIMEOUT_MS = 4000;
+// The very first connect only: a page that has never had a price shouldn't wait out the full timeout.
+const COLD_START_TICK_TIMEOUT_MS = 1500;
 const DEFAULT_MAX_RECONNECT_BACKOFF_MS = 15_000;
 
 export function usePriceStream(
@@ -111,7 +113,11 @@ export function usePriceStream(
     const connect = () => {
       if (disposed) return;
       es = new EventSource(streamPath);
-      watchdog = setTimeout(degrade, firstTickTimeoutMs);
+      const coldStart = attempt === 0;
+      watchdog = setTimeout(
+        degrade,
+        coldStart ? Math.min(COLD_START_TICK_TIMEOUT_MS, firstTickTimeoutMs) : firstTickTimeoutMs
+      );
 
       es.onmessage = (event: MessageEvent) => {
         watchdog = clearTimer(watchdog);
@@ -134,7 +140,10 @@ export function usePriceStream(
         setMode('stream');
         setConnected(true);
         const prices = frame.prices as Record<string, number>;
-        if (Object.keys(prices).length > 0) onTickRef.current(prices);
+        if (Object.keys(prices).length > 0) {
+          onTickRef.current(prices);
+          rememberPrices(prices);
+        }
         if (frame.bands) onBandsRef.current?.(frame.bands as Record<string, number>);
         if (Array.isArray(frame.closed)) onClosedRef.current?.(frame.closed as string[]);
       };

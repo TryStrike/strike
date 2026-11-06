@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import type { Cell, CellLabel, Scales, TapGrid } from "tapgrid";
 import { TapGridChart } from "tapgrid/react";
 import { useStore } from "@/lib/store";
+import { ChartSkeleton } from "@/components/states/Skeleton";
 import { agentChartBets } from "@/lib/agent/agentFeed";
 import { resolveHouseLedgerCurrency } from "@/lib/balance/houseLedgerCurrency";
 import { AssetType } from "@/lib/utils/priceFeed";
@@ -36,6 +37,7 @@ import {
   Pulse,
 } from "@phosphor-icons/react";
 
+const WAIT_FOR_HISTORY_MS = 1_000;
 const BET_LOCK_MS = 2_500;
 const RESULT_VISIBLE_MS = 3_000;
 const ROWS = 10;
@@ -939,7 +941,15 @@ export const LiveChart = React.memo(function LiveChart({
   const assetSelectorRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
 
-  const isLoadingPrice = currentPrice <= 0;
+  // Polling brings no history, so the chart stops waiting for it after a moment.
+  const hasHistory = priceHistory.length > 1;
+  const [stoppedWaiting, setStoppedWaiting] = useState(false);
+  useEffect(() => {
+    if (hasHistory || stoppedWaiting) return;
+    const id = setTimeout(() => setStoppedWaiting(true), WAIT_FOR_HISTORY_MS);
+    return () => clearTimeout(id);
+  }, [hasHistory, stoppedWaiting]);
+  const isChartReady = currentPrice > 0 && (hasHistory || stoppedWaiting);
 
   const [showInsufficientFunds, setShowInsufficientFunds] = useState(false);
 
@@ -1324,24 +1334,16 @@ export const LiveChart = React.memo(function LiveChart({
       ref={containerRef}
       className="absolute inset-0 z-0 bg-white font-tight text-ink overflow-hidden select-none"
     >
-      {isLoadingPrice && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/80">
-          <div className="flex flex-col items-center gap-3">
-            <div className="w-6 h-6 rounded-full border-2 border-line border-t-up animate-spin" />
-            <div className="text-center">
-              <p className="text-ink text-sm font-medium">
-                Loading {currentAssetConfig.name}
-              </p>
-              <p className="text-subtle text-xs mt-0.5">
-                Connecting to price feed…
-              </p>
-            </div>
-          </div>
+      {!isChartReady && (
+        <div className="absolute inset-0 z-[6]">
+          <ChartSkeleton label={`Loading ${currentAssetConfig.name}…`} />
         </div>
       )}
 
       {theme && (
-        <div className="absolute inset-0 z-5">
+        <div
+          className={`absolute inset-0 z-5 ${isChartReady ? "opacity-100 transition-opacity duration-200 motion-reduce:transition-none" : "opacity-0"}`}
+        >
           <TapGridChart
             mode={isBox ? "grid" : "line"}
             seriesKey={selectedAsset}

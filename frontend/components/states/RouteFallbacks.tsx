@@ -4,7 +4,7 @@ import React from 'react';
 import { useRouter } from 'next/navigation';
 import { House } from '@phosphor-icons/react';
 import { StateScreen } from './StateScreen';
-import { SkeletonCard, SkeletonChartBlock, SkeletonStatTile, SkeletonTable } from './Skeleton';
+import { SkeletonCard, SkeletonStatTile, SkeletonTable } from './Skeleton';
 
 export const FallbackShell: React.FC<{ children: React.ReactNode; className?: string }> = ({
   children,
@@ -15,7 +15,7 @@ export const FallbackShell: React.FC<{ children: React.ReactNode; className?: st
   </div>
 );
 
-export type RouteShape = 'page' | 'dashboard' | 'list' | 'chart' | 'stats';
+export type RouteShape = 'page' | 'dashboard' | 'list' | 'stats';
 
 export function routeSkeleton(shape: RouteShape) {
   switch (shape) {
@@ -29,17 +29,6 @@ export function routeSkeleton(shape: RouteShape) {
             <SkeletonStatTile />
           </div>
           <SkeletonCard />
-        </div>
-      );
-    case 'chart':
-      return (
-        <div className="w-full max-w-[880px] space-y-4 px-4 py-8">
-          <SkeletonChartBlock />
-          <div className="grid gap-4 sm:grid-cols-3">
-            <SkeletonStatTile />
-            <SkeletonStatTile />
-            <SkeletonStatTile />
-          </div>
         </div>
       );
     case 'list':

@@ -49,15 +49,27 @@ export const SkeletonTable: React.FC<{ rows?: number; columns?: number; classNam
   </div>
 );
 
-export const SkeletonChartBlock: React.FC<{ className?: string }> = ({ className = '' }) => (
-  <div
-    className={`relative min-h-[220px] w-full overflow-hidden rounded-3xl bg-surface ring-1 ring-line ${className}`}
-    role="presentation"
-  >
-    <svg className="absolute inset-x-0 bottom-0 h-1/2 w-full text-line" viewBox="0 0 400 100" preserveAspectRatio="none" aria-hidden="true">
-      <path d="M0 80 C40 60 60 90 100 70 S160 40 200 55 S280 30 320 45 S380 20 400 35 L400 100 L0 100 Z" fill="currentColor" opacity="0.7" />
+/** Fills a positioned parent, and stays invisible for a moment so fast loads never flash it. */
+export const ChartSkeleton: React.FC<{ label: string }> = ({ label }) => (
+  <div className="by-chart-skeleton pointer-events-none absolute inset-0 overflow-hidden bg-white" role="status">
+    {[20, 40, 60, 80].map((top) => (
+      <span key={top} className="absolute inset-x-0 h-px bg-line" style={{ top: `${top}%` }} />
+    ))}
+    <svg
+      className="absolute inset-x-0 top-1/4 h-1/2 w-full animate-pulse text-line motion-reduce:animate-none"
+      viewBox="0 0 400 100"
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M0 80 C40 60 60 90 100 70 S160 40 200 55"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        vectorEffect="non-scaling-stroke"
+      />
     </svg>
-    <Skeleton className="absolute left-4 top-4 h-4 w-24" rounded="sm" />
+    <p className="absolute inset-x-0 top-1/2 mt-16 text-center text-xs text-subtle">{label}</p>
   </div>
 );
 
