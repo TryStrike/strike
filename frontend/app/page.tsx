@@ -295,7 +295,7 @@ export default function Landing() {
           <span>© {BRAND.name} · Prices via Yahoo Finance &amp; Binance · Not financial advice</span>
           <div className="flex gap-6">
             <a href={explorerAddressUrl(getArcConfig().treasuryAddress)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1">Treasury contract <ArrowUpRight size={13} aria-hidden="true" /></a>
-            <a href="https://example.com/strike" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1">GitHub <ArrowUpRight size={13} aria-hidden="true" /></a>
+            <a href="https://github.com/TryStrike/strike" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1">GitHub <ArrowUpRight size={13} aria-hidden="true" /></a>
           </div>
         </div>
       </footer>
