@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         supervise("binance stream", strike_core::binance_ws::run());
     }
     supervise("settlement sweeper", strike_core::settlement::run_sweeper());
+    supervise("agent result recorder", agent::run_result_recorder());
     supervise("shadow log", strike_core::shadow::run());
     if !strike_core::world::enabled() {
         tracing::warn!(

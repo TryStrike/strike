@@ -147,6 +147,27 @@ async fn run(mut session: Session, mut stopped: watch::Receiver<bool>, approval:
     live().remove(&id);
 }
 
+/// Finishes results no task is left to follow, after a restart or a failed task.
+pub async fn run_result_recorder() {
+    let mut every = tokio::time::interval(Duration::from_millis(agent::CHECK_EVERY_MS));
+    loop {
+        every.tick().await;
+        if let Err(err) = record_unfollowed().await {
+            tracing::error!("[agent] results not recorded: {err}");
+        }
+    }
+}
+
+async fn record_unfollowed() -> ApiResult<()> {
+    let database = db::db().await?;
+    for (decision_id, session_id) in agent::unrecorded_results(database).await? {
+        if !live().contains_key(&session_id) {
+            agent::record_result(database, &decision_id).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Marks the session stopped, tells the feed, and wakes the task.
 pub async fn stop(database: &Db, session_id: &str, reason: &str) {
     match agent::stop_session(database, session_id, reason).await {
@@ -317,7 +338,7 @@ async fn check(
         return Ok(Placement::Noted);
     }
     if session.mode == "normal" {
-        let proposal = agent::record_proposal(
+        let recorded = agent::record_proposal(
             database,
             &session.id,
             Proposed {
@@ -330,6 +351,9 @@ async fn check(
             now,
         )
         .await?;
+        let Some(proposal) = recorded else {
+            return Ok(Placement::Gone);
+        };
         publish(&session.id, decision_frame(&proposal));
         let expires_ms = proposal.expires_at_ms.unwrap_or(now + agent::PROPOSAL_MS);
         return Ok(Placement::Proposed {
