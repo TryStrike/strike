@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use k256::ecdsa::SigningKey;
 use rusqlite::params;
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::Notify;
 
 use crate::address::keccak256;
@@ -21,7 +21,6 @@ use crate::eth::{
 };
 
 pub const DEFAULT_RPC: &str = "https://rpc.rabdi.db-chain.testnet.arkiv.network";
-pub const EXPLORER: &str = "https://rabdi.explorer.arkiv.network";
 pub const CHAIN_ID: u64 = 7_794_095;
 const SCHEMA: &str = "strike.bets";
 const ARKIV: &str = "0x4400000000000000000000000000000000000044";
@@ -254,37 +253,6 @@ impl Arkiv {
             operator: address_from_signing_key(&signer).to_lowercase(),
             signer,
         }))
-    }
-
-    pub async fn query(&self, query: &str, limit: u32) -> ApiResult<Value> {
-        self.rpc
-            .call(
-                "arkiv_query",
-                json!([query, {
-                    "select": { "key": true, "attributes": true, "creator": true, "createdAt": true },
-                    "limit": format!("0x{limit:x}"),
-                }]),
-            )
-            .await
-    }
-
-    pub async fn entity(&self, key: &str) -> ApiResult<Value> {
-        self.rpc.call("arkiv_getEntity", json!([key])).await
-    }
-
-    /// Trusts only what our operator created: anyone can write our schema tag.
-    /// `bet_ids` must already be validated: they are spliced into `str('…')`.
-    pub fn history_query(&self, wallet: &str, bet_ids: &[&str]) -> String {
-        let ids = bet_ids
-            .iter()
-            .map(|id| format!("betId = str('{id}')"))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        format!(
-            "arkiv.schema = str('{SCHEMA}') AND $creator = addr({}) AND wallet = addr({}) AND ({ids})",
-            self.operator,
-            wallet.to_lowercase()
-        )
     }
 
     async fn tick(&self) -> ApiResult<()> {

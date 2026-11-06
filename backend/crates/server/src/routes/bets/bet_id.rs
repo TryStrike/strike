@@ -324,7 +324,6 @@ fn string_or_empty(value: Option<&Value>) -> String {
 }
 
 /// `BET_ID = /^[A-Za-z0-9_.:-]{1,120}$/`.
-/// Never a quote, so an id is safe inside an Arkiv `str('…')`.
 pub(crate) fn bet_id_ok(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     (1..=120).contains(&bytes.len())
