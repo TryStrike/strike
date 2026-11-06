@@ -2,9 +2,12 @@
 
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { ArrowUpRight, Copy, ShieldCheck, X } from '@phosphor-icons/react';
 import { explorerTxUrl } from '@/lib/arc/config';
 import { useStore } from '@/lib/store';
+
+const OnchainProof = dynamic(() => import('./OnchainProof'), { ssr: false });
 
 export interface SettlementTick {
   timestamp: number;
@@ -830,6 +833,8 @@ export const SettlementProof: React.FC<SettlementProofProps> = ({
                   </p>
                 )}
               </div>
+
+              {!demo && <OnchainProof betId={bet.betId} />}
 
               {proof.caveats.length > 0 && (
                 <ul className="mt-3 flex flex-col gap-1.5 rounded-3xl bg-down-soft px-4 py-3">

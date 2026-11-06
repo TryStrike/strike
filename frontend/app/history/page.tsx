@@ -2,6 +2,7 @@
 
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -58,6 +59,8 @@ import {
   type BetHistoryPage,
   type BetHistoryRow,
 } from '@/lib/store/historySlice';
+
+const EpochStrip = dynamic(() => import('@/components/history/EpochStrip'), { ssr: false });
 
 interface LoadedPage {
   wallet: string;
@@ -396,6 +399,8 @@ function HistoryPageInner() {
               </>
             )}
           </section>
+
+          <EpochStrip />
 
           <p className="text-center font-jet text-[11px] leading-relaxed text-faint">
             History is served by <span className="text-muted">GET /api/bets/history</span> for{' '}
