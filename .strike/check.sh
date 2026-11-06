@@ -15,6 +15,7 @@ backend() {
 frontend() {
   cd frontend
   npx tsc --noEmit
+  npx tsx lib/markets/bandCeiling.check.ts
   BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8080}" npm run build
 }
 
