@@ -121,6 +121,9 @@ pub fn parse_start(message: &str) -> Result<StartTerms, Rejection> {
 /// rows that already exist.
 pub fn check_start(t: &StartTerms, now_ms: i64) -> Result<(), Rejection> {
     let cfg = config();
+    if !t.wallet.starts_with("0x") || !crate::address::is_address(&t.wallet) {
+        return Err(refuse(400, "Wallet must be a 0x address"));
+    }
     if t.chain_id != cfg.arc_chain_id {
         return Err(refuse(400, "Start message is for another chain"));
     }
@@ -931,6 +934,17 @@ mod tests {
             message.replace("Strike agent session", "Strike"),
         ] {
             assert_eq!(parse_start(&forged).unwrap_err().0, 400, "{forged}");
+        }
+    }
+
+    #[test]
+    fn only_a_0x_wallet_starts() {
+        let now = terms().expires_ms - 60_000;
+        assert!(check_start(&terms(), now).is_ok());
+        let body = "1111111111111111111111111111111111111111";
+        for wallet in [format!("0X{body}"), body.to_string(), "0x1111".to_string()] {
+            let t = StartTerms { wallet, ..terms() };
+            assert_eq!(check_start(&t, now).unwrap_err().0, 400, "{}", t.wallet);
         }
     }
 }

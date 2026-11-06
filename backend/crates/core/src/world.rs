@@ -39,6 +39,7 @@ pub const ALREADY_USED: &str = "This approval link was already used";
 pub const OTHER_BROWSER: &str = "Approval opened in another browser";
 pub const WRONG_ISSUER: &str = "Wrong identity provider";
 pub const EXPIRED: &str = "Human check expired";
+pub const SUPERSEDED: &str = "A newer human check replaced this one";
 pub const CODE_SPENT: &str = "Approval code expired or used";
 pub const UNAVAILABLE: &str = "World ID unavailable, nothing started";
 pub const MISMATCH: &str = "A different human approved this";
@@ -59,6 +60,11 @@ pub fn accepted_classes(
     orb_max: Decimal,
     floor: Option<&str>,
 ) -> Result<&'static [&'static str], String> {
+    if selfie_max > orb_max {
+        return Err(format!(
+            "WORLD_SELFIE_MAX {selfie_max} is above WORLD_ORB_MAX {orb_max}"
+        ));
+    }
     let tier = if budget <= selfie_max {
         0
     } else if budget <= orb_max {
@@ -195,6 +201,11 @@ pub async fn begin(
         if let Some(refused) = agent::start_blocked(conn, &start_nonce, &wallet)? {
             return Ok(Err(refused));
         }
+        conn.execute(
+            "UPDATE world_attempts SET status = 'expired', reason = ?2, done_at = ?3 \
+             WHERE wallet = ?1 AND status = 'pending'",
+            params![wallet, SUPERSEDED, now_ms * 1_000],
+        )?;
         let inserted = conn.execute(
             "INSERT INTO world_attempts (id, wallet, message, state, nonce, verifier, browser, \
              acr_allowed, status, expires_at, created_at) \
@@ -399,6 +410,10 @@ impl Failure {
             Failure::Unavailable => UNAVAILABLE.to_string(),
             Failure::Rejected(code) if code == "invalid_grant" => CODE_SPENT.to_string(),
             Failure::Rejected(code) => could_not_finish(code),
+            Failure::Invalid("acr") => {
+                "Your World ID level is too low for this budget, lower it or verify with Orb"
+                    .to_string()
+            }
             Failure::Invalid(claim) => format!("Approval did not validate ({claim})"),
         }
     }
@@ -970,6 +985,7 @@ mod tests {
         assert_eq!(tier(5, Some("orb")), ["orb", "orb-face"]);
         assert_eq!(tier(60, Some("selfie")), ["orb-face"]);
         assert!(accepted_classes(Decimal::ONE, selfie, orb, Some("passkey")).is_err());
+        assert!(accepted_classes(Decimal::from(30), orb, selfie, None).is_err());
     }
 
     #[test]

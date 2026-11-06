@@ -2,7 +2,8 @@
 //! a YOLO session, and the attempt read behind the agent panel's chip. The
 //! callback always lands back on `/agent`, and never logs the code or token.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
@@ -61,6 +62,30 @@ async fn callback(
     }
 }
 
+/// Attempts whose code is out at World. A duplicate callback (a reload, a
+/// double redirect) leaves the first to finish instead of spending the code
+/// and recording its `invalid_grant` over the approval.
+// ponytail: per process, a claim column on world_attempts if the API ever runs twice.
+static REDEEMING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+struct Redeeming(String);
+
+impl Redeeming {
+    fn take(id: &str) -> Option<Self> {
+        let mut set = REDEEMING.lock().unwrap_or_else(PoisonError::into_inner);
+        set.insert(id.to_string()).then(|| Self(id.to_string()))
+    }
+}
+
+impl Drop for Redeeming {
+    fn drop(&mut self) {
+        REDEEMING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 /// The agent cookie on approval. `Err(Some)` is an outcome to record,
 /// `Err(None)` one the session write already recorded.
 async fn decide(
@@ -99,6 +124,9 @@ async fn decide(
     }
     let Some(code) = query.get("code") else {
         return fail("World ID could not finish: no code");
+    };
+    let Some(_redeeming) = Redeeming::take(&attempt.id) else {
+        return Ok(Err(None));
     };
     let grant = match world::redeem(code, attempt, now).await {
         Ok(grant) => grant,
