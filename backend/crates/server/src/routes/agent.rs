@@ -320,6 +320,9 @@ async fn answer_in_task(
         .map_err(|panic| ApiError::Other(format!("proposal answer task failed: {panic}")))?
 }
 
+const MOVED_WHILE_APPROVING: &str =
+    "The market moved while you were approving, so nothing was placed and no money moved";
+
 async fn answer_proposal(
     id: &str,
     headers: &HeaderMap,
@@ -436,8 +439,14 @@ async fn settle_proposal(
                     _ => {}
                 }
             }
+            agent::Signal::Trade { .. } if stepup.is_some() => {
+                live::answer(database, &session, id, "skipped", MOVED_WHILE_APPROVING).await?;
+            }
             agent::Signal::Trade { .. } => {
                 live::answer(database, &session, id, "skipped", "The move reversed").await?;
+            }
+            agent::Signal::Skip(_) if stepup.is_some() => {
+                live::answer(database, &session, id, "skipped", MOVED_WHILE_APPROVING).await?;
             }
             agent::Signal::Skip(why) => {
                 live::answer(database, &session, id, "skipped", why).await?;

@@ -352,13 +352,15 @@ Say on stage that Agent Pass is on the sandbox issuer and why. Fallback if World
 2. **Sandbox "simulated human" is refused.** Approvals from the sandbox app's simulated human in Developer Settings always ended `access_denied`. Only a sandbox account set up as described in "Getting a sandbox approval to work" was accepted.
 3. **IDKit Selfie tier is coded but not tested live.** The live IDKit run used the Orb preset in the simulator.
 4. **Passkeys are accepted** on Orb-level accounts (`amr = pop user mfa`). That proves a user-verified device of the Orb-verified account holder, not a fresh face scan.
-5. Server integration tests have not run. No test covers the full pause/resume loop or a restart.
-6. An approval and the signed request it re-sends both last 5 minutes. Approving after about 4.5 minutes makes the re-send expire, and the user starts again.
+5. Server integration tests (settlement, world_agent, shutdown, http) pass on Linux. The full pause and resume loop was verified live in the browser, not by an automated server test.
+6. A signed agent start is valid for 9 minutes and a signed withdrawal for 10, longer than the 5 minute approval, so a slow approval no longer expires the re-sent request.
 7. A 401 with no code from the agent routes makes the frontend re-sign the wallet once for nothing. Harmless.
 8. Not seen live yet: `slow_down` from the token endpoint. We assume it comes as HTTP 400 like the other RFC 8628 errors.
 9. After the daily loss cap, each new bet attempt pushes the cool-off another 30 minutes, until UTC midnight resets the loss total.
-10. The device code is stored in plain text in a column named `device_code_enc`. It is never logged or returned.
+10. The device code is never stored (only its hash), logged or returned; the poller keeps it in memory.
 11. The approval card shows a code and a link, no QR code.
 12. One poller per process. Approval polling breaks if the API runs as more than one process.
 13. The nullifier, `sub`, device code and tokens are never logged. Logs carry the step-up id, status, HTTP status, World's OAuth error code and World's `error_description` (cut to 200 characters).
 14. Agent Pass identity is bound to the human by trust on first use, since World gives no link between the IDKit nullifier and the Agent Pass `sub`.
+15. If the market signal has gone by the time a proposal is approved, the trade is not placed and the reason reads "The market moved while you were approving, so nothing was placed and no money moved".
+16. A withdrawal over the 50 USDC per-request or 200 USDC daily cap is refused before any World approval is requested.
