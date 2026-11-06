@@ -92,7 +92,27 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const updateAllPrices = useStore((s) => s.updateAllPrices);
   const setMaxBands = useStore((s) => s.setMaxBands);
   const setClosedAssets = useStore((s) => s.setClosedAssets);
-  const feed = usePriceStream(updateAllPrices, { onBands: setMaxBands, onClosed: setClosedAssets });
+  const seedHistory = useStore((s) => s.seedHistory);
+  const setMarketState = useStore((s) => s.setMarketState);
+  const refreshBlitzPass = useStore((s) => s.refreshBlitzPass);
+  const passWallet = useStore((s) => s.address);
+  const blitzStart = useStore((s) => s.blitz?.startsAt);
+  const feed = usePriceStream(updateAllPrices, {
+    onBands: setMaxBands,
+    onClosed: setClosedAssets,
+    onHistory: seedHistory,
+    onMarket: setMarketState,
+  });
+  useEffect(() => {
+    // Until the first market event arrives over the stream.
+    fetch('/api/market/state')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => m && !useStore.getState().blitz && setMarketState(m))
+      .catch(() => {});
+  }, [setMarketState]);
+  useEffect(() => {
+    void refreshBlitzPass();
+  }, [refreshBlitzPass, passWallet, blitzStart]);
   useEffect(() => {
     useStore.getState().setPriceFeed(feed);
   }, [feed.mode, feed.connected]); // eslint-disable-line react-hooks/exhaustive-deps

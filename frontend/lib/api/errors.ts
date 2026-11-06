@@ -107,6 +107,7 @@ const MESSAGES: Record<string, (e: ApiError) => string> = {
   price_moved: () => "The price moved before your bet landed. Nothing was charged, try again.",
   betting_closed: () => "Betting on this round has closed. Pick a later one.",
   market_quiet: () => "This market is too quiet to bet on right now.",
+  blitz_inactive: () => "Blitz is not running right now. Wait for the next window.",
   market_closed: () => "This market is closed.",
   price_unavailable: () => "The live price is unavailable. Nothing was charged, try again shortly.",
   proposal_expired: () => "This proposal expired. Nothing was placed.",

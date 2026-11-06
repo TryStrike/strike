@@ -6,9 +6,7 @@ import { isRealWin } from "@/lib/types/bet";
 import { useShallow } from "zustand/react/shallow";
 import { LiveChart } from "./LiveChart";
 import { BalanceDisplay } from "@/components/balance";
-import { getArcConfig, getAssetConfig } from "@/lib/arc/config";
 import { useToast } from "@/lib/hooks/useToast";
-import { useAccount } from "wagmi";
 import { ArrowDown, ArrowUp, Check, X } from "@phosphor-icons/react";
 import {
   Button,
@@ -28,7 +26,7 @@ import {
   matchSettledRound,
   type SettlementProofInput,
 } from "./SettlementProof";
-import { explorerAddressUrl } from "@/lib/arc/config";
+import { explorerAddressUrl, getArcConfig } from "@/lib/arc/config";
 import { ArrowUpRight } from "@phosphor-icons/react";
 
 export const GameBoard: React.FC = () => {
@@ -42,11 +40,10 @@ export const GameBoard: React.FC = () => {
     placeBetFromHouseBalance,
     isPlacingBet,
     isBlitzActive,
-    blitzEndTime,
-    nextBlitzTime,
+    blitz,
+    serverOffsetMs,
+    enterBlitz,
     hasBlitzAccess,
-    updateBlitzTimer,
-    enableBlitzAccess,
     error,
     clearError,
     isLoading: isLoadingBalance,
@@ -65,11 +62,10 @@ export const GameBoard: React.FC = () => {
       placeBetFromHouseBalance: s.placeBetFromHouseBalance,
       isPlacingBet: s.isPlacingBet,
       isBlitzActive: s.isBlitzActive,
-      blitzEndTime: s.blitzEndTime,
-      nextBlitzTime: s.nextBlitzTime,
+      blitz: s.blitz,
+      serverOffsetMs: s.serverOffsetMs,
+      enterBlitz: s.enterBlitz,
       hasBlitzAccess: s.hasBlitzAccess,
-      updateBlitzTimer: s.updateBlitzTimer,
-      enableBlitzAccess: s.enableBlitzAccess,
       error: s.error,
       clearError: s.clearError,
       isLoading: s.isLoading,
@@ -81,7 +77,6 @@ export const GameBoard: React.FC = () => {
   );
 
   const marketClosed = useStore((s) => s.closedAssets.includes(s.selectedAsset));
-  const { connector } = useAccount();
 
   const [betAmount, setBetAmount] = useState<string>("0.1");
   const [selectedDuration, setSelectedDuration] = useState<number>(5);
@@ -98,12 +93,12 @@ export const GameBoard: React.FC = () => {
 
   const currencySymbol = "USDC";
 
-  const blitzEntryFee = 1;
+  const blitzEntryFee = Number(blitz?.fee ?? 1);
   const blitzEntryCurrencySymbol = currencySymbol;
   const isWalletConnected = !!address;
 
   const handleEnterBlitz = async () => {
-    if (!isWalletConnected || !address) {
+    if (!isWalletConnected) {
       toast.error("Please connect your wallet first");
       return;
     }
@@ -115,85 +110,36 @@ export const GameBoard: React.FC = () => {
 
     try {
       setIsActivatingBlitz(true);
-
-      const arcConfig = getArcConfig();
-      const assetConfig = getAssetConfig("USDC");
-      const feeWallet = process.env.NEXT_PUBLIC_PLATFORM_FEE_WALLET_ARC;
-      if (!feeWallet) {
-        throw new Error("Arc fee collector wallet not configured");
-      }
-
-      const [{ erc20Abi, parseUnits }, { arcPublicClient, arcWalletClient }] =
-        await Promise.all([import("viem"), import("@/lib/arc/client")]);
-      const injected = (await connector?.getProvider()) as
-        import("viem").EIP1193Provider | undefined;
-      if (!injected || !address) {
-        throw new Error(
-          "Active wallet not found in session. Please reconnect.",
-        );
-      }
-      const wallet = arcWalletClient(injected, address as `0x${string}`);
-      if ((await wallet.getChainId()) !== arcConfig.chainId) {
-        throw new Error(
-          `Switch your wallet to ${arcConfig.name} and try again`,
-        );
-      }
-
-      toast.info(
-        `Confirming ${blitzEntryFee} ${currencySymbol} Blitz Entry...`,
-      );
-      const hash = await wallet.writeContract({
-        address: assetConfig.address,
-        abi: erc20Abi,
-        functionName: "transfer",
-        args: [
-          feeWallet as `0x${string}`,
-          parseUnits(String(blitzEntryFee), assetConfig.decimals),
-        ],
-      });
-      await arcPublicClient().waitForTransactionReceipt({ hash });
-      toast.success("Payment successful! Blitz Mode enabled.");
-      enableBlitzAccess();
-      refreshWalletBalance();
+      await enterBlitz();
+      toast.success("Blitz Mode enabled.");
     } catch (err: unknown) {
-      if (process.env.NODE_ENV === "development") {
-        console.error("Blitz entry failed:", err);
-      }
-      const errorMessage =
-        err instanceof Error ? err.message : String(err ?? "");
-
-      if (
-        errorMessage.includes("rejected") ||
-        errorMessage.includes("denied") ||
-        errorMessage.includes("User rejected")
-      ) {
-        toast.error("User rejected");
-      } else {
-        toast.error(errorMessage || "Failed to enter Blitz Round");
-      }
+      toast.error(err instanceof Error ? err.message : "Failed to enter Blitz Round");
     } finally {
       setIsActivatingBlitz(false);
     }
   };
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      updateBlitzTimer();
-      const now = Date.now();
-      if (isBlitzActive && blitzEndTime) {
-        const remaining = Math.max(0, blitzEndTime - now);
-        setBlitzTimeRemaining(`${Math.floor(remaining / 1000)}s`);
+    const tick = () => {
+      const now = Date.now() + serverOffsetMs;
+      if (!blitz) {
+        setBlitzCountdown("--:--");
+        setBlitzTimeRemaining("");
+      } else if (isBlitzActive) {
+        setBlitzTimeRemaining(`${Math.max(0, Math.ceil((blitz.endsAt - now) / 1000))}s`);
         setBlitzCountdown("");
       } else {
-        const timeToNext = Math.max(0, nextBlitzTime - now);
+        const timeToNext = Math.max(0, blitz.startsAt - now);
         const mins = Math.floor(timeToNext / 60000);
         const secs = Math.floor((timeToNext % 60000) / 1000);
         setBlitzCountdown(`${mins}:${secs.toString().padStart(2, "0")}`);
         setBlitzTimeRemaining("");
       }
-    }, 1000);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [isBlitzActive, blitzEndTime, nextBlitzTime, updateBlitzTimer]);
+  }, [isBlitzActive, blitz, serverOffsetMs]);
 
   useEffect(() => {
     setTimeframeSeconds(selectedDuration);
@@ -601,7 +547,7 @@ export const GameBoard: React.FC = () => {
                     : `in ${blitzCountdown}`}
                 </span>
               </div>
-              <p className="mt-0.5 text-xs text-subtle">2× on boosted cells.</p>
+              <p className="mt-0.5 text-xs text-subtle">2× on boosted cells. The fee comes out of your play balance.</p>
             </div>
             {hasBlitzAccess ? (
               <span className="inline-flex items-center gap-1 text-sm font-medium text-up">
@@ -622,7 +568,7 @@ export const GameBoard: React.FC = () => {
                 }
               >
                 {isActivatingBlitz
-                  ? "Paying…"
+                  ? "Entering…"
                   : `Enter · ${blitzEntryFee} ${blitzEntryCurrencySymbol}`}
               </Button>
             )}

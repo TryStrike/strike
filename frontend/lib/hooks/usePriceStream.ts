@@ -12,6 +12,8 @@ export interface UsePriceStreamOptions {
   maxReconnectBackoffMs?: number;
   onBands?: (bands: Record<string, number>) => void;
   onClosed?: (closed: string[]) => void;
+  onHistory?: (asset: string, points: [number, number][]) => void;
+  onMarket?: (state: unknown) => void;
 }
 
 const DEFAULT_STREAM_PATH = '/api/prices/stream';
@@ -29,11 +31,15 @@ export function usePriceStream(
   const onTickRef = useRef(onTick);
   const onBandsRef = useRef(options.onBands);
   const onClosedRef = useRef(options.onClosed);
+  const onHistoryRef = useRef(options.onHistory);
+  const onMarketRef = useRef(options.onMarket);
   useEffect(() => {
     onTickRef.current = onTick;
     onBandsRef.current = options.onBands;
     onClosedRef.current = options.onClosed;
-  }, [onTick, options.onBands, options.onClosed]);
+    onHistoryRef.current = options.onHistory;
+    onMarketRef.current = options.onMarket;
+  }, [onTick, options.onBands, options.onClosed, options.onHistory, options.onMarket]);
 
   const [mode, setMode] = useState<PriceFeedMode>('poll');
   const [connected, setConnected] = useState(false);
@@ -132,6 +138,23 @@ export function usePriceStream(
         if (frame.bands) onBandsRef.current?.(frame.bands as Record<string, number>);
         if (Array.isArray(frame.closed)) onClosedRef.current?.(frame.closed as string[]);
       };
+
+      es.addEventListener('history', (event) => {
+        watchdog = clearTimer(watchdog);
+        try {
+          const { asset, points } = JSON.parse(String((event as MessageEvent).data));
+          if (typeof asset === 'string' && Array.isArray(points)) onHistoryRef.current?.(asset, points);
+        } catch (err) {
+          console.error('[prices] malformed history frame', err);
+        }
+      });
+      es.addEventListener('market', (event) => {
+        try {
+          onMarketRef.current?.(JSON.parse(String((event as MessageEvent).data)));
+        } catch (err) {
+          console.error('[prices] malformed market frame', err);
+        }
+      });
 
       es.onerror = () => degrade();
     };

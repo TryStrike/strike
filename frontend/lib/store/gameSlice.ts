@@ -33,6 +33,20 @@ export interface ActiveBet {
   startTime?: number;
 }
 
+export interface MarketInfo {
+  range: number;
+  windowMs: number;
+  quiet: boolean;
+}
+
+export interface BlitzWindow {
+  active: boolean;
+  startsAt: number;
+  endsAt: number;
+  boost: number;
+  fee: string;
+}
+
 export interface GameState {
   gameMode: GameMode;
   selectedAsset: AssetType;
@@ -64,9 +78,12 @@ export interface GameState {
   error: string | null;
   timeframeSeconds: number;
 
+  /** Server clock minus local clock, from the market feed. */
+  serverOffsetMs: number;
+  markets: Record<string, MarketInfo>;
+  blitz: BlitzWindow | null;
   isBlitzActive: boolean;
-  blitzEndTime: number | null;
-  nextBlitzTime: number;
+  blitzPassStart: number | null;
   hasBlitzAccess: boolean;
   blitzMultiplier: number;
   activeTab: "bet" | "wallet" | "blitz";
@@ -88,6 +105,7 @@ export interface GameState {
       priceBottom?: number;
       startTime?: number;
       endTime?: number;
+      blitz?: boolean;
     },
   ) => Promise<{
     betId: string;
@@ -102,8 +120,10 @@ export interface GameState {
   addActiveBet: (bet: ActiveBet) => void;
   clearError: () => void;
 
-  enableBlitzAccess: () => void;
-  updateBlitzTimer: () => void;
+  seedHistory: (asset: string, points: [number, number][]) => void;
+  setMarketState: (state: unknown) => void;
+  refreshBlitzPass: () => Promise<void>;
+  enterBlitz: () => Promise<void>;
   toggleIndicator: (indicatorId: string) => void;
   setIsIndicatorsOpen: (isOpen: boolean) => void;
   setIsTourOpen: (isOpen: boolean) => void;
@@ -364,21 +384,11 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
     isIndicatorsOpen: false,
     isTourOpen: false,
 
+    serverOffsetMs: 0,
+    markets: {},
+    blitz: null,
     isBlitzActive: false,
-    blitzEndTime: null,
-    nextBlitzTime: (() => {
-      if (typeof window !== "undefined") {
-        const stored = localStorage.getItem("binomo_blitz_next");
-        if (stored) {
-          const t = parseInt(stored, 10);
-          if (t > Date.now()) return t;
-        }
-        const next = Date.now() + 2 * 60 * 1000;
-        localStorage.setItem("binomo_blitz_next", next.toString());
-        return next;
-      }
-      return Date.now() + 2 * 60 * 1000;
-    })(),
+    blitzPassStart: null,
     hasBlitzAccess: false,
     blitzMultiplier: 2.0,
 
@@ -452,6 +462,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         priceBottom?: number;
         startTime?: number;
         endTime?: number;
+      blitz?: boolean;
       },
     ) => {
       if (get().isPlacingBet || Date.now() - lastBetAttemptAt < BET_DEBOUNCE_MS) return;
@@ -539,6 +550,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
               endTime: betEndTime,
               priceTop: metadata?.priceTop,
               priceBottom: metadata?.priceBottom,
+              ...(gameMode === "box" && metadata?.blitz ? { blitz: true } : {}),
               betRequestId,
               isOver: direction === "UP",
               multiplier: multiplier,
@@ -751,42 +763,83 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
       set({ error: null });
     },
 
-    enableBlitzAccess: () => {
-      set({ hasBlitzAccess: true });
+    seedHistory: (asset: string, points: [number, number][]) => {
+      const { assetHistories, assetPrices, rawAssetPrices, selectedAsset, serverOffsetMs } = get();
+      const seeded: PricePoint[] = points
+        .filter(([t, p]) => Number.isFinite(t) && Number.isFinite(p) && p > 0)
+        .map(([t, p]) => ({ timestamp: t - serverOffsetMs, price: p }));
+      if (seeded.length === 0) return;
+      const lastSeeded = seeded[seeded.length - 1].timestamp;
+      const live = (assetHistories[asset] || []).filter((p) => p.timestamp > lastSeeded);
+      const merged = [...seeded, ...live].slice(-MAX_PRICE_HISTORY);
+      const last = merged[merged.length - 1].price;
+      const update: Partial<GameState> = {
+        assetHistories: { ...assetHistories, [asset]: merged },
+        assetPrices: { ...assetPrices, [asset]: assetPrices[asset] ?? last },
+        rawAssetPrices: { ...rawAssetPrices, [asset]: rawAssetPrices[asset] ?? last },
+      };
+      if (asset === selectedAsset) {
+        update.priceHistory = merged;
+        update.currentPrice = get().currentPrice || last;
+      }
+      set(update as GameState);
     },
 
-    updateBlitzTimer: () => {
-      const { isBlitzActive, blitzEndTime, nextBlitzTime } = get();
-      const now = Date.now();
-      const BLITZ_DURATION = 60 * 1000;
-      const BLITZ_INTERVAL = 2 * 60 * 1000;
+    setMarketState: (raw: unknown) => {
+      const m = raw as {
+        serverTime?: number;
+        assets?: Record<string, MarketInfo>;
+        blitz?: BlitzWindow;
+      } | null;
+      if (!m || typeof m.serverTime !== "number" || !m.assets) return;
+      const { blitzPassStart } = get();
+      const blitz = m.blitz ?? null;
+      set({
+        serverOffsetMs: m.serverTime - Date.now(),
+        markets: m.assets,
+        blitz,
+        isBlitzActive: !!blitz?.active,
+        blitzMultiplier: blitz?.boost ?? 2.0,
+        hasBlitzAccess:
+          !!blitz?.active && blitzPassStart !== null && blitzPassStart === blitz.startsAt,
+      });
+    },
 
-      if (isBlitzActive) {
-        if (blitzEndTime && now >= blitzEndTime) {
-          const newNextTime = now + BLITZ_INTERVAL;
-          if (typeof window !== "undefined") {
-            localStorage.setItem("binomo_blitz_next", newNextTime.toString());
-          }
-          set({
-            isBlitzActive: false,
-            blitzEndTime: null,
-            nextBlitzTime: newNextTime,
-            hasBlitzAccess: false,
-          });
-        }
-      } else {
-        if (now >= nextBlitzTime) {
-          const newNextTime = now + BLITZ_INTERVAL + BLITZ_DURATION;
-          if (typeof window !== "undefined") {
-            localStorage.setItem("binomo_blitz_next", newNextTime.toString());
-          }
-          set({
-            isBlitzActive: true,
-            blitzEndTime: now + BLITZ_DURATION,
-            nextBlitzTime: newNextTime,
-          });
-        }
+    refreshBlitzPass: async () => {
+      const { address } = get();
+      if (!address) {
+        set({ blitzPassStart: null, hasBlitzAccess: false });
+        return;
       }
+      try {
+        const res = await fetch(`/api/blitz/pass?wallet=${address}`);
+        if (!res.ok || !sameWallet(address, get().address)) return;
+        const data = await res.json();
+        const start = data.hasPass && typeof data.windowStartsAt === "number" ? data.windowStartsAt : null;
+        const { blitz } = get();
+        set({
+          blitzPassStart: start,
+          hasBlitzAccess: !!blitz?.active && start !== null && start === blitz.startsAt,
+        });
+      } catch (err) {
+        console.warn("[blitz] could not read pass", err);
+      }
+    },
+
+    enterBlitz: async () => {
+      const { address, selectedCurrency } = get();
+      if (!address) throw new Error("Connect your wallet first");
+      const currency = resolveHouseLedgerCurrency({ selectedCurrency });
+      const res = await sendGuarded(() =>
+        fetch("/api/blitz/enter", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ currency }),
+        }),
+      );
+      if (!res.ok) throw new ApiFailure(await readApiError(res));
+      await get().refreshBlitzPass();
+      void get().fetchBalance?.(address);
     },
   };
 };
