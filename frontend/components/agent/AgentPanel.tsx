@@ -14,7 +14,12 @@ import {
   cx,
 } from "@/components/ui/kit";
 import { useAgentFeed } from "@/lib/agent/agentFeed";
-import { useAgent, useAgentState, type StartLimits } from "@/lib/agent/useAgent";
+import {
+  sameWallet,
+  useAgent,
+  useAgentState,
+  type StartLimits,
+} from "@/lib/agent/useAgent";
 import { useCopilot } from "@/lib/copilot/useCopilot";
 import { wait } from "@/lib/api/errors";
 import { useWorldConfig } from "@/lib/world/human";
@@ -40,11 +45,53 @@ const AMOUNT_INPUT = /^\d*\.?\d*$/;
 /** `stake_floor` in the Rust agent. A smaller limit could never place a trade. */
 const MIN_AMOUNT = 0.1;
 
+function YoloSwitch({
+  on,
+  disabled,
+  label,
+  onClick,
+  className = "h-7 px-3",
+}: {
+  on: boolean;
+  disabled?: boolean;
+  label?: string;
+  onClick: () => void;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={onClick}
+      className={cx(
+        "flex items-center gap-1.5 rounded-full text-sm font-semibold disabled:opacity-40",
+        on ? "bg-attention text-white" : "bg-surface text-muted",
+        className,
+      )}
+    >
+      <Lightning size={14} weight="fill" />
+      {label ?? `YOLO ${on ? "on" : "off"}`}
+    </button>
+  );
+}
+
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
   const houseBalance = useHouseBalance();
-  const { session, error, busy, start, answer, retryApproval } = useAgent();
+  const {
+    session,
+    checking,
+    error,
+    busy,
+    switching,
+    start,
+    answer,
+    retryApproval,
+    setMode,
+  } = useAgent();
   const orb = useWorldConfig().data?.tiers.orb;
   const [limits, setLimits] = useState<Limits>({
     mode: "normal",
@@ -55,11 +102,16 @@ export function AgentPanel() {
     maxPerTrade: "0.2",
     stopLoss: "0.8",
   });
-  const running = session?.status === "running";
+  const foreign =
+    session && address && !sameWallet(session.wallet, address)
+      ? session
+      : null;
+  const own = foreign ? null : session;
+  const running = own?.status === "running";
   const state = useAgentState(running);
   const paused = running && state?.status === "paused";
   const now = useNow(paused);
-  const sessionAsset = session?.asset;
+  const sessionAsset = own?.asset;
   useEffect(() => {
     if (sessionAsset)
       useStore.getState().setSelectedAsset(sessionAsset as AssetType);
@@ -90,18 +142,37 @@ export function AgentPanel() {
     </p>
   );
 
-  if (session) {
-    const newSession = () => {
-      useAgentFeed.getState().dismiss();
-      useCopilot.getState().clear();
-    };
+  const newSession = () => {
+    useAgentFeed.getState().dismiss();
+    useCopilot.getState().clear();
+  };
+
+  if (foreign) {
+    return (
+      <div className="flex h-full flex-col gap-3 p-6">
+        <h1 className="text-xl font-semibold">Agent</h1>
+        <p role="status" className="text-sm text-muted">
+          {foreign.status === "running"
+            ? `An agent is running on ${foreign.wallet.slice(0, 6)}…${foreign.wallet.slice(-4)}. Switch to that wallet to watch it. It keeps trading either way.`
+            : `The last session here belonged to ${foreign.wallet.slice(0, 6)}…${foreign.wallet.slice(-4)}.`}
+        </p>
+        <Button variant="secondary" size="sm" onClick={newSession}>
+          Set up an agent on this wallet
+        </Button>
+      </div>
+    );
+  }
+
+  if (own) {
+    const session = own;
+    const yolo = session.mode === "yolo";
     const footer = (
       <div className="flex flex-col gap-2">
         {paused && (
           <>
             <p
               role="status"
-              className="rounded-2xl bg-down-soft px-3 py-2 text-xs text-down"
+              className="rounded-2xl bg-attention-soft px-3 py-2 text-xs text-attention"
             >
               The agent paused and places no bets until you approve in World
               App.
@@ -131,11 +202,33 @@ export function AgentPanel() {
       <div className="flex h-full min-h-0 flex-col gap-3 p-4">
         <header className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">Copilot</h1>
-          <Badge tone={paused ? "down" : running ? "up" : "neutral"}>
-            {`${session.mode} on ${session.asset}${paused ? ", paused" : ""}`}
-          </Badge>
+          <span className="flex items-center gap-2">
+            <Badge tone={paused ? "attention" : running ? "up" : "neutral"}>
+              {`${session.asset}${paused ? ", paused" : ""}`}
+            </Badge>
+            <YoloSwitch
+              on={yolo}
+              disabled={!running || switching}
+              label={switching && !yolo ? "Approve in World App" : undefined}
+              onClick={() => setMode(yolo ? "normal" : "yolo")}
+            />
+          </span>
         </header>
         <AgentStream session={session} onAnswer={answer} footer={footer} />
+      </div>
+    );
+  }
+
+  if (checking) {
+    return (
+      <div
+        role="status"
+        aria-label="Looking for a running agent"
+        className="flex h-full flex-col gap-4 p-6"
+      >
+        <div className="h-7 w-24 animate-pulse rounded-2xl bg-surface" />
+        <div className="h-16 animate-pulse rounded-2xl bg-surface" />
+        <div className="h-40 animate-pulse rounded-2xl bg-surface" />
       </div>
     );
   }
@@ -171,23 +264,13 @@ export function AgentPanel() {
             onChange={(v) => set("minutes", v)}
           />
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={limits.mode === "yolo"}
+        <YoloSwitch
+          on={limits.mode === "yolo"}
           onClick={() =>
             set("mode", limits.mode === "yolo" ? "normal" : "yolo")
           }
-          className={cx(
-            "flex h-[44px] items-center gap-2 rounded-full px-4 text-sm font-semibold disabled:opacity-40",
-            limits.mode === "yolo"
-              ? "bg-down text-white"
-              : "bg-surface text-muted",
-          )}
-        >
-          <Lightning size={16} weight="fill" />
-          YOLO {limits.mode === "yolo" ? "on" : "off"}
-        </button>
+          className="h-[44px] px-4"
+        />
       </section>
       <p className="-mt-3 text-xs text-faint">
         {limits.mode === "yolo"

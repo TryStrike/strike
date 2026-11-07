@@ -5,6 +5,7 @@ import {
   CheckCircle,
   Circle,
   CircleNotch,
+  MinusCircle,
   XCircle,
 } from "@phosphor-icons/react";
 import { cx } from "@/components/ui/kit";
@@ -12,11 +13,15 @@ import { formatPrice } from "@/components/history/historyFormat";
 import { useAgentFeed, type Activity } from "@/lib/agent/agentFeed";
 
 const CHECK_EVERY_MS = 5_000;
+/** `agent::signal` in the Rust core. It has no reading, and it isn't a fault. */
+const MARKET_FLAT = "Market is flat";
 
-type State = "ok" | "bad" | "active" | "idle";
+/** `no` is a check that did not clear, which is routine. `bad` is a real fault. */
+type State = "ok" | "no" | "bad" | "active" | "idle";
 
 const ICON = {
   ok: <CheckCircle size={13} weight="fill" className="text-up" />,
+  no: <MinusCircle size={13} weight="fill" className="text-faint" />,
   bad: <XCircle size={13} weight="fill" className="text-down" />,
   active: (
     <CircleNotch size={13} weight="bold" className="animate-spin text-ink" />
@@ -36,12 +41,12 @@ function aiStep({ signal, ai }: Activity): [State, string] {
   const score = Math.round((ai.score ?? 0) * 100);
   const needed = Math.round((ai.needed ?? 0) * 100);
   return [
-    ai.status === "pass" ? "ok" : "bad",
+    ai.status === "pass" ? "ok" : "no",
     `scored ${score}, needs ${needed}, ${ai.ms}ms`,
   ];
 }
 
-function rowsOf(activity: Activity) {
+function rowsOf(activity: Activity, waiting: boolean) {
   const { signal, ai, result } = activity;
   if (!signal) return [];
   const { price, movePct, rangeShare, needed, skip } = signal;
@@ -52,7 +57,9 @@ function rowsOf(activity: Activity) {
     result?.outcome === "placed"
       ? ["ok", "placed"]
       : result?.outcome === "proposed"
-        ? ["active", "waiting for your tap"]
+        ? waiting
+          ? ["active", "waiting for your tap"]
+          : ["idle", "answered"]
         : result?.outcome === "refused"
           ? ["bad", "refused, see the feed"]
           : ["idle", ""];
@@ -60,7 +67,7 @@ function rowsOf(activity: Activity) {
     {
       label: "Price at check",
       value: price === null ? (skip ?? "") : formatPrice(price),
-      state: price === null ? "bad" : "ok",
+      state: price !== null ? "ok" : skip === MARKET_FLAT ? "no" : "bad",
     },
     {
       label: "Measured 15s move",
@@ -72,7 +79,7 @@ function rowsOf(activity: Activity) {
       value: measured
         ? `${Math.round(rangeShare * 100)}%, needs ${Math.round(needed * 100)}%`
         : "",
-      state: !measured ? "idle" : rangeShare >= needed ? "ok" : "bad",
+      state: !measured ? "idle" : rangeShare >= needed ? "ok" : "no",
     },
     {
       label: "AI review",
@@ -100,7 +107,10 @@ export function LiveActivity() {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  const rows = rowsOf(activity);
+  const waiting = useAgentFeed((s) =>
+    s.decisions.some((d) => d.verdict === "awaiting"),
+  );
+  const rows = rowsOf(activity, waiting);
   const at = activity.signal?.at;
   const next = at ? Math.ceil((at + CHECK_EVERY_MS - now) / 1000) : 0;
   return (
@@ -119,7 +129,11 @@ export function LiveActivity() {
           <li key={row.label} className="flex items-center gap-1.5 text-xs">
             {ICON[row.state]}
             <span
-              className={cx(row.state === "idle" ? "text-faint" : "text-ink")}
+              className={cx(
+                row.state === "idle" || row.state === "no"
+                  ? "text-faint"
+                  : "text-ink",
+              )}
             >
               {row.label}
             </span>

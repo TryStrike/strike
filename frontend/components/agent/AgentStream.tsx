@@ -16,7 +16,6 @@ import { formatPrice } from "@/components/history/historyFormat";
 import { DecisionRow } from "@/components/agent/DecisionRow";
 import { LiveActivity } from "@/components/agent/LiveActivity";
 import {
-  WAITING_FOR_HUMAN,
   WHY_REACH,
   useAgentFeed,
   type AgentSession,
@@ -74,22 +73,33 @@ function SessionStrip({ session }: { session: AgentSession }) {
 }
 
 function OpenBet({ d, asset }: { d: Decision; asset: string }) {
-  const price = useStore((s) => s.currentPrice);
+  const price = useStore((s) => s.assetPrices[asset]);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  const strike = d.strike ?? price;
-  const ahead = d.direction === "UP" ? price - strike : strike - price;
+  const ahead =
+    d.strike === null || !price
+      ? null
+      : d.direction === "UP"
+        ? price - d.strike
+        : d.strike - price;
   const left = Math.max(0, Math.ceil(((d.roundEndsAt ?? now) - now) / 1000));
   return (
     <p className="flex items-center justify-between gap-2 rounded-2xl bg-surface px-3 py-2 text-xs">
       <span className="min-w-0 truncate">
-        {d.direction === "UP" ? "↑" : "↓"} {asset} from {formatPrice(strike)},{" "}
-        <span className={ahead >= 0 ? "text-up" : "text-down"}>
-          {ahead >= 0 ? "ahead" : "behind"} by {formatPrice(Math.abs(ahead))}
-        </span>
+        {d.direction === "UP" ? "↑" : "↓"} {asset}
+        {d.strike !== null && ` from ${formatPrice(d.strike)}`}
+        {ahead !== null && (
+          <>
+            ,{" "}
+            <span className={ahead >= 0 ? "text-up" : "text-down"}>
+              {ahead >= 0 ? "ahead" : "behind"} by{" "}
+              {formatPrice(Math.abs(ahead))}
+            </span>
+          </>
+        )}
       </span>
       <span className="shrink-0 font-jet tabular-nums text-faint">
         {left > 0 ? `${left}s left` : "settling"}
@@ -108,7 +118,7 @@ function NowLine({
 }) {
   const open = decisions.find((d) => d.betId && !d.result);
   if (open) return <OpenBet d={open} asset={session.asset} />;
-  if (decisions[0]?.reason === WAITING_FOR_HUMAN)
+  if (session.pausedUntil !== null)
     return (
       <p className="flex items-center gap-1.5 px-1 text-xs text-muted">
         <HandPalm size={14} weight="fill" /> Paused until you check in
@@ -241,9 +251,20 @@ export default function AgentStream({
     (byTime[0]?.skipCount ?? 0) +
     thoughts.reduce((n, t) => n + t.thinking.length + t.text.length, 0);
   useEffect(() => {
+    // Why the agent stopped is the one row nobody should have to scroll to.
+    if (session.status === "stopped") following.current = true;
     if (following.current)
       list.current?.scrollTo({ top: list.current.scrollHeight });
   }, [tail, session.status]);
+  useEffect(() => {
+    const el = list.current;
+    if (!el) return;
+    const pin = new ResizeObserver(() => {
+      if (following.current) el.scrollTo({ top: el.scrollHeight });
+    });
+    pin.observe(el);
+    return () => pin.disconnect();
+  }, []);
 
   const why = (d: Decision) =>
     send(`Explain decision ${d.id} of this session.`, "Why this decision?");
@@ -309,7 +330,7 @@ export default function AgentStream({
           const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
           following.current = scrollHeight - scrollTop - clientHeight < 40;
         }}
-        className="min-h-0 flex-1 space-y-2 overflow-y-auto"
+        className="-mx-1.5 min-h-0 flex-1 space-y-2 overflow-y-auto px-1.5 pb-1.5 pt-0.5"
       >
         {rows.map((row) => (
           <li key={row.key}>

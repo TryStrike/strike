@@ -79,6 +79,20 @@ pub fn halt(session_id: &str) {
     }
 }
 
+/// Tells the feed the mode changed and starts or ends the watcher to match it.
+pub async fn mode_changed(database: &Db, session: &Session) -> ApiResult<()> {
+    if let Some(l) = live().get_mut(&session.id) {
+        l.watcher = crate::watcher::spawn(session, l.frames.clone());
+    }
+    publish(&session.id, session_frame(session));
+    let why = match session.mode.as_str() {
+        "yolo" => "Switched to YOLO",
+        _ => "Switched to normal, you approve every trade",
+    };
+    note(database, session, "skipped", why).await?;
+    Ok(())
+}
+
 pub fn approval(session_id: &str) -> Option<Approval> {
     live().get(session_id).map(|l| l.approval.clone())
 }
@@ -185,6 +199,11 @@ async fn run_on(
         }
         if *stopped.borrow() {
             return Ok(None);
+        }
+        // The mode can change under a running session.
+        match agent::session_for(database, &session.id, &session.wallet).await? {
+            Some(current) => *session = current,
+            None => return Ok(None),
         }
         match check(database, session, stopped, chase_cleared.as_deref()).await? {
             Placement::Stop(reason) => return Ok(Some(reason)),
@@ -476,6 +495,9 @@ async fn pause(
         stepup.as_ref().map(|s| s.id.as_str()),
     );
     let Some(paused) = pausing.await? else {
+        if let Some(stepup) = &stepup {
+            agentpass::cancel(database, &stepup.id, "The agent is not paused").await?;
+        }
         return Ok(None);
     };
     *session = paused;
@@ -498,6 +520,10 @@ async fn pause(
             return Ok(None);
         };
         if current.status != "running" {
+            return Ok(None);
+        }
+        if current.paused_until_ms.is_none() {
+            *session = current;
             return Ok(None);
         }
         let status = match &current.pause_stepup_id {

@@ -96,7 +96,7 @@ export function Field({ unit, className, ...props }: InputHTMLAttributes<HTMLInp
   );
 }
 
-export function Badge({ tone = 'neutral', children }: { tone?: 'neutral' | 'up' | 'down'; children: ReactNode }) {
-  const t = { neutral: 'bg-surface text-muted', up: 'bg-up-soft text-up', down: 'bg-down-soft text-down' }[tone];
+export function Badge({ tone = 'neutral', children }: { tone?: 'neutral' | 'up' | 'down' | 'attention'; children: ReactNode }) {
+  const t = { neutral: 'bg-surface text-muted', up: 'bg-up-soft text-up', down: 'bg-down-soft text-down', attention: 'bg-attention-soft text-attention' }[tone];
   return <span className={cx('inline-flex items-center rounded-full px-2 py-0.5 font-jet text-[11px] font-medium', t)}>{children}</span>;
 }

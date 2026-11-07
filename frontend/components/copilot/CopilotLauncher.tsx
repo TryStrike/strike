@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { ChatCircleDots, X } from "@phosphor-icons/react";
 import { useAgentFeed } from "@/lib/agent/agentFeed";
+import { useOwnSession } from "@/lib/agent/useAgent";
 import { setNavigator, useCopilotView } from "@/lib/copilot/actions";
 import { AI_ROUTE } from "@/lib/theme";
 
@@ -16,7 +17,7 @@ const ChartOverlay = dynamic(() => import("./ChartOverlay"), { ssr: false });
 
 export function CopilotLauncher() {
   const [open, setOpen] = useState(false);
-  const session = useAgentFeed((s) => s.session);
+  const session = useOwnSession();
   const connectIfLive = useAgentFeed((s) => s.connectIfLive);
   const table = useCopilotView((s) => s.table);
   const chart = useCopilotView((s) => s.chart);

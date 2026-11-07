@@ -825,14 +825,55 @@ async fn a_price_move_makes_a_yolo_agent_place_a_bet_on_the_feed() {
         })
         .await;
     assert_eq!(settled["result"], "win", "{settled}");
-    assert_eq!(settled["pnl"], json!(4.5), "{settled}");
+    assert_eq!(settled["pnl"], json!(4.0), "{settled}");
     let stopped = decisions
         .until("session", 10, |d| d["status"] == "stopped")
         .await;
     assert_eq!(stopped["stoppedReason"], "budget spent", "{stopped}");
     assert_eq!(stopped["spent"], json!(5.0), "{stopped}");
-    assert_eq!(stopped["realizedPnl"], json!(4.5), "{stopped}");
-    assert_eq!(s.balance_of(&wallet), 95 * UNIT + 95 * UNIT / 10);
+    assert_eq!(stopped["realizedPnl"], json!(4.0), "{stopped}");
+    assert_eq!(s.balance_of(&wallet), 95 * UNIT + 9 * UNIT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_to_yolo_lets_a_running_agent_place_without_a_tap() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let trader = key(14);
+    s.fund(&address_of(&trader), 100);
+    let terms = StartTerms {
+        mode: "normal".into(),
+        ..yolo(&trader)
+    };
+    let (status, body, cookie) = s.start_agent(&trader, &terms).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cookie = cookie.unwrap();
+    let mut decisions = s.feed(&cookie).await;
+
+    let switch = |body: Value| {
+        s.http
+            .post(format!("{}/api/agent/mode", s.url))
+            .header("cookie", &cookie)
+            .json(&body)
+            .send()
+    };
+    let reply: Value = switch(json!({ "mode": "yolo" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reply["code"], "step_up_required", "{reply}");
+    let stepup = reply["stepup"]["id"].clone();
+    let res = switch(json!({ "mode": "yolo", "stepupId": stepup }))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let seen = decisions.until("session", 5, |d| d["mode"] == "yolo").await;
+    assert_eq!(seen["roundSeconds"], 10, "{seen}");
+    jump_after_history(&feed).await;
+    let placed = first_verdict(&mut decisions, &["placed", "awaiting"], 15).await;
+    assert_eq!(placed["verdict"], "placed", "{placed}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

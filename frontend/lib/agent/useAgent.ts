@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isAddressEqual, type Address } from "viem";
 import { useAccount, useSignMessage } from "wagmi";
 import { getArcConfig } from "@/lib/arc/config";
 import { useStore } from "@/lib/store";
 import { errorMessage, readApiError, type StepUp } from "@/lib/api/errors";
 import { sendGuarded } from "@/lib/world/gate";
-import { useAgentFeed, type Decision } from "./agentFeed";
+import { useAgentFeed, type AgentSession, type Decision } from "./agentFeed";
 
 export type { AgentSession, Decision } from "./agentFeed";
 
@@ -60,6 +61,19 @@ const json = (body: object) => ({
   body: JSON.stringify(body),
 });
 
+export function sameWallet(a: string, b: string): boolean {
+  return isAddressEqual(a as Address, b as Address);
+}
+
+/** The feed's session, unless it belongs to a wallet other than the connected one. */
+export function useOwnSession() {
+  const { address } = useAccount();
+  const session = useAgentFeed((s) => s.session);
+  return session && address && !sameWallet(session.wallet, address)
+    ? null
+    : session;
+}
+
 export function useAgentState(active: boolean) {
   const [state, setState] = useState<AgentState | null>(null);
   const pushed = useAgentFeed(
@@ -75,7 +89,14 @@ export function useAgentState(active: boolean) {
     const tick = async () => {
       try {
         const res = await fetch("/api/agent/state", { cache: "no-store" });
-        if (!stop && res.ok) setState(await res.json());
+        if (stop) return;
+        // The cookie is gone, so this browser can no longer follow the session.
+        if (res.status === 401) useAgentFeed.getState().dismiss();
+        if (!res.ok) return;
+        const next: AgentState = await res.json();
+        setState(next);
+        // A feed can hang without an error, and a new one replays the stop.
+        if (next.status === "stopped") useAgentFeed.getState().reconnect();
       } catch {}
     };
     void tick();
@@ -91,13 +112,42 @@ export function useAgentState(active: boolean) {
 export function useAgent() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
-  const { session, decisions, connect, showSession, showDecision } =
+  const { session, checking, decisions, connect, showSession, showDecision } =
     useAgentFeed();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const starting = useRef(false);
+  const probed = useRef<string | null>(null);
 
   useEffect(() => connect(), [connect]);
+
+  const follow = useCallback(
+    (next: AgentSession) => {
+      showSession(next);
+      connect(true);
+    },
+    [showSession, connect],
+  );
+
+  /** Moves this browser onto the wallet's running session, if it has one. */
+  const reattach = useCallback(
+    async (wallet: string, guarded: boolean) => {
+      const send = () => fetch("/api/agent/resume", json({ wallet }));
+      const res = await (guarded ? sendGuarded(send) : send());
+      if (res.ok) follow((await res.json()).session);
+      return res.ok;
+    },
+    [follow],
+  );
+
+  const mine = !session || !address || sameWallet(session.wallet, address);
+  const covered = Boolean(session) && mine;
+  useEffect(() => {
+    if (!address || checking || covered || probed.current === address) return;
+    probed.current = address;
+    reattach(address, false).catch(() => {});
+  }, [address, checking, covered, reattach]);
 
   const balanceMoves = decisions.reduce(
     (moves, d) => moves + (d.betId ? 1 : 0) + (d.result ? 1 : 0),
@@ -137,11 +187,13 @@ export function useAgent() {
           { session: false },
         );
         if (!res.ok) {
-          setError(errorMessage(await readApiError(res)));
+          const refused = await readApiError(res);
+          if (refused.code === "agent_running" && (await reattach(address, true)))
+            return;
+          setError(errorMessage(refused));
           return;
         }
-        showSession((await res.json()).session);
-        connect(true);
+        follow((await res.json()).session);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Signing failed");
       } finally {
@@ -149,7 +201,30 @@ export function useAgent() {
         setBusy(false);
       }
     },
-    [address, signMessageAsync, showSession, connect],
+    [address, signMessageAsync, follow, reattach],
+  );
+
+  const setMode = useCallback(
+    async (mode: AgentSession["mode"]) => {
+      setError(null);
+      setSwitching(true);
+      try {
+        const res = await sendGuarded(
+          (stepupId) => fetch("/api/agent/mode", json({ mode, stepupId })),
+          { session: false },
+        );
+        if (!res.ok) {
+          setError(errorMessage(await readApiError(res)));
+          return;
+        }
+        showSession((await res.json()).session);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not switch the mode");
+      } finally {
+        setSwitching(false);
+      }
+    },
+    [showSession],
   );
 
   const retryApproval = useCallback(async () => {
@@ -197,5 +272,16 @@ export function useAgent() {
     [showDecision],
   );
 
-  return { session, decisions, error, busy, start, answer, retryApproval };
+  return {
+    session,
+    checking,
+    decisions,
+    error,
+    busy,
+    switching,
+    start,
+    answer,
+    retryApproval,
+    setMode,
+  };
 }

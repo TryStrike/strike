@@ -25,6 +25,7 @@ export interface AgentSession {
   pausedUntil: number | null;
   pauseStepupId: string | null;
   checksPassed: number;
+  roundSeconds: number;
 }
 
 export interface Trace {
@@ -129,7 +130,7 @@ export function agentChartBets(): ActiveBet[] {
             direction: d.direction,
             timestamp: d.createdAt,
             strikePrice: d.strike,
-            startTime: d.roundEndsAt - ROUND_MS,
+            startTime: d.roundEndsAt - session.roundSeconds * 1000,
             endTime: d.roundEndsAt,
           },
         ]
@@ -139,10 +140,10 @@ export function agentChartBets(): ActiveBet[] {
 
 /** `agent::WAITING_FOR_HUMAN` in the Rust core. */
 export const WAITING_FOR_HUMAN = "Waiting for a human";
+/** `jev::BLOCKED` in the Rust core. The AI gate turning down a trade is routine. */
+export const AI_BLOCKED = "jev confidence was too low";
 export const WHY_REACH = 20;
 const KEEP = 100;
-/** `agent::ROUND_SECONDS` in the Rust core. */
-const ROUND_MS = 30_000;
 const KEEP_THOUGHTS = 30;
 const LIVE_UNTIL = "strike-agent-live-until";
 
@@ -150,6 +151,8 @@ let source: EventSource | null = null;
 
 interface AgentFeed {
   session: AgentSession | null;
+  /** Until the server says whether this browser has a session. */
+  checking: boolean;
   decisions: Decision[];
   thoughts: Thought[];
   activity: Activity;
@@ -159,12 +162,14 @@ interface AgentFeed {
   showDecision: (decision: Decision) => void;
   showThought: (frame: ThoughtFrame) => void;
   connect: (fresh?: boolean) => void;
+  reconnect: () => void;
   connectIfLive: () => void;
   dismiss: () => void;
 }
 
 export const useAgentFeed = create<AgentFeed>((set, get) => ({
   session: null,
+  checking: true,
   decisions: [],
   thoughts: [],
   activity: {},
@@ -215,11 +220,13 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     source?.close();
     if (fresh)
       set({ decisions: [], thoughts: [], activity: {}, stepup: null });
+    set({ checking: !get().session });
     const opened = new EventSource("/api/agent/decisions");
     source = opened;
-    opened.addEventListener("session", (e) =>
-      get().showSession(JSON.parse((e as MessageEvent).data)),
-    );
+    opened.addEventListener("session", (e) => {
+      get().showSession(JSON.parse((e as MessageEvent).data));
+      set({ checking: false });
+    });
     opened.addEventListener("decision", (e) =>
       get().showDecision(JSON.parse((e as MessageEvent).data)),
     );
@@ -233,10 +240,16 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
       get().showThought(JSON.parse((e as MessageEvent).data)),
     );
     opened.onerror = () => {
+      set({ checking: false });
       if (opened.readyState !== EventSource.CLOSED) return;
       opened.close();
       if (source === opened) source = null;
     };
+  },
+  reconnect: () => {
+    source?.close();
+    source = null;
+    get().connect();
   },
   connectIfLive: () => {
     if (Number(localStorage.getItem(LIVE_UNTIL)) > Date.now()) get().connect();
@@ -247,6 +260,7 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     localStorage.removeItem(LIVE_UNTIL);
     set({
       session: null,
+      checking: false,
       decisions: [],
       thoughts: [],
       activity: {},

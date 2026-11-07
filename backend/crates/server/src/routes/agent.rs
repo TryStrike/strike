@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
 
+use strike_core::address;
 use strike_core::agent;
 use strike_core::agentpass::{self, Action};
 use strike_core::bets::now_ms;
@@ -36,6 +37,8 @@ pub fn routes() -> Router {
     Router::new()
         .route("/api/agent/start", post(start))
         .route("/api/agent/stop", post(stop))
+        .route("/api/agent/resume", post(resume))
+        .route("/api/agent/mode", post(mode))
         .route("/api/agent/checkpoint", post(checkpoint))
         .route("/api/agent/state", get(state))
         .route("/api/agent/decisions", get(decisions))
@@ -159,12 +162,17 @@ pub(crate) async fn start_session(
 }
 
 pub(crate) fn started(session: agent::Session) -> Result<Cookie, ApiError> {
-    let ttl = (session.ends_at_ms - session.starts_at_ms) / 1_000 + COOKIE_GRACE_SECONDS;
+    let cookie = session_cookie(&session, session.starts_at_ms)?;
+    live::spawn(session);
+    Ok(cookie)
+}
+
+fn session_cookie(session: &agent::Session, from_ms: i64) -> Result<Cookie, ApiError> {
+    let ttl = (session.ends_at_ms - from_ms) / 1_000 + COOKIE_GRACE_SECONDS;
     let token = crypto::mint_agent_token(&session.id, &session.wallet, ttl).map_err(|err| {
         tracing::error!("[agent] token not minted: {err}");
         ApiError::unavailable(AGENTS_NOT_CONFIGURED)
     })?;
-    live::spawn(session);
     Ok(Cookie {
         name: AGENT_COOKIE,
         value: token,
@@ -172,6 +180,101 @@ pub(crate) fn started(session: agent::Session) -> Result<Cookie, ApiError> {
         same_site: "Lax",
         http_only: true,
     })
+}
+
+/// Reconnects a browser to the wallet's running session. A balance session
+/// already proves the wallet, so this needs no new signature.
+async fn resume(headers: HeaderMap, raw: Bytes) -> Result<Response, ApiError> {
+    let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+    let Some(wallet) = body.get("wallet").and_then(Value::as_str) else {
+        return Err(ApiError::bad_request("Missing wallet"));
+    };
+    if !wallet.starts_with("0x") || !address::is_address(wallet) {
+        return Err(ApiError::bad_request("Wallet must be a 0x address"));
+    }
+    http::require_wallet_session(&headers, wallet)?;
+    let database = db::db().await?;
+    let now = now_ms();
+    let session = agent::running_session(database, &address::canonical(wallet), now)
+        .await?
+        .ok_or_else(no_session)?;
+    let cookie = session_cookie(&session, now)?;
+    Ok(http::json_with_cookie(
+        json!({ "session": session.to_json() }),
+        cookie,
+    ))
+}
+
+async fn mode(headers: HeaderMap, raw: Bytes) -> Result<Response, ApiError> {
+    let claims = claims(&headers)?;
+    let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+    let mode = match body.get("mode").and_then(Value::as_str) {
+        Some("normal") => "normal",
+        Some("yolo") => "yolo",
+        _ => return Err(ApiError::bad_request("Mode must be normal or yolo")),
+    };
+    let database = db::db().await?;
+    let session = agent::session_for(database, &claims.session_id, &claims.wallet)
+        .await?
+        .ok_or_else(no_session)?;
+    let now = now_ms();
+    let stepup = stepup_id(&body);
+    let mut human_id = None;
+    if mode == "yolo" && session.mode != "yolo" && session.status == "running" {
+        if bans::is_globally_banned(&session.wallet).await {
+            return Ok(reject(agentpass::refusal(
+                403,
+                "banned",
+                "Wallet is banned",
+            )));
+        }
+        let human = match agentpass::require_human(database, &session.wallet).await? {
+            Ok(human) => human,
+            Err(rejection) => return Ok(reject(rejection)),
+        };
+        if human.tier != "orb" {
+            return Ok(reject(agentpass::refusal(
+                403,
+                "human_tier_too_low",
+                "A YOLO agent needs an Orb-verified World ID",
+            )));
+        }
+        if stepup.is_none() {
+            let action = Action {
+                kind: "yolo_start",
+                key: agent::mode_key(&session.id),
+                summary: format!(
+                    "Switch agent to YOLO: {} USDC stop-loss, {}",
+                    session.stop_loss.normalize(),
+                    session.asset
+                ),
+                session_id: Some(&session.id),
+            };
+            let asked = agentpass::begin(database, &human, &session.wallet, action, now).await?;
+            return Ok(reject(match asked {
+                Ok(stepup) => agentpass::step_up_required(&stepup),
+                Err(rejection) => rejection,
+            }));
+        }
+        human_id = Some(human.id);
+    }
+    let changed = agent::set_mode(
+        database,
+        &session.id,
+        mode,
+        human_id.as_deref(),
+        stepup.as_deref(),
+        now,
+    )
+    .await?;
+    let updated = match changed {
+        Ok(updated) => updated,
+        Err(rejection) => return Ok(reject(rejection)),
+    };
+    if updated.mode != session.mode {
+        live::mode_changed(database, &updated).await?;
+    }
+    Ok(Json(json!({ "session": updated.to_json() })).into_response())
 }
 
 async fn stop(headers: HeaderMap) -> Result<Json<Value>, ApiError> {

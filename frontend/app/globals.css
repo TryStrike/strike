@@ -15,6 +15,8 @@
   --color-up-soft: var(--up-soft);
   --color-down: var(--down);
   --color-down-soft: var(--down-soft);
+  --color-attention: var(--attention);
+  --color-attention-soft: var(--attention-soft);
   --font-tight: var(--font-inter-tight), system-ui, sans-serif;
   --font-serif: var(--font-instrument-serif), Georgia, serif;
   --font-jet: var(--font-jetbrains-mono), ui-monospace, monospace;
@@ -32,6 +34,8 @@
   --up-soft: #eef2ff;
   --down: #c2410c;
   --down-soft: #fff3ec;
+  --attention: #8a5a00;
+  --attention-soft: #fdf3d7;
   --burst-x: 50vw;
   --burst-y: 0px;
 }
@@ -48,6 +52,8 @@
   --up-soft: #e6f6d2;
   --down: #e5484d;
   --down-soft: #ffe3e1;
+  --attention: #8a5a00;
+  --attention-soft: #fbe6ae;
   --radius-sm: 2px;
   --radius-md: 3px;
   --radius-lg: 4px;

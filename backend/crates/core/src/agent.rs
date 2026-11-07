@@ -15,8 +15,9 @@ use crate::{agentpass, world};
 pub const CHECK_EVERY_MS: u64 = 5_000;
 pub const PROPOSAL_MS: i64 = 5_000;
 pub const PROPOSAL_EXPIRED: &str = "Proposal expired";
-pub const ROUND_SECONDS: i64 = 30;
-pub const CLOSING_MS: i64 = 35_000;
+pub const ROUND_SECONDS: i64 = 10;
+/// No new bet this close to the end, so its round can settle inside the session.
+pub const CLOSING_MS: i64 = ROUND_SECONDS * 1_000 + CHECK_EVERY_MS as i64;
 const LOOKBACK_MS: i64 = 15_000;
 const RANGE_MS: i64 = 120_000;
 /// The 15 s move has to be at least this share of the 2 minute range.
@@ -433,6 +434,7 @@ impl Session {
             "pausedUntil": self.paused_until_ms,
             "pauseStepupId": self.pause_stepup_id,
             "checksPassed": self.checks_passed,
+            "roundSeconds": ROUND_SECONDS,
         })
     }
 }
@@ -750,6 +752,82 @@ pub async fn stop_session(db: &Db, id: &str, reason: &str) -> ApiResult<Option<S
     .await
 }
 
+/// The newest session still trading for `wallet`, for a browser that lost its cookie.
+pub async fn running_session(db: &Db, wallet: &str, now_ms: i64) -> ApiResult<Option<Session>> {
+    let wallet = wallet.to_string();
+    db.read(move |conn| {
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {SESSION_COLUMNS} FROM agent_sessions \
+                     WHERE wallet = ?1 AND status = 'running' AND ends_at > ?2 \
+                     ORDER BY starts_at DESC LIMIT 1"
+                ),
+                params![wallet, now_ms * 1_000],
+                session_row,
+            )
+            .optional()?)
+    })
+    .await
+}
+
+/// Switches a running session between modes.
+///
+/// Going to yolo spends a fresh approval, and that approval covers any
+/// checkpoint already due. Going to normal needs none, because the trader then
+/// approves every trade, so it ends a yolo pause. Asking for the current mode
+/// changes nothing and spends nothing.
+pub async fn set_mode(
+    db: &Db,
+    session_id: &str,
+    mode: &'static str,
+    human_id: Option<&str>,
+    stepup_id: Option<&str>,
+    now_ms: i64,
+) -> ApiResult<Result<Session, Rejection>> {
+    let id = session_id.to_string();
+    let (human_id, stepup_id) = (human_id.map(str::to_string), stepup_id.map(str::to_string));
+    db.write(move |conn| {
+        let session = load_session(conn, &id)?;
+        if session.status != "running" || now_ms >= session.ends_at_ms {
+            return Ok(Err(coded(409, "not_running", "The agent is not running")));
+        }
+        if session.mode == mode {
+            return Ok(Ok(session));
+        }
+        if mode == "yolo" {
+            let (Some(human_id), Some(stepup_id)) = (&human_id, &stepup_id) else {
+                return Ok(Err(coded(
+                    401,
+                    "step_up_required",
+                    "A YOLO agent needs your approval in World App",
+                )));
+            };
+            let key = mode_key(&id);
+            if let Err(refused) =
+                agentpass::consume(conn, stepup_id, human_id, "yolo_start", &key, now_ms)?
+            {
+                return Ok(Err(refused));
+            }
+        } else {
+            end_pause(conn, Some(&id), "Switched to normal mode")?;
+        }
+        let passed = session.checks_passed.max(checkpoints_due(&session));
+        conn.execute(
+            "UPDATE agent_sessions SET mode = ?2, checks_passed = ?3 WHERE id = ?1",
+            params![id, mode, passed],
+        )?;
+        Ok(Ok(load_session(conn, &id)?))
+    })
+    .await
+}
+
+/// What a mid-session switch to yolo is approved against. The `yolo_start` kind
+/// is shared with a start, and this key keeps the two approvals apart.
+pub fn mode_key(session_id: &str) -> String {
+    format!("{session_id}:yolo")
+}
+
 pub async fn stop_all_running(db: &Db) -> ApiResult<usize> {
     db.write(|conn| {
         conn.execute(
@@ -808,7 +886,7 @@ pub async fn pause(
     db.write(move |conn| {
         let changed = conn.execute(
             "UPDATE agent_sessions SET paused_until = ?2, pause_stepup_id = ?3 \
-             WHERE id = ?1 AND status = 'running'",
+             WHERE id = ?1 AND status = 'running' AND mode = 'yolo'",
             params![id, until_ms * 1_000, stepup],
         )?;
         Ok(match changed {
@@ -1006,6 +1084,10 @@ pub async fn reserve(
         }
         if now_ms >= session.ends_at_ms {
             return Ok(Reserve::Stop(TIME_UP));
+        }
+        // The trader may have switched to normal while this check was running.
+        if !proposal && session.mode != "yolo" {
+            return Ok(Reserve::Gone);
         }
         let Some(human) = world::human_of_wallet(conn, &session.wallet)? else {
             return Ok(Reserve::Stop(HUMAN_REQUIRED));
@@ -1413,6 +1495,87 @@ mod tests {
         .unwrap();
     }
 
+    async fn set_yolo(db: &Db, id: &str) {
+        let id = id.to_string();
+        db.write(move |conn| {
+            conn.execute(
+                "UPDATE agent_sessions SET mode = 'yolo' WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn switching_to_normal_ends_a_yolo_pause_and_refuses_the_yolo_bet_in_flight() {
+        let (db, id, path) = paused_world().await;
+        let now = 2_000;
+        set_yolo(&db, &id).await;
+        approved(&db, "held", "agent_checkpoint", "k", now).await;
+        pause(&db, &id, now + 60_000, Some("held"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let session = set_mode(&db, &id, "normal", None, None, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.mode, "normal");
+        assert_eq!(session.paused_until_ms, None);
+        assert_eq!(session.pause_stepup_id, None);
+        let cancelled = crate::agentpass::get(&db, "held", now).await.unwrap();
+        assert_eq!(cancelled.unwrap().status, "cancelled");
+
+        assert!(matches!(
+            reserve(&db, &id, trade("late"), now).await.unwrap(),
+            Reserve::Gone
+        ));
+        assert!(pause(&db, &id, now + 60_000, None).await.unwrap().is_none());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn going_to_yolo_spends_this_sessions_approval_and_clears_due_checkpoints() {
+        let (db, id, path) = paused_world().await;
+        let now = 2_000;
+        let refused = set_mode(&db, &id, "yolo", Some("h1"), None, now).await;
+        assert_eq!(refused.unwrap().unwrap_err().0, 401);
+
+        approved(&db, "other", "yolo_start", "another-session:yolo", now).await;
+        let refused = set_mode(&db, &id, "yolo", Some("h1"), Some("other"), now).await;
+        assert_eq!(refused.unwrap().unwrap_err().0, 403);
+
+        let loss = id.clone();
+        db.write(move |conn| {
+            conn.execute(
+                "UPDATE agent_sessions SET realized_pnl = stop_loss * -3 / 4 WHERE id = ?1",
+                [loss],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        approved(&db, "mine", "yolo_start", &mode_key(&id), now).await;
+        let session = set_mode(&db, &id, "yolo", Some("h1"), Some("mine"), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.mode, "yolo");
+        assert!(
+            !needs_human(&session),
+            "the switch approval covers the loss"
+        );
+
+        let same = set_mode(&db, &id, "yolo", None, None, now).await;
+        assert_eq!(same.unwrap().unwrap().mode, "yolo");
+        let late = set_mode(&db, &id, "normal", None, None, session.ends_at_ms).await;
+        assert_eq!(late.unwrap().unwrap_err().1["code"], "not_running");
+        std::fs::remove_file(path).ok();
+    }
+
     fn trade(id: &str) -> Reservation<'_> {
         Reservation {
             decision_id: id,
@@ -1429,6 +1592,7 @@ mod tests {
     async fn only_the_stepup_of_this_pause_resumes_it_and_nothing_trades_meanwhile() {
         let (db, id, path) = paused_world().await;
         let now = 2_000;
+        set_yolo(&db, &id).await;
         approved(
             &db,
             "old",

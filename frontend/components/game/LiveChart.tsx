@@ -28,6 +28,7 @@ import { useToast } from "@/lib/hooks/useToast";
 import { bandMultiplierCeiling } from "@/lib/markets/bandCeiling";
 import {
   CaretDown,
+  LockSimple,
   X,
   MagnifyingGlass,
   Star,
@@ -51,6 +52,8 @@ interface LiveChartProps {
   betAmount: string;
   /** The live / polling / stale chip next to the price. Off on the trade page. */
   showFeedState?: boolean;
+  /** A running agent trades one asset, so the chart stays on it. */
+  assetLocked?: boolean;
 }
 
 interface BoxQuote {
@@ -903,6 +906,7 @@ const AssetIcon = ({
 export const LiveChart = React.memo(function LiveChart({
   betAmount,
   showFeedState = true,
+  assetLocked = false,
 }: LiveChartProps) {
   const priceHistory = useStore((state) => state.priceHistory);
   const currentPrice = useStore((state) => state.currentPrice);
@@ -1415,6 +1419,10 @@ export const LiveChart = React.memo(function LiveChart({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             ref={assetSelectorRef}
+            disabled={assetLocked}
+            title={
+              assetLocked ? "Stop the agent to change the asset" : undefined
+            }
             onClick={() => {
               if (!isAssetDropdownOpen && assetSelectorRef.current) {
                 const rect = assetSelectorRef.current.getBoundingClientRect();
@@ -1423,7 +1431,7 @@ export const LiveChart = React.memo(function LiveChart({
               setIsAssetDropdownOpen(!isAssetDropdownOpen);
             }}
             data-tour="asset-selector"
-            className="flex items-center gap-2 pl-1.5 pr-3 py-1.5 bg-white ring-1 ring-line rounded-full hover:bg-surface transition-colors"
+            className="flex items-center gap-2 pl-1.5 pr-3 py-1.5 bg-white ring-1 ring-line rounded-full enabled:hover:bg-surface transition-colors"
           >
             <div className="w-6 h-6 rounded-full flex items-center justify-center overflow-hidden">
               <AssetIcon
@@ -1438,11 +1446,15 @@ export const LiveChart = React.memo(function LiveChart({
             <span className="font-jet text-faint text-[11px]">
               {currentAssetConfig.pair}
             </span>
-            <CaretDown
-              size={12}
-              weight="bold"
-              className={`text-subtle transition-transform duration-200 ${isAssetDropdownOpen ? "rotate-180" : ""}`}
-            />
+            {assetLocked ? (
+              <LockSimple size={12} weight="bold" className="text-subtle" />
+            ) : (
+              <CaretDown
+                size={12}
+                weight="bold"
+                className={`text-subtle transition-transform duration-200 ${isAssetDropdownOpen ? "rotate-180" : ""}`}
+              />
+            )}
           </button>
 
           <div
@@ -1501,7 +1513,7 @@ export const LiveChart = React.memo(function LiveChart({
           </div>
         </div>
 
-        {watchlist.length > 0 && (
+        {!assetLocked && watchlist.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1 max-w-[320px]">
             {watchlist.slice(0, 8).map((asset) => (
               <button
@@ -1623,6 +1635,7 @@ export const LiveChart = React.memo(function LiveChart({
       </div>
 
       {isAssetDropdownOpen &&
+        !assetLocked &&
         typeof document !== "undefined" &&
         createPortal(
           <>

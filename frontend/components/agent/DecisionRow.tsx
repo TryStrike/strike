@@ -11,6 +11,7 @@ import {
 } from "@phosphor-icons/react";
 import { Badge, Button, cx } from "@/components/ui/kit";
 import {
+  AI_BLOCKED,
   WAITING_FOR_HUMAN,
   type AgentSession,
   type Decision,
@@ -29,7 +30,7 @@ const VERDICT: Record<
   awaiting: { label: "needs you", tone: "neutral" },
   skipped: { label: "skipped", tone: "neutral" },
   blocked: { label: "blocked", tone: "down" },
-  rejected: { label: "rejected", tone: "down" },
+  rejected: { label: "rejected", tone: "neutral" },
 };
 
 const RESULT: Record<string, string> = {
@@ -56,7 +57,7 @@ function verdictText(d: Decision) {
 }
 
 function stepsOf(d: Decision) {
-  const steps: { name: string; text: string; bad?: boolean }[] = [];
+  const steps: { name: string; text: string; tone?: "quiet" | "bad" }[] = [];
   const { trace } = d;
   if (trace) {
     steps.push({ name: "Signal", text: trace.signal });
@@ -68,7 +69,7 @@ function stepsOf(d: Decision) {
       steps.push({
         name: "AI",
         text: `scored ${score}, needs ${needed}`,
-        bad: d.confidence < trace.jevNeeded,
+        tone: d.confidence < trace.jevNeeded ? "quiet" : undefined,
       });
     }
     if (d.verdict !== "blocked" && d.stake !== null) {
@@ -82,7 +83,12 @@ function stepsOf(d: Decision) {
     steps.push({
       name: "Verdict",
       text: verdictText(d),
-      bad: d.verdict === "blocked" || d.verdict === "rejected",
+      tone:
+        d.verdict === "rejected" || d.reason === AI_BLOCKED
+          ? "quiet"
+          : d.verdict === "blocked"
+            ? "bad"
+            : undefined,
     });
   }
   if (d.result) {
@@ -91,7 +97,7 @@ function stepsOf(d: Decision) {
     steps.push({
       name: "Result",
       text: `${RESULT[d.result] ?? d.result}${pnl}`,
-      bad: d.result === "loss",
+      tone: d.result === "loss" ? "bad" : undefined,
     });
   }
   return steps;
@@ -104,7 +110,7 @@ function Countdown({ until }: { until: number }) {
     return () => clearInterval(timer);
   }, []);
   return (
-    <span className="ml-auto font-jet text-xs tabular-nums text-down">
+    <span className="ml-auto font-jet text-xs tabular-nums text-attention">
       {(Math.max(0, until - now) / 1000).toFixed(1)}s
     </span>
   );
@@ -146,12 +152,12 @@ export function DecisionRow({
     if (later) {
       return (
         <p className="flex items-center gap-1.5 px-1 text-xs text-subtle">
-          <CheckCircle size={13} weight="fill" className="text-up" /> Confirmed
+          <CheckCircle size={13} weight="fill" className="text-up" /> Resumed
         </p>
       );
     }
     return (
-      <p className="flex items-center gap-2 rounded-2xl bg-down-soft px-3 py-2 text-xs text-down">
+      <p className="flex items-center gap-2 rounded-2xl bg-attention-soft px-3 py-2 text-xs text-attention">
         <HandPalm size={14} weight="fill" />
         {session.status === "running"
           ? "Waiting for you."
@@ -165,7 +171,10 @@ export function DecisionRow({
     );
   }
 
-  const v = VERDICT[d.verdict];
+  const v =
+    d.reason === AI_BLOCKED
+      ? { ...VERDICT.blocked, tone: "neutral" as const }
+      : VERDICT[d.verdict];
   return (
     <div className="rounded-2xl px-3 py-2 ring-1 ring-ink/[0.06]">
       <button
@@ -198,7 +207,11 @@ export function DecisionRow({
                 <span
                   className={cx(
                     "mt-1 size-1.5 shrink-0 rounded-full",
-                    s.bad ? "bg-down" : "bg-up",
+                    s.tone === "bad"
+                      ? "bg-down"
+                      : s.tone === "quiet"
+                        ? "bg-faint"
+                        : "bg-up",
                   )}
                 />
                 <span className="w-12 shrink-0 font-jet text-faint">
@@ -259,7 +272,7 @@ export function DecisionRow({
         ) : (
           <Link
             href="/agent"
-            className="mt-2 block text-xs font-semibold text-down underline"
+            className="mt-2 block text-xs font-semibold text-attention underline"
           >
             Waiting for you. Open /agent
           </Link>

@@ -13,6 +13,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use strike_core::address::keccak256;
 use strike_core::agent::{start_message, StartTerms};
+use strike_core::crypto::{mint_balance_session_with, BALANCE_SESSION_COOKIE};
 use strike_core::payout_rules::withdrawal_intent_message;
 
 const SECRET: &str = "world-agent-test-secret";
@@ -479,4 +480,168 @@ async fn a_yolo_start_needs_an_orb_human_and_one_fresh_approval_from_the_same_wo
         (status, body["code"].as_str()),
         (StatusCode::FORBIDDEN, Some("human_mismatch"))
     );
+}
+
+impl Server {
+    async fn post_cookie(
+        &self,
+        path: &str,
+        cookie: &str,
+        body: &Value,
+    ) -> (StatusCode, Value, Option<String>) {
+        let res = self
+            .http
+            .post(format!("{}{path}", self.url))
+            .header("cookie", cookie)
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        let status = res.status();
+        let challenge = res
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap().to_string());
+        let set = res
+            .headers()
+            .get("set-cookie")
+            .map(|v| v.to_str().unwrap().to_string());
+        let body = res.json().await.unwrap_or(Value::Null);
+        let carried = challenge.or(set);
+        (status, body, carried)
+    }
+
+    /// Starts a normal session and returns the cookie that follows it.
+    async fn start_normal(&self, signer: &SigningKey) -> String {
+        let mut terms = yolo(&address_of(signer));
+        terms.mode = "normal".into();
+        let message = start_message(&terms);
+        let body = json!({ "message": message, "signature": sign(signer, &message) });
+        let (status, body, cookie) = self.post_cookie("/api/agent/start", "", &body).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        cookie.unwrap().split(';').next().unwrap().to_string()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_agent_switches_to_yolo_only_with_a_fresh_orb_approval() {
+    let s = start().await;
+    let (selfie, orb) = (key(21), key(22));
+    s.verify("selfie-human", &address_of(&selfie), "selfie");
+    s.verify("orb-human", &address_of(&orb), "orb");
+    let to = |mode: &str| json!({ "mode": mode });
+    let yolo_with = |id: &str| json!({ "mode": "yolo", "stepupId": id });
+
+    let low = s.start_normal(&selfie).await;
+    let (status, body, _) = s.post_cookie("/api/agent/mode", &low, &to("yolo")).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("human_tier_too_low"))
+    );
+
+    let cookie = s.start_normal(&orb).await;
+    let (status, _, _) = s
+        .post_cookie("/api/agent/mode", &cookie, &to("turbo"))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = s.post_cookie("/api/agent/mode", "", &to("yolo")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body, challenge) = s.post_cookie("/api/agent/mode", &cookie, &to("yolo")).await;
+    let first = step_up(status, &body, &challenge);
+    let (status, body, _) = s
+        .post_cookie("/api/agent/mode", &cookie, &yolo_with(&first))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("stepup_pending"))
+    );
+    assert_eq!(
+        s.count("SELECT count(*) FROM agent_sessions WHERE mode = 'yolo'"),
+        0
+    );
+
+    s.idp.approve_as("orb-world-id");
+    assert_eq!(s.settled(&first).await["status"], "approved");
+    let (status, body, _) = s
+        .post_cookie("/api/agent/mode", &cookie, &yolo_with(&first))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["session"]["mode"], "yolo");
+    assert_eq!(s.settled(&first).await["status"], "used");
+
+    let (status, body, _) = s.post_cookie("/api/agent/mode", &cookie, &to("yolo")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["session"]["mode"], "yolo");
+
+    let (status, body, _) = s
+        .post_cookie("/api/agent/mode", &cookie, &to("normal"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["session"]["mode"], "normal");
+
+    let (status, body, _) = s
+        .post_cookie("/api/agent/mode", &cookie, &yolo_with(&first))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("stepup_used"))
+    );
+
+    let (status, _, _) = s.post_cookie("/api/agent/stop", &cookie, &json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = s
+        .post_cookie("/api/agent/mode", &cookie, &to("normal"))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("not_running"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wallet_reconnects_to_its_running_agent_from_a_new_browser() {
+    let s = start().await;
+    let (alice, bob) = (key(31), key(32));
+    s.verify("alice", &address_of(&alice), "selfie");
+    let wallet = address_of(&alice);
+    let original = s.start_normal(&alice).await;
+    let signed_in = |who: &str| {
+        let token = mint_balance_session_with(Some(SECRET), who).unwrap();
+        format!("{BALANCE_SESSION_COOKIE}={token}")
+    };
+    let body = json!({ "wallet": wallet });
+
+    let (status, reply, _) = s.post_cookie("/api/agent/resume", "", &body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{reply}");
+    let other = signed_in(&address_of(&bob));
+    let (status, reply, _) = s.post_cookie("/api/agent/resume", &other, &body).await;
+    assert_eq!(
+        (status, reply["code"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("session_required"))
+    );
+    let bob_body = json!({ "wallet": address_of(&bob) });
+    let (status, _, _) = s.post_cookie("/api/agent/resume", &other, &bob_body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = s
+        .post_cookie("/api/agent/resume", &other, &json!({ "wallet": "nope" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mine = signed_in(&wallet);
+    let (status, reply, cookie) = s.post_cookie("/api/agent/resume", &mine, &body).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["session"]["status"], "running");
+    let cookie = cookie.unwrap();
+    let cookie = cookie.split(';').next().unwrap();
+
+    let (status, reply, _) = s.post_cookie("/api/agent/stop", cookie, &json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["session"]["stoppedReason"], "You stopped the agent");
+    let (status, _, _) = s.post_cookie("/api/agent/resume", &mine, &body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, reply, _) = s
+        .post_cookie("/api/agent/stop", &original, &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
 }
