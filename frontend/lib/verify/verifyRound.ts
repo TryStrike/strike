@@ -1,12 +1,11 @@
 import type { Hex } from 'viem';
-import { arkiv, entityUrl, flatten, type RawEntity } from '@/lib/arkiv';
+import { arkiv, entityUrl, flatten, SWARM_GATEWAY, type RawEntity } from '@/lib/arkiv';
 import { signedByWallet } from '@/lib/arkivBets';
 import { arcPublicClient } from '@/lib/arc/client';
 import { explorerAddressUrl, explorerTxUrl, getArcConfig } from '@/lib/arc/config';
 import { roundLeaf, type RoundFields } from '@/lib/proofs/leaf';
 
 const OPERATOR = process.env.NEXT_PUBLIC_ARKIV_OPERATOR?.trim().toLowerCase() ?? '';
-export const SWARM_GATEWAY = (process.env.NEXT_PUBLIC_SWARM_GATEWAY?.trim() || 'https://api-strike.fastship.studio/swarm').replace(/\/+$/, '');
 const BET_ID = /^[A-Za-z0-9_.:-]{1,120}$/;
 const EPOCH_MS = 600_000;
 const COMMIT_AFTER_START_MS = 11 * 60_000;
@@ -54,7 +53,9 @@ export interface RoundSummary {
 export interface Report {
   steps: Step[];
   round: RoundSummary | null;
-  verdict: { kind: 'running' | 'ok' | 'fail' | 'wait'; text: string };
+  verdict: { kind: 'running' | 'ok' | 'fail' | 'wait' | 'retry'; text: string };
+  /** Set with a 'retry' verdict when the service sent Retry-After. */
+  retryAfterMs?: number;
 }
 
 const TITLES: Record<StepId, string> = {
@@ -68,13 +69,37 @@ const TITLES: Record<StepId, string> = {
 const ORDER = Object.keys(TITLES) as StepId[];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Rate limits, timeouts and dropped connections say nothing about the round, so they are
+ * retried and never shown as a failed check. Returns null for a real error.
+ */
+export function transientInfo(err: unknown): { retryAfterMs?: number } | null {
+  const e = err as { status?: number; code?: number; name?: string; message?: string; shortMessage?: string; retryAfterMs?: number; headers?: Headers; cause?: unknown };
+  const secs = Number(e?.headers?.get?.('retry-after'));
+  const retryAfterMs = e?.retryAfterMs ?? (Number.isFinite(secs) && secs > 0 ? secs * 1_000 : undefined);
+  const text = `${e?.shortMessage ?? ''} ${e?.message ?? ''}`;
+  const hit =
+    e?.status === 429 || (e?.status !== undefined && e.status >= 500) || e?.code === -32005 || e?.code === -32603 ||
+    /HttpRequestError|TimeoutError|RpcRequestError|LimitExceeded|FailedToFetch/i.test(e?.name ?? '') ||
+    /rate.?limit|429|-32005|failed to fetch|network|timed? ?out|HTTP request failed|Swarm answered (429|5\d\d)|Arkiv RPC HTTP (429|5\d\d)/i.test(text);
+  if (hit) return { retryAfterMs };
+  return e?.cause ? transientInfo(e.cause) : null;
+}
+
+/** One short line for any error, never a raw viem dump. */
+export const shortError = (err: unknown) => {
+  const e = err as { shortMessage?: string; message?: string };
+  return (e?.shortMessage ?? e?.message ?? String(err)).split('\n')[0].slice(0, 200);
+};
+
 async function retry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
   for (let i = 1; ; i++) {
     try {
       return await fn();
     } catch (err) {
       if (i >= tries) throw err;
-      await sleep(1_000 * i);
+      await sleep(transientInfo(err)?.retryAfterMs ?? 1_000 * i);
     }
   }
 }
@@ -91,11 +116,25 @@ async function query(q: string, limit = 5): Promise<Record<string, string>[]> {
 
 class Stop extends Error {}
 
+const BACKOFF_MS = [3_000, 8_000, 20_000];
+
 /**
  * Checks one round end to end from the browser: Arkiv, Swarm and Arc are read directly,
  * no Strike server is called. `onUpdate` gets a fresh report after every change.
  */
 export async function verifyBet(betId: string, onUpdate: (r: Report) => void): Promise<Report> {
+  for (let i = 0; ; i++) {
+    const out = await verifyOnce(betId, onUpdate);
+    if (out.verdict.kind !== 'retry' || i >= BACKOFF_MS.length) return out;
+    const wait = Math.min(30_000, Math.max(BACKOFF_MS[i], out.retryAfterMs ?? 0));
+    onUpdate({ ...out, verdict: { kind: 'retry', text: `${out.verdict.text} Retrying in ${Math.ceil(wait / 1_000)}s (attempt ${i + 2} of ${BACKOFF_MS.length + 1}).` } });
+    await sleep(wait);
+  }
+}
+
+async function verifyOnce(betId: string, onUpdate: (r: Report) => void): Promise<Report> {
+  let transient = false;
+  let retryHint = 0;
   const report: Report = {
     steps: ORDER.map((id) => ({ id, title: TITLES[id], status: 'pending' })),
     round: null,
@@ -112,6 +151,14 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
     return report;
   };
   // a step that cannot pass stops the run; the later rows stay pending-less ("skip")
+  // an unreadable service is not a failed check: show it as waiting and let the caller retry
+  const unreachable = (id: StepId, service: string, err: unknown, links?: Link[]): never => {
+    const t = transientInfo(err);
+    if (!t) return halt(id, 'fail', `Could not read ${service}: ${shortError(err)}`, links);
+    transient = true;
+    retryHint = Math.max(retryHint, t.retryAfterMs ?? 0);
+    return halt(id, 'wait', `Couldn't reach ${service} right now (it is rate limiting or offline).`, links);
+  };
   const halt = (id: StepId, status: 'fail' | 'wait', detail: string, links?: Link[]): never => {
     set(id, status, detail, links);
     for (const s of report.steps) if (s.status === 'pending') s.status = 'skip';
@@ -133,7 +180,7 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
       round = rows[0];
     } catch (err) {
       if (err instanceof Stop) throw err;
-      return halt('round', 'fail', `Could not reach Arkiv: ${(err as Error).message}`);
+      return unreachable('round', 'Arkiv', err);
     }
     const settledAt = Number(round.settledAt);
     report.round = {
@@ -183,7 +230,7 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
         );
       }
     } catch (err) {
-      set('bet', 'skip', `Could not read the player's bet: ${(err as Error).message}`);
+      set('bet', 'skip', transientInfo(err) ? "Couldn't reach Arkiv for the player's bet right now, skipped." : `Could not read the player's bet: ${shortError(err)}`);
     }
 
     // 3. the epoch. The sealed round only has settledAt, which can fall just past the end time, so try the epoch before too.
@@ -199,7 +246,7 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
       try {
         rows = await query(`arkiv.schema = str('strike.epochs') AND $creator = addr(${OPERATOR}) AND epoch = u64(${c})`);
       } catch (err) {
-        return halt('epoch', 'fail', `Could not reach Arkiv: ${(err as Error).message}`);
+        return unreachable('epoch', 'Arkiv', err);
       }
       const e = rows[0];
       if (!e) continue;
@@ -227,7 +274,7 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
         epoch = e;
         n = c;
         set('epoch', 'pass', `Epoch ${c}, root ${e.root}`, [{ label: 'Epoch entity', href: entityUrl(e.key) }]);
-        return halt('swarm', 'fail', `Could not read the proof file: ${(err as Error).message}`, [
+        return unreachable('swarm', 'the Swarm proof file', err, [
           { label: 'Swarm file', href: `${SWARM_GATEWAY}/bytes/${e.swarm}` },
         ]);
       }
@@ -235,11 +282,13 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
 
     if (!epoch) {
       const commitAt = new Date(n * EPOCH_MS + COMMIT_AFTER_START_MS);
-      const when = commitAt.getTime() > Date.now() ? `about ${commitAt.toLocaleTimeString()}` : 'any moment now';
+      const at = commitAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       halt(
         'epoch',
         'wait',
-        `Epoch ${n} is not committed yet. The batch commits about 11 minutes after its window starts, so ${when}. Check back then.`,
+        commitAt.getTime() > Date.now()
+          ? `Epoch ${n} commits at ${at} (11 minutes after its window starts). Check back then.`
+          : `Epoch ${n} was due to commit at ${at} and has not landed yet. The operator is running late, check again in a few minutes.`,
       );
     }
     const ep = epoch!;
@@ -259,7 +308,7 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
     try {
       rebuilt = roundLeaf(entry.round);
     } catch (err) {
-      return halt('leaf', 'fail', `Could not rebuild the leaf: ${(err as Error).message}`);
+      return halt('leaf', 'fail', `Could not rebuild the leaf: ${shortError(err)}`);
     }
     const r = entry.round;
     const same =
@@ -291,7 +340,7 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
         4,
       );
     } catch (err) {
-      return halt('arc', 'fail', `Could not read Arc (its public RPC rate limits, try again in a minute): ${(err as Error).message}`, arcLinks);
+      return unreachable('arc', 'Arc', err, arcLinks);
     }
     if (onchainRoot !== ep.root) halt('arc', 'fail', `Arc holds a different root for epoch ${n}: ${onchainRoot}`, arcLinks);
     if (!verified) halt('arc', 'fail', 'Arc says this leaf is not in the committed root.', arcLinks);
@@ -299,7 +348,13 @@ export async function verifyBet(betId: string, onUpdate: (r: Report) => void): P
 
     return end('ok', 'Verified: this round is exactly what was committed on Arc');
   } catch (err) {
-    if (!(err instanceof Stop)) return end('fail', `Check failed: ${(err as Error).message}`);
+    if (!(err instanceof Stop)) {
+      return transientInfo(err)
+        ? end('retry', "Couldn't reach Arc or Arkiv right now.")
+        : end('fail', `Check failed: ${shortError(err)}`);
+    }
+    if (transient) report.retryAfterMs = retryHint;
+    if (transient) return end('retry', "Couldn't reach Arc, Arkiv or Swarm right now. This says nothing about the round.");
     const bad = report.steps.find((s) => s.status === 'fail');
     const wait = report.steps.find((s) => s.status === 'wait');
     return wait ? end('wait', 'Not committed yet. This round cannot be checked on Arc until its batch lands.') : end('fail', `Not verified: ${bad?.detail ?? err.message}`);

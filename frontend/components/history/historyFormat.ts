@@ -15,12 +15,6 @@ export function formatAmount(value: unknown, decimals: 2 | 4 = 2): string {
   return formatMoney(asNumber(value), decimals);
 }
 
-export function formatSignedAmount(value: number): string {
-  const n = asNumber(value);
-  const sign = n > 0 ? '+' : n < 0 ? '−' : '';
-  return `${sign}${formatAmount(Math.abs(n))}`;
-}
-
 export function formatPrice(value: unknown): string {
   const n = asNumber(value);
   if (n === 0) return '0.00';
@@ -69,16 +63,6 @@ export function formatRowDateTime(
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-  });
-}
-
-export function formatClock(iso: string | null | undefined): string {
-  const t = safeTime(iso);
-  if (t === null) return '—';
-  return new Date(t).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
   });
 }
 
@@ -289,12 +273,3 @@ export function hasActiveFilters(filters: BetHistoryFilters): boolean {
   );
 }
 
-export function filterSummary(filters: BetHistoryFilters): string {
-  const bits: string[] = [];
-  if (filters.asset && filters.asset !== 'ALL') bits.push(filters.asset);
-  if (filters.outcome) bits.push(filters.outcome === 'won' ? 'Wins' : 'Losses');
-  if (filters.direction) bits.push(filters.direction);
-  if (filters.from) bits.push(`from ${formatDateTime(filters.from)}`);
-  if (filters.to) bits.push(`to ${formatDateTime(filters.to)}`);
-  return bits.length ? bits.join(' · ') : 'All rounds';
-}

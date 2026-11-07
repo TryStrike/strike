@@ -148,6 +148,8 @@ const KEEP_THOUGHTS = 30;
 const LIVE_UNTIL = "strike-agent-live-until";
 
 let source: EventSource | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let failures = 0;
 
 interface AgentFeed {
   session: AgentSession | null;
@@ -218,6 +220,7 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
   connect: (fresh = false) => {
     if (source && !fresh) return;
     source?.close();
+    clearTimeout(retryTimer);
     if (fresh)
       set({ decisions: [], thoughts: [], activity: {}, stepup: null });
     set({ checking: !get().session });
@@ -239,14 +242,22 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     opened.addEventListener("thought", (e) =>
       get().showThought(JSON.parse((e as MessageEvent).data)),
     );
+    opened.onopen = () => {
+      failures = 0;
+    };
     opened.onerror = () => {
       set({ checking: false });
+      // The browser retries by itself until the server answers non-200; after that it gives up, so we do.
       if (opened.readyState !== EventSource.CLOSED) return;
       opened.close();
-      if (source === opened) source = null;
+      if (source !== opened) return;
+      source = null;
+      const wait = Math.min(1_000 * 2 ** failures++, 30_000);
+      retryTimer = setTimeout(() => get().connectIfLive(), wait);
     };
   },
   reconnect: () => {
+    clearTimeout(retryTimer);
     source?.close();
     source = null;
     get().connect();
@@ -255,6 +266,7 @@ export const useAgentFeed = create<AgentFeed>((set, get) => ({
     if (Number(localStorage.getItem(LIVE_UNTIL)) > Date.now()) get().connect();
   },
   dismiss: () => {
+    clearTimeout(retryTimer);
     source?.close();
     source = null;
     localStorage.removeItem(LIVE_UNTIL);

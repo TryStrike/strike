@@ -17,6 +17,7 @@ function Verify() {
   const params = useSearchParams();
   const [input, setInput] = useState(params.get('bet') ?? '');
   const [report, setReport] = useState<Report | null>(null);
+  const [busy, setBusy] = useState(false);
   const run = useRef(0);
 
   const check = (id: string) => {
@@ -24,19 +25,23 @@ function Verify() {
     const betId = id.trim();
     if (!betId) return;
     window.history.replaceState(null, '', `/verify?bet=${encodeURIComponent(betId)}`);
+    setBusy(true);
     void verifyBet(betId, (r) => {
       if (run.current === mine) setReport(r);
+    }).finally(() => {
+      if (run.current === mine) setBusy(false);
     });
   };
 
   useEffect(() => {
     const id = params.get('bet');
-    if (id) check(id);
+    if (id) queueMicrotask(() => check(id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const r = report?.round;
   const tone = report?.verdict.kind === 'ok' ? 'bg-up/[0.08] text-up' : report?.verdict.kind === 'fail' ? 'bg-down-soft text-down' : 'bg-surface text-ink';
+  const canRetry = report?.verdict.kind === 'retry' && !busy;
 
   return (
     <div className="min-h-full w-full bg-white font-tight text-ink">
@@ -81,6 +86,15 @@ function Verify() {
           <div className="space-y-6">
             <div role="status" className={`rounded-2xl px-5 py-4 text-[15px] font-semibold ${tone}`}>
               {report.verdict.text}
+              {canRetry && (
+                <button
+                  type="button"
+                  onClick={() => check(input)}
+                  className="ml-3 inline-flex h-8 items-center rounded-full bg-ink px-4 text-xs font-semibold text-white"
+                >
+                  Retry
+                </button>
+              )}
             </div>
 
             {r && (

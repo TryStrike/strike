@@ -27,8 +27,6 @@ const STATE: Record<StepUpStatus, { label: string; tone: 'up' | 'down' | 'neutra
   },
 };
 
-export const stepUpSettled = (s: StepUpStatus) => s !== 'pending';
-
 export function useNow(active: boolean, tickMs = 1_000) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {

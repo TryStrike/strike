@@ -7,7 +7,8 @@ import { explorerAddressUrl, explorerTxUrl, getArcConfig } from '@/lib/arc/confi
 import { arcPublicClient } from '@/lib/arc/client';
 import { roundLeaf, type RoundFields } from '@/lib/proofs/leaf';
 import { Badge } from '@/components/ui/kit';
-import { entityUrl } from '@/lib/arkiv';
+import { entityUrl, SWARM_GATEWAY } from '@/lib/arkiv';
+import { shortError, transientInfo } from '@/lib/verify/verifyRound';
 
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 60_000;
@@ -41,38 +42,62 @@ const VERIFY_ROUND_ABI = [
   },
 ] as const;
 
-type Verdict = { kind: 'checking' } | { kind: 'done'; leafOk: boolean; onchain: boolean } | { kind: 'error'; reason: string };
+const RETRY_DELAYS_MS = [3_000, 8_000, 20_000];
+
+type Verdict =
+  | { kind: 'checking' }
+  | { kind: 'retrying'; inMs: number }
+  | { kind: 'unreachable' }
+  | { kind: 'done'; leafOk: boolean; onchain: boolean }
+  | { kind: 'error'; reason: string };
 type Keyed = Verdict & { key: string };
 
 /**
  * Rebuilds the leaf from the round's own fields, then asks StrikeTreasury on Arc
  * whether it is in the committed root. Neither step takes our server's word for it.
  */
-function useArcVerdict(data: BetProof): Verdict {
+function useArcVerdict(data: BetProof): { verdict: Verdict; retry: () => void } {
   const key = `${data.epoch}:${data.leaf}:${data.proof?.join(',')}`;
   const [verdict, setVerdict] = useState<Keyed>({ kind: 'checking', key: '' });
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (data.status !== 'committed' || !data.round || !data.proof) return;
     let cancelled = false;
-    (async () => {
-      const leaf = roundLeaf(data.round as RoundFields);
-      const onchain = await arcPublicClient().readContract({
-        address: getArcConfig().treasuryAddress as Hex,
-        abi: VERIFY_ROUND_ABI,
-        functionName: 'verifyRound',
-        args: [BigInt(data.epoch), leaf, data.proof as Hex[]],
-      });
-      if (!cancelled) setVerdict({ kind: 'done', leafOk: leaf === data.leaf, onchain, key });
-    })().catch((err: Error) => {
-      console.error('[proof] verifyRound on Arc failed', err);
-      if (!cancelled) setVerdict({ kind: 'error', reason: err.message, key });
-    });
+    let timer: number | undefined;
+    const run = async (i: number): Promise<void> => {
+      try {
+        const leaf = roundLeaf(data.round as RoundFields);
+        const onchain = await arcPublicClient().readContract({
+          address: getArcConfig().treasuryAddress as Hex,
+          abi: VERIFY_ROUND_ABI,
+          functionName: 'verifyRound',
+          args: [BigInt(data.epoch), leaf, data.proof as Hex[]],
+        });
+        if (!cancelled) setVerdict({ kind: 'done', leafOk: leaf === data.leaf, onchain, key });
+      } catch (err) {
+        if (cancelled) return;
+        const t = transientInfo(err);
+        if (!t) {
+          console.error('[proof] verifyRound on Arc failed', err);
+          setVerdict({ kind: 'error', reason: shortError(err), key });
+        } else if (i >= RETRY_DELAYS_MS.length) {
+          setVerdict({ kind: 'unreachable', key });
+        } else {
+          const inMs = Math.min(30_000, Math.max(RETRY_DELAYS_MS[i], t.retryAfterMs ?? 0));
+          setVerdict({ kind: 'retrying', inMs, key });
+          timer = window.setTimeout(() => void run(i + 1), inMs);
+        }
+      }
+    };
+    void run(0);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, data.status]);
-  return verdict.key === key ? verdict : { kind: 'checking' };
+  }, [key, data.status, attempt]);
+  const v: Verdict = verdict.key === key ? verdict : { kind: 'checking' };
+  return { verdict: v, retry: () => { setVerdict({ kind: 'checking', key }); setAttempt((n) => n + 1); } };
 }
 
 export const TxLink: React.FC<{ hash: string; label: string }> = ({ hash, label }) => (
@@ -87,10 +112,6 @@ export const TxLink: React.FC<{ hash: string; label: string }> = ({ hash, label 
     <ArrowUpRight size={12} />
   </a>
 );
-
-/** Reads raw bytes by reference; the web gateway answers 200 for any address, so it cannot tell a miss. */
-/** Mainnet bundles open on Swarm's public API gateway; testnet (Sepolia) bundles need a testnet Bee node. */
-const SWARM_GATEWAY = (process.env.NEXT_PUBLIC_SWARM_GATEWAY?.trim() || 'https://api.gateway.ethswarm.org').replace(/\/+$/, '');
 
 const ArchiveLink: React.FC<{ href: string; label: string; id: string }> = ({ href, label, id }) => (
   <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-jet text-up">
@@ -212,14 +233,27 @@ const ProofBody: React.FC<{ data: BetProof; at: number }> = ({ data, at }) => {
 };
 
 const ArcVerdict: React.FC<{ data: BetProof }> = ({ data }) => {
-  const verdict = useArcVerdict(data);
+  const { verdict, retry } = useArcVerdict(data);
   const treasury = getArcConfig().treasuryAddress;
   const epochLine = <span className="font-jet text-subtle">epoch {data.epoch}</span>;
   if (verdict.kind === 'checking') {
     return <p className="mt-1.5 text-[11px] text-muted">Asking StrikeTreasury on Arc to verify this round…</p>;
   }
+  if (verdict.kind === 'retrying') {
+    return <p className="mt-1.5 text-[11px] text-muted">Couldn&apos;t reach Arc right now, retrying in {Math.ceil(verdict.inMs / 1000)}s…</p>;
+  }
+  if (verdict.kind === 'unreachable') {
+    return (
+      <p className="mt-1.5 text-[11px] text-muted">
+        Arc&apos;s public RPC is busy, so this round is not checked yet (that does not mean it is wrong).{' '}
+        <button type="button" onClick={retry} className="text-up underline underline-offset-2">
+          Retry
+        </button>
+      </p>
+    );
+  }
   if (verdict.kind === 'error') {
-    return <p className="mt-1.5 text-[11px] text-down">Could not reach Arc to verify: {verdict.reason}</p>;
+    return <p className="mt-1.5 text-[11px] text-down">Arc could not check this round: {verdict.reason}</p>;
   }
   const ok = verdict.leafOk && verdict.onchain;
   return (

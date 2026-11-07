@@ -100,10 +100,6 @@ export function getArcConfig(): ArcConfig {
 
 export const ARC_ASSETS: ArcAsset[] = ['USDC', 'EURC'];
 
-export function isArcAsset(value: string): value is ArcAsset {
-  return (ARC_ASSETS as string[]).includes(value.toUpperCase());
-}
-
 export function getAssetConfig(asset: ArcAsset): ArcAssetConfig {
   return getArcConfig().assets[asset];
 }
