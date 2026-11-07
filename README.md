@@ -8,6 +8,22 @@ Strike is a binary options app on Arc. you call higher or lower on crypto, forex
 
 ![how strike fits together](arkiv/assets/architecture.png)
 
+## at a glance
+
+| | |
+|---|---|
+| live app | [strike.fastship.studio](https://strike.fastship.studio) on **Arc testnet** (chain id `5042002`) |
+| Arc Studio project | [studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd](https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd) |
+| vault | `StrikeTreasury` [`0x8726144B6a122862B9F1184752d8ebA0AcD662B6`](https://explorer.testnet.arc.io/address/0x8726144B6a122862B9F1184752d8ebA0AcD662B6) |
+| stocks | `TestStockMarket` [`0xd9f98f3b268e788f3ccf6e7ced2d592a84a6f80f`](https://explorer.testnet.arc.io/address/0xd9f98f3b268e788f3ccf6e7ced2d592a84a6f80f) |
+| a payout | [`0x9e98fd2e…5465`](https://explorer.testnet.arc.io/tx/0x9e98fd2ebea3c4518f31843fee79102fdc7f034c0f23a413e954143c08935465) |
+| a batch of rounds committed | [`0xb51687e2…5712`](https://explorer.testnet.arc.io/tx/0xb51687e2490c4b9947674915480a950e11c80980f14ec1a49f3b4bc505dc5712) |
+| check any round | [strike.fastship.studio/verify](https://strike.fastship.studio/verify) |
+| packages we published | [arkiv-rs-sdk](https://crates.io/crates/arkiv-rs-sdk) on crates.io, [arc-provable-vault](https://github.com/TryStrike/arc-provable-vault) template |
+| builder | [github.com/ayuxy027](https://github.com/ayuxy027) |
+
+every contract, tx and Studio detail for the Arc track: [docs/arc.md](docs/arc.md)
+
 ## what's in here
 
 | track | what to read |
