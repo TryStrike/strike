@@ -119,6 +119,7 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
     set({
       address: null,
       walletBalance: null,
+      houseBalanceKnown: false,
       isConnected: false,
       network: null,
       selectedCurrency: null,
@@ -166,7 +167,7 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
   },
 
   setAddress: (address: string | null) => {
-    if (address !== get().address) set({ address, walletBalance: null });
+    if (address !== get().address) set({ address, walletBalance: null, houseBalanceKnown: false } as Partial<WalletState>);
   },
 
   setIsConnected: (connected: boolean) => {
@@ -178,7 +179,7 @@ export const createWalletSlice: StateCreator<Store, [], [], WalletState> = (set,
   },
 
   setSelectedCurrency: (currency: string | null) => {
-    set({ selectedCurrency: currency });
+    set({ selectedCurrency: currency, houseBalanceKnown: false } as Partial<WalletState>);
     const { isConnected, address } = get();
     if (isConnected && address) {
       get().refreshWalletBalance();

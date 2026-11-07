@@ -17,6 +17,7 @@ const nowMs = () => Date.now();
 
 export const BalanceDisplay: React.FC = () => {
   const houseBalance = useStore(state => state.houseBalance);
+  const houseBalanceKnown = useStore(state => state.houseBalanceKnown);
   const network = useStore(state => state.network);
   const userTier = useStore(state => state.userTier);
   const selectedCurrency = useStore(state => state.selectedCurrency);
@@ -110,7 +111,7 @@ export const BalanceDisplay: React.FC = () => {
     setIsReceiptOpen(true);
   };
 
-  const formattedBalance = houseBalance.toFixed(4);
+  const formattedBalance = houseBalanceKnown ? houseBalance.toFixed(4) : "--";
 
   const currentSymbol = resolveHouseLedgerCurrency({ selectedCurrency });
 

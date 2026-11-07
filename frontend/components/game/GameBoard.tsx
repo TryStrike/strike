@@ -75,6 +75,7 @@ export const GameBoard: React.FC = () => {
   );
 
   const marketClosed = useStore((s) => s.closedAssets.includes(s.selectedAsset));
+  const errorCode = useStore((s) => s.errorCode);
 
   const [betAmount, setBetAmount] = useState<string>("0.1");
   const [selectedDuration, setSelectedDuration] = useState<number>(5);
@@ -180,12 +181,7 @@ export const GameBoard: React.FC = () => {
 
   const amountNum = Number(betAmount);
   const multiplier = getMultiplier(selectedDuration);
-  const isBalanceError =
-    !!error &&
-    (error.includes("User not found") ||
-      error.includes("No house balance") ||
-      error.includes("Insufficient house") ||
-      error.includes("balance"));
+  const isBalanceError = !!error && errorCode === "insufficient_balance";
 
   const [sessionStart] = useState(() => Date.now());
   const sessionBets = bets.filter((b) => b.timestamp >= sessionStart);
@@ -234,7 +230,13 @@ export const GameBoard: React.FC = () => {
   });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.repeat) return;
+      if (e.repeat || e.defaultPrevented) return;
+      if (
+        document.querySelector(
+          '[aria-modal="true"], dialog[open], [data-tour-host]:not(:empty)',
+        )
+      )
+        return;
       const el = e.target as HTMLElement | null;
       if (
         el &&
@@ -250,7 +252,13 @@ export const GameBoard: React.FC = () => {
         setBetAmount(preset);
         return;
       }
-      if (gameMode !== "binomo" || !isWalletConnected || isPlacingBet) return;
+      if (
+        gameMode !== "binomo" ||
+        !isWalletConnected ||
+        isPlacingBet ||
+        useStore.getState().closedAssets.includes(useStore.getState().selectedAsset)
+      )
+        return;
       if (e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
         void betRef.current(e.key === "ArrowUp" ? "UP" : "DOWN");

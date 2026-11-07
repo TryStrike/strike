@@ -7,6 +7,8 @@ import { sendGuarded } from "@/lib/world/gate";
 
 export interface BalanceState {
   houseBalance: number;
+  /** False until a fetch lands for the current wallet and currency; houseBalance is then not meaningful. */
+  houseBalanceKnown: boolean;
   userTier: 'free' | 'standard' | 'vip';
   isLoading: boolean;
   error: string | null;
@@ -22,8 +24,11 @@ export interface BalanceState {
   clearError: () => void;
 }
 
+let fetchSeq = 0;
+
 export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (set, get) => ({
   houseBalance: 0,
+  houseBalanceKnown: false,
   userTier: 'free',
   isLoading: false,
   error: null,
@@ -34,6 +39,7 @@ export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (se
     });
 
     if (!address) return;
+    const seq = ++fetchSeq;
 
     try {
       set({ isLoading: true, error: null });
@@ -44,8 +50,18 @@ export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (se
 
       const data = await response.json();
 
+      // Drop stale replies: a newer fetch started, or the wallet or currency changed meanwhile.
+      const cur = get();
+      if (
+        seq !== fetchSeq ||
+        (cur.address && cur.address.toLowerCase() !== address.toLowerCase()) ||
+        resolveHouseLedgerCurrency({ selectedCurrency: cur.selectedCurrency }) !== currency
+      )
+        return;
+
       set({
         houseBalance: data.balance || 0,
+        houseBalanceKnown: true,
         userTier: data.tier || 'free',
         isLoading: false,
         error: null
@@ -60,7 +76,7 @@ export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (se
   },
 
   setBalance: (balance: number) => {
-    set({ houseBalance: balance });
+    set({ houseBalance: balance, houseBalanceKnown: true });
   },
 
   updateBalance: (amount: number, operation: 'add' | 'subtract') => {
@@ -109,6 +125,7 @@ export const createBalanceSlice: StateCreator<Store, [], [], BalanceState> = (se
 
       set({
         houseBalance: data.newBalance,
+        houseBalanceKnown: true,
         isLoading: false,
         error: null
       });

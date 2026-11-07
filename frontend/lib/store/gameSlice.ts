@@ -67,7 +67,6 @@ export interface GameState {
   settlingBets: ActiveBet[];
   maxBands: Record<string, number>;
   closedAssets: string[];
-  targetCells: TargetCell[];
   isPlacingBet: boolean;
   lastResult: {
     won: boolean;
@@ -86,6 +85,8 @@ export interface GameState {
   } | null;
   settledResults: SettledResult[];
   error: string | null;
+  /** Server error code of the last failed bet, for classifying without string matching. */
+  errorCode: string | null;
   timeframeSeconds: number;
 
   /** Server clock minus local clock, from the market feed. */
@@ -140,65 +141,6 @@ export interface GameState {
 }
 
 const MAX_PRICE_HISTORY = 720;
-
-const DEFAULT_TARGET_CELLS: TargetCell[] = [
-  {
-    id: "1",
-    label: "+$5 in 30s",
-    multiplier: 1.5,
-    priceChange: 5,
-    direction: "UP",
-  },
-  {
-    id: "2",
-    label: "+$10 in 30s",
-    multiplier: 2.0,
-    priceChange: 10,
-    direction: "UP",
-  },
-  {
-    id: "3",
-    label: "+$20 in 30s",
-    multiplier: 3.0,
-    priceChange: 20,
-    direction: "UP",
-  },
-  {
-    id: "4",
-    label: "+$50 in 30s",
-    multiplier: 5.0,
-    priceChange: 50,
-    direction: "UP",
-  },
-  {
-    id: "5",
-    label: "+$100 in 30s",
-    multiplier: 10.0,
-    priceChange: 100,
-    direction: "UP",
-  },
-  {
-    id: "6",
-    label: "-$5 in 30s",
-    multiplier: 1.5,
-    priceChange: -5,
-    direction: "DOWN",
-  },
-  {
-    id: "7",
-    label: "-$10 in 30s",
-    multiplier: 2.0,
-    priceChange: -10,
-    direction: "DOWN",
-  },
-  {
-    id: "8",
-    label: "-$20 in 30s",
-    multiplier: 3.0,
-    priceChange: -20,
-    direction: "DOWN",
-  },
-];
 
 const ROUND_CLOCK_GRACE_MS = 400;
 const BET_TIMEOUT_MS = 6_000;
@@ -391,7 +333,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
     const pending = roundTimers.get(bet.id);
     if (pending) clearTimeout(pending);
     const delay =
-      Math.max(0, (bet.endTime as number) - Date.now()) + ROUND_CLOCK_GRACE_MS;
+      Math.max(0, (bet.endTime as number) - (Date.now() + get().serverOffsetMs)) + ROUND_CLOCK_GRACE_MS;
     roundTimers.set(
       bet.id,
       setTimeout(() => void settleRound(bet.id), delay),
@@ -415,11 +357,11 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
     settlingBets: [],
     maxBands: {},
     closedAssets: [],
-    targetCells: DEFAULT_TARGET_CELLS,
     isPlacingBet: false,
     lastResult: null,
     settledResults: [],
     error: null,
+    errorCode: null,
     timeframeSeconds: 5,
     activeTab: "bet",
     activeIndicators: {},
@@ -511,10 +453,9 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
         return;
       lastBetAttemptAt = Date.now();
 
-      set({ isPlacingBet: true, error: null });
+      set({ isPlacingBet: true, error: null, errorCode: null });
 
       const {
-        targetCells,
         currentPrice,
         addActiveBet,
         gameMode,
@@ -552,15 +493,7 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
             direction: direction,
           };
         } else {
-          const foundTarget = targetCells.find(
-            (cell: TargetCell) => cell.id === targetId,
-          );
-          if (!foundTarget) {
-            throw new Error("Invalid target cell");
-          }
-          target = foundTarget;
-          direction = target.direction;
-          multiplier = target.multiplier;
+          throw new Error("Invalid target cell");
         }
 
         const clickTime = Date.now();
@@ -691,7 +624,11 @@ export const createGameSlice: StateCreator<Store, [], [], GameState> = (
           : error instanceof Error
             ? error.message
             : "Failed to place bet";
-        set({ isPlacingBet: false, error: message });
+        set({
+          isPlacingBet: false,
+          error: message,
+          errorCode: error instanceof ApiFailure ? (error.api.code ?? null) : null,
+        });
         throw new Error(message);
       }
     },

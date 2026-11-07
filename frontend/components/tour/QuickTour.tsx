@@ -16,9 +16,7 @@ import {
     clearTourProgress,
     isTourDismissed,
     setTourDismissed,
-    hasSeenTour,
     markTourSeen,
-    shouldAutoStartTour,
     normalizeTourScope,
 } from './tourProgress';
 
@@ -616,40 +614,4 @@ export const QuickTour: React.FC<{
         host
     );
 };
-
-export function useOnboardingTour(options?: { autoStartDelayMs?: number }) {
-    const [isOpen, setIsOpen] = useState(false);
-    const [dismissed, setDismissed] = useState(false);
-    const startedScopesRef = useRef<Set<string>>(new Set());
-
-    const address = useStore(state => state.address);
-    const scope = normalizeTourScope(address);
-
-    useEffect(() => {
-        const storage = safeStorage();
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- auto-start reads localStorage, only available after hydration
-        setDismissed(isTourDismissed(storage, scope));
-        if (startedScopesRef.current.has(scope)) return;
-        if (
-            shouldAutoStartTour({
-                dismissed: isTourDismissed(storage, scope),
-                seen: hasSeenTour(storage, scope),
-            })
-        ) {
-            startedScopesRef.current.add(scope);
-            const delay = options?.autoStartDelayMs ?? 1200;
-            const t = setTimeout(() => setIsOpen(true), delay);
-            return () => clearTimeout(t);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- delay read once per scope
-    }, [scope]);
-
-    return {
-        isOpen,
-        dismissed,
-        scope,
-        open: () => setIsOpen(true),
-        close: () => setIsOpen(false),
-    };
-}
 
