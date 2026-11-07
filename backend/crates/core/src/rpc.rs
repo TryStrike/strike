@@ -69,6 +69,7 @@ const FUNCTIONS: &[(&str, &[&str])] = &[
             "p_transaction_hash",
         ],
     ),
+    ("bet_replay", &["p_idempotency_key"]),
     ("normalize_ban_address", &["p"]),
     ("is_wallet_globally_banned", &["p_address"]),
 ];
@@ -165,6 +166,14 @@ pub fn dispatch(conn: &mut Connection, function: &str, args: &Args) -> ApiResult
                 )
             })
         }
+        "bet_replay" => in_transaction(conn, |c| {
+            duplicate_bet(
+                c,
+                args.text("p_idempotency_key")
+                    .as_deref()
+                    .unwrap_or_default(),
+            )
+        }),
         "settle_round" => {
             let end = args.end_tick();
             in_transaction(conn, |c| {
@@ -674,6 +683,17 @@ pub(crate) fn debit_blitz_fee(
         Ok(credited(new))
     })
     .map(|outcome| outcome.json)
+}
+
+/// Puts a withdrawal's debit back, with a `refund` audit row.
+pub(crate) fn credit_for_withdrawal_refund(
+    conn: &Connection,
+    user: Option<&str>,
+    amount: Decimal,
+    currency: &str,
+) -> ApiResult<Value> {
+    credit_balance(conn, user, Some(amount), Some(currency), None, "refund")
+        .map(|outcome| outcome.json)
 }
 
 pub(crate) fn debit_for_withdrawal(

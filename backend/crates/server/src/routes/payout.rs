@@ -262,6 +262,7 @@ async fn run(id: i64) -> ApiResult<Response> {
     // with the balance to cover it.
     let database = db::db().await?;
     let currency_for_claim = currency.clone();
+    let refund_address = db_address.clone();
     let claim = move || async move {
         match withdrawals::claim_and_debit(
             database,
@@ -305,10 +306,35 @@ async fn run(id: i64) -> ApiResult<Response> {
             ));
         }
         Err(PayError::Refused(response)) => return Ok(response),
+        Err(PayError::NotSent(err)) => {
+            // The node refused it, so nothing left the treasury: put the debit back.
+            tracing::error!("[withdrawal/pay] id={id} broadcast refused: {err}");
+            let refunded = withdrawals::refund(
+                db::db().await?,
+                id,
+                refund_address,
+                js_number_string(amount),
+                currency.clone(),
+            )
+            .await;
+            if matches!(refunded, Ok(true)) {
+                return Ok(error(
+                    StatusCode::BAD_GATEWAY,
+                    "Treasury payout was refused — the debit was refunded.",
+                ));
+            }
+            tracing::error!("[withdrawal/pay] id={id} could not be refunded: {refunded:?}");
+            mark_needs_reconciliation(id, &format!("chain_payout_refused:{err}"), None).await;
+            return Ok(payout_parked());
+        }
         Err(PayError::Send { sent, error: err }) => {
             let hashes: Vec<&str> = sent.iter().map(|s| s.hash.as_str()).collect();
-            mark_needs_reconciliation(id, &format!("chain_payout_error:sent={hashes:?}: {err}"))
-                .await;
+            mark_needs_reconciliation(
+                id,
+                &format!("chain_payout_error:sent={hashes:?}: {err}"),
+                hashes.first().copied(),
+            )
+            .await;
             return Ok(payout_parked());
         }
     };
@@ -322,7 +348,12 @@ async fn run(id: i64) -> ApiResult<Response> {
         }
     }
     if let Some(err) = failure {
-        mark_needs_reconciliation(id, &format!("chain_payout_error:sent={hashes:?}: {err}")).await;
+        mark_needs_reconciliation(
+            id,
+            &format!("chain_payout_error:sent={hashes:?}: {err}"),
+            hashes.first().copied(),
+        )
+        .await;
         return Ok(payout_parked());
     }
     let combined = hashes[0].to_string();
@@ -334,7 +365,12 @@ async fn run(id: i64) -> ApiResult<Response> {
         Err(err) => Some(err.to_string()),
     };
     if let Some(reason) = finalize_failure {
-        mark_needs_reconciliation(id, &format!("tx_hash_writeback_failed:{reason}")).await;
+        mark_needs_reconciliation(
+            id,
+            &format!("tx_hash_writeback_failed:{reason}"),
+            Some(&combined),
+        )
+        .await;
         return Ok(error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Payout succeeded but the request could not be finalized — check the ledger.",
@@ -350,11 +386,11 @@ async fn run(id: i64) -> ApiResult<Response> {
 /// `markNeedsReconciliation`: once a row is claimed, a failure is no longer a
 /// plain 500. Funds may have left the treasury, so park it where no second
 /// admin can pay it again, and shout in the logs.
-async fn mark_needs_reconciliation(id: i64, reason: &str) {
+async fn mark_needs_reconciliation(id: i64, reason: &str, tx_hash: Option<&str>) {
     let note = reconciliation_note(reason);
     tracing::error!("[withdrawal/pay] id={id} {note}");
     let parked = match db::db().await {
-        Ok(database) => withdrawals::park(database, id, note).await,
+        Ok(database) => withdrawals::park(database, id, note, tx_hash.map(str::to_string)).await,
         Err(err) => Err(err),
     };
     // Left `accepted` with no tx hash, which is equally unpayable.

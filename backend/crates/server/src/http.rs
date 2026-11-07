@@ -1,4 +1,5 @@
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, FromRequestParts, Request};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -128,6 +129,20 @@ fn session_required(message: &str) -> ApiError {
     ApiError::unauthorized(message).with("code", json!("session_required"))
 }
 
+/// `axum::extract::Query` with the JSON `{error, code}` refusal the frontend reads.
+pub struct Query<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Query<T> {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Query(query)| Self(query))
+            .map_err(|rejection| ApiError::coded("invalid_query", rejection.body_text()))
+    }
+}
+
 pub struct JsonBody<T>(pub T);
 
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for JsonBody<T> {
@@ -230,6 +245,29 @@ mod tests {
             );
         }
         map
+    }
+
+    #[tokio::test]
+    async fn a_bad_query_string_is_a_json_400() {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            #[allow(dead_code)]
+            limit: u32,
+        }
+        let (mut parts, ()) = axum::http::Request::get("/x?limit=abc")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let Err(rejection) = Query::<Page>::from_request_parts(&mut parts, &()).await else {
+            panic!("limit=abc must be refused");
+        };
+        let res = rejection.into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(res.headers()["content-type"], "application/json");
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "invalid_query");
+        assert!(body["error"].is_string());
     }
 
     #[test]

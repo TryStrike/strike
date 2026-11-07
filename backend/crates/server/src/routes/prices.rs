@@ -3,8 +3,8 @@
 //! The aggregation, caching and framing live in `strike_core::prices`; this is
 //! the thin HTTP layer that reproduces the route's query handling and headers.
 
+use crate::http::Query;
 use axum::body::Bytes;
-use axum::extract::Query;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

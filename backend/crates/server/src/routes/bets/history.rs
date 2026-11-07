@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use axum::extract::Query;
+use crate::http::Query;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

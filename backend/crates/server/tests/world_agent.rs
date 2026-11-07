@@ -434,7 +434,7 @@ async fn a_yolo_start_needs_an_orb_human_and_one_fresh_approval_from_the_same_wo
     );
     assert_eq!(s.count("SELECT count(*) FROM agent_sessions"), 0);
 
-    s.idp.answer(503, json!({}));
+    s.idp.answer(400, json!({ "error": "invalid_grant" }));
     assert_eq!(s.settled(&first).await["status"], "failed");
     let (status, body, _) = s
         .post("/api/agent/start", &start(&bob, &terms, Some(&first)))

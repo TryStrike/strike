@@ -549,6 +549,21 @@ async fn a_bet_on_a_stale_feed_is_refused_before_money_moves() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retried_bet_gets_its_original_answer_even_when_the_feed_has_gone_stale() {
+    let (s, feed, _) = Server::start(100.0).await;
+    let body = classic("UP", 100.0);
+    let first = s.bet(body.clone()).await;
+
+    feed.lock().unwrap().down = true;
+    tokio::time::sleep(Duration::from_millis(3300)).await;
+    let retry = s.bet(body).await;
+
+    assert_eq!(retry["duplicate"], json!(true));
+    assert_eq!(retry["betId"], first["betId"]);
+    assert_eq!(s.audit_rows("bet_lock"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_forged_multiplier_is_refused() {
     let (s, _feed, _) = Server::start(100.0).await;
     let mut forged = classic("UP", 100.0);

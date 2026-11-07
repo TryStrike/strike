@@ -1,6 +1,6 @@
 //! `/api/session/ping`: presence, with its opportunistic housekeeping and its "ignore lookup errors and
 //! fall through" behaviour, which is what makes a malformed session id a resume
-//! instead of a 500.
+//! instead of a 500. An unreadable body is the caller's 400.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -72,7 +72,7 @@ fn parse_ping_body(raw: &Bytes) -> ApiResult<PingBody> {
     match serde_json::from_slice::<Value>(raw) {
         Ok(Value::Null) | Err(_) => {
             tracing::error!("session/ping request failed: unreadable body");
-            Err(ApiError::internal("Session update failed"))
+            Err(ApiError::bad_request("Request body must be a JSON object"))
         }
         Ok(body) => Ok(serde_json::from_value(body).unwrap_or_default()),
     }
@@ -236,7 +236,7 @@ async fn close(raw: Bytes) -> ApiResult<Json<Value>> {
         .filter(|body: &Value| !body.is_null())
         .ok_or_else(|| {
             tracing::error!("session/ping close failed: unreadable body");
-            ApiError::internal("Session close failed")
+            ApiError::bad_request("Request body must be a JSON object")
         })?;
 
     let session_id = body.get("session_id").and_then(Value::as_str).unwrap_or("");

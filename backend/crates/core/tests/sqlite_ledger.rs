@@ -10,7 +10,8 @@ use strike_core::db::Db;
 use strike_core::error::{ApiError, ApiResult};
 use strike_core::money::{to_fixed, MONEY_SCALE};
 use strike_core::withdrawals::{
-    claim_and_debit, finalize, park, queue, stuck, Claim, QueueRequest, Queued,
+    claim_and_debit, expire_pending, finalize, park, queue, refund, stuck, Claim, QueueRequest,
+    Queued,
 };
 
 const USER: &str = "0xaaaa000000000000000000000000000000000001";
@@ -980,7 +981,7 @@ async fn accept(db: Arc<Db>, id: i64, amount: &str, paid: Arc<AtomicI64>, fail: 
     if matches!(claim, Claim::Debited { .. }) {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         if fail {
-            assert!(park(&db, id, "NEEDS_RECONCILIATION:transfer".into())
+            assert!(park(&db, id, "NEEDS_RECONCILIATION:transfer".into(), None)
                 .await
                 .unwrap());
         } else {
@@ -1157,6 +1158,68 @@ async fn a_failed_transfer_parks_keeps_the_debit_and_cannot_pay_again() {
     assert_eq!(paid.load(Ordering::SeqCst), 0);
     assert_eq!(balance(&t.db, USER).await, units(70));
     assert!(!finalize(&t.db, 1, "0xlate".into(), None).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_transfer_keeps_its_tx_hash_for_the_operator() {
+    let t = TempDb::new();
+    deposit(&t.db, USER, "100", "0xdep1").await;
+    seed_requests(&t.db, 1, units(30)).await;
+    let claim = claim_and_debit(&t.db, 1, json!(USER), "30".into(), USDC.to_string());
+    assert!(matches!(claim.await.unwrap(), Claim::Debited { .. }));
+
+    assert!(park(&t.db, 1, "timeout".into(), Some("0xsent".into()))
+        .await
+        .unwrap());
+
+    let hash: Option<String> =
+        t.db.read(|c| {
+            Ok(c.query_row(
+                "SELECT tx_hash FROM withdrawal_requests WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(hash.as_deref(), Some("0xsent"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_broadcast_is_refunded_once_and_the_ledger_reconciles() {
+    let t = TempDb::new();
+    deposit(&t.db, USER, "100", "0xdep1").await;
+    seed_requests(&t.db, 1, units(30)).await;
+    let claim = claim_and_debit(&t.db, 1, json!(USER), "30".into(), USDC.to_string());
+    assert!(matches!(claim.await.unwrap(), Claim::Debited { .. }));
+    assert_eq!(balance(&t.db, USER).await, units(70));
+
+    let undo = || refund(&t.db, 1, json!(USER), "30".into(), USDC.to_string());
+    assert!(undo().await.unwrap());
+    assert!(!undo().await.unwrap(), "a second refund is a no-op");
+
+    assert_eq!(balance(&t.db, USER).await, units(100));
+    assert_eq!(request_count(&t.db, "rejected").await, 1);
+    assert_reconciles(&t.db, USER).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_pending_requests_are_rejected_and_nothing_else() {
+    let t = TempDb::new();
+    deposit(&t.db, USER, "100", "0xdep1").await;
+    seed_requests(&t.db, 2, units(10)).await;
+    let claim = claim_and_debit(&t.db, 2, json!(USER), "10".into(), USDC.to_string());
+    assert!(matches!(claim.await.unwrap(), Claim::Debited { .. }));
+    let later = strike_core::db::now_us() + 1_000_000;
+
+    assert!(expire_pending(&t.db, 0).await.unwrap().is_empty());
+    assert_eq!(expire_pending(&t.db, later).await.unwrap(), vec![1]);
+    assert_eq!(request_count(&t.db, "rejected").await, 1);
+    assert_eq!(
+        request_count(&t.db, "accepted").await,
+        1,
+        "debited rows stay"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1390,7 +1453,7 @@ async fn stuck_rows_are_reported_and_left_alone() {
     assert!(finalize(&t.db, ids[0], "0xpaid".to_string(), None)
         .await
         .unwrap());
-    assert!(park(&t.db, ids[1], "note".to_string()).await.unwrap());
+    assert!(park(&t.db, ids[1], "note".to_string(), None).await.unwrap());
     assert_eq!(stuck(&t.db, later).await.unwrap(), vec![ids[2]]);
 
     assert_eq!(request_count(&t.db, "accepted").await, 2);

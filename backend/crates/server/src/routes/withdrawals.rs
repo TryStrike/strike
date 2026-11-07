@@ -13,7 +13,7 @@
 //! signed intent (`signature`), `notes` and `decided_by` must never leave the
 //! server, and that must survive someone widening the SELECT later.
 
-use axum::extract::Query;
+use crate::http::Query;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

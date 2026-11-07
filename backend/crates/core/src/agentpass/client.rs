@@ -123,9 +123,10 @@ fn safe(code: &str) -> &str {
 }
 
 pub(super) async fn poll(cfg: &ApConfig, device_code: &str) -> Poll {
-    let unavailable = || Poll::End("failed", "World ID unavailable, try again".into());
+    // A hiccup (no discovery, timeout, 429, 5xx) is not an answer: keep polling
+    // until the step-up expires. Only World ID's own refusals end it.
     let Some(urls) = endpoints(cfg).await else {
-        return unavailable();
+        return Poll::Pending;
     };
     let sent = http()
         .post(&urls.token_endpoint)
@@ -137,7 +138,7 @@ pub(super) async fn poll(cfg: &ApConfig, device_code: &str) -> Poll {
         .send()
         .await;
     let Ok(res) = sent else {
-        return unavailable();
+        return Poll::Pending;
     };
     let status = res.status();
     let body: Value = res.json().await.unwrap_or(Value::Null);
@@ -147,8 +148,11 @@ pub(super) async fn poll(cfg: &ApConfig, device_code: &str) -> Poll {
             None => Poll::End("failed", "World ID sent no ID token".into()),
         };
     }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Poll::SlowDown;
+    }
     if status != reqwest::StatusCode::BAD_REQUEST && status != reqwest::StatusCode::UNAUTHORIZED {
-        return unavailable();
+        return Poll::Pending;
     }
     let error = body.get("error").and_then(Value::as_str).unwrap_or("");
     if !matches!(error, "authorization_pending" | "slow_down") {

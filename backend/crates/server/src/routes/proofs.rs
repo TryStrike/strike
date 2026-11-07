@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query};
+use crate::http::Query;
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

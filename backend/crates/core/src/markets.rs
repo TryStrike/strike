@@ -30,6 +30,13 @@ const USDT_BSC: &str = "0x55d398326f99059fF775485246999027B3197955";
 const DECIMALS: f64 = 1e18;
 pub const QUOTE_USD: u32 = 100;
 const TTL: Duration = Duration::from_secs(30);
+/// After a failed Yahoo fetch the last good snapshot is served and Yahoo is tried
+/// again this soon, instead of caching the failure for a full TTL.
+const RETRY: Duration = Duration::from_secs(5);
+/// A signed quote is never built on a snapshot older than this.
+const MAX_QUOTE_AGE_MS: i64 = 5 * 60 * 1000;
+/// The last EUR/USD rate still good enough when Yahoo is down.
+const MAX_RATE_AGE: Duration = Duration::from_secs(15 * 60);
 /// Per upstream call. With 6 quotes in flight, 17 wrappers finish in at most
 /// three rounds, so a refresh never holds the cache lock past ~9s.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -197,24 +204,37 @@ static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("markets reqwest client")
 });
 
+/// When the snapshot stops being fresh, and the snapshot: the last good one.
 type Cached = Option<(Instant, Arc<Markets>)>;
 static CACHE: Lazy<Mutex<Cached>> = Lazy::new(|| Mutex::new(None));
 
 /// Cached for 30s. The lock is held through a refresh, so concurrent callers
-/// share one upstream fetch instead of each firing 18 requests.
+/// share one upstream fetch instead of each firing 18 requests. A failed Yahoo
+/// fetch keeps the last good snapshot (its `at` shows the age) and retries soon.
 pub async fn snapshot() -> Arc<Markets> {
     let mut cache = CACHE.lock().await;
-    if let Some((at, markets)) = cache.as_ref() {
-        if at.elapsed() < TTL {
+    if let Some((until, markets)) = cache.as_ref() {
+        if Instant::now() < *until {
             return markets.clone();
         }
     }
-    let markets = Arc::new(fetch().await);
-    *cache = Some((Instant::now(), markets.clone()));
+    let (fresh, ok) = fetch().await;
+    let (markets, valid_for) = next_snapshot(cache.as_ref().map(|c| c.1.clone()), fresh, ok);
+    *cache = Some((Instant::now() + valid_for, markets.clone()));
     markets
 }
 
-async fn fetch() -> Markets {
+/// What to serve after a fetch, and for how long.
+fn next_snapshot(prev: Option<Arc<Markets>>, fresh: Markets, ok: bool) -> (Arc<Markets>, Duration) {
+    match (ok, prev) {
+        (true, _) => (Arc::new(fresh), TTL),
+        (false, Some(prev)) => (prev, RETRY),
+        (false, None) => (Arc::new(fresh), RETRY),
+    }
+}
+
+/// The snapshot, and whether Yahoo answered.
+async fn fetch() -> (Markets, bool) {
     let (spark, quotes) = tokio::join!(fetch_spark(), fetch_quotes());
     let now = now_millis();
     let session = spark
@@ -225,12 +245,13 @@ async fn fetch() -> Markets {
         .iter()
         .map(|ticker| build_asset(ticker, spark.as_ref(), &quotes))
         .collect();
-    Markets {
+    let markets = Markets {
         at: now,
         session,
         quote_usd: QUOTE_USD,
         assets,
-    }
+    };
+    (markets, spark.is_some())
 }
 
 async fn fetch_spark() -> Option<Value> {
@@ -535,7 +556,8 @@ pub fn sign_quote(key: &SigningKey, digest: &[u8; 32]) -> ApiResult<String> {
 type RateCache = Option<(Instant, f64)>;
 static EUR_USD: Lazy<Mutex<RateCache>> = Lazy::new(|| Mutex::new(None));
 
-/// USD per EUR from Yahoo (EURUSD=X), cached for a minute.
+/// USD per EUR from Yahoo (EURUSD=X), cached for a minute. When Yahoo fails the
+/// last rate is used for up to 15 minutes, so one hiccup does not stop EURC quotes.
 async fn eur_usd() -> ApiResult<f64> {
     let mut cache = EUR_USD.lock().await;
     if let Some((at, rate)) = *cache {
@@ -543,18 +565,39 @@ async fn eur_usd() -> ApiResult<f64> {
             return Ok(rate);
         }
     }
+    let fetched = fetch_eur_usd().await;
+    let last = cache.map(|(at, rate)| (at.elapsed(), rate));
+    if let Ok(rate) = fetched {
+        *cache = Some((Instant::now(), rate));
+    }
+    rate_or_last(last, fetched)
+}
+
+async fn fetch_eur_usd() -> ApiResult<f64> {
     let body: Value = HTTP
         .get("https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?range=1d&interval=5m")
         .send()
         .await?
         .json()
         .await?;
-    let rate = body["chart"]["result"][0]["meta"]["regularMarketPrice"]
+    body["chart"]["result"][0]["meta"]["regularMarketPrice"]
         .as_f64()
         .filter(|r| r.is_finite() && *r > 0.5 && *r < 2.0)
-        .ok_or_else(|| ApiError::unavailable("No EUR/USD rate right now"))?;
-    *cache = Some((Instant::now(), rate));
-    Ok(rate)
+        .ok_or_else(|| ApiError::unavailable("No EUR/USD rate right now"))
+}
+
+/// The fresh rate, else the last one if it is younger than [`MAX_RATE_AGE`].
+fn rate_or_last(last: Option<(Duration, f64)>, fetched: ApiResult<f64>) -> ApiResult<f64> {
+    match (fetched, last) {
+        (Ok(rate), _) => Ok(rate),
+        (Err(err), Some((age, rate))) if age < MAX_RATE_AGE => {
+            tracing::warn!(
+                "[markets] EUR/USD fetch failed ({err}), using the rate from {age:?} ago"
+            );
+            Ok(rate)
+        }
+        (Err(err), _) => Err(err),
+    }
 }
 
 /// The live price of `symbol` in `currency` (USDC or EURC) as a quote TestStockMarket
@@ -572,6 +615,11 @@ pub async fn signed_quote(symbol: &str, currency: &str) -> ApiResult<Value> {
         .and_then(|b| SigningKey::from_slice(&b).ok())
         .ok_or_else(|| ApiError::unavailable("ARC_TREASURY_SECRET_KEY is missing or invalid"))?;
     let snapshot = snapshot().await;
+    if now_millis() - snapshot.at > MAX_QUOTE_AGE_MS {
+        return Err(ApiError::unavailable(
+            "No live price for this stock right now",
+        ));
+    }
     let symbol = symbol.trim().to_uppercase();
     let asset = snapshot
         .assets
@@ -611,6 +659,44 @@ pub async fn signed_quote(symbol: &str, currency: &str) -> ApiResult<Value> {
         "chainId": cfg.arc_chain_id,
         "session": snapshot.session,
     }))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn markets(at: i64) -> Markets {
+        Markets {
+            at,
+            session: "open",
+            quote_usd: QUOTE_USD,
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_last_good_snapshot_and_retries_soon() {
+        let good = Arc::new(markets(1));
+        let (kept, valid_for) = next_snapshot(Some(good.clone()), markets(2), false);
+        assert!(Arc::ptr_eq(&kept, &good));
+        assert_eq!(valid_for, RETRY);
+
+        let (fresh, valid_for) = next_snapshot(Some(good), markets(3), true);
+        assert_eq!((fresh.at, valid_for), (3, TTL));
+        let (first, valid_for) = next_snapshot(None, markets(4), false);
+        assert_eq!((first.at, valid_for), (4, RETRY));
+    }
+
+    #[test]
+    fn a_failed_rate_fetch_uses_a_recent_rate_only() {
+        let err = || Err(ApiError::unavailable("down"));
+        let recent = Some((Duration::from_secs(120), 1.08));
+        assert_eq!(rate_or_last(recent, err()).unwrap(), 1.08);
+        assert_eq!(rate_or_last(recent, Ok(1.1)).unwrap(), 1.1);
+        let old = Some((MAX_RATE_AGE + Duration::from_secs(1), 1.08));
+        assert!(rate_or_last(old, err()).is_err());
+        assert!(rate_or_last(None, err()).is_err());
+    }
 }
 
 #[cfg(test)]

@@ -865,6 +865,9 @@ pub enum PayError<R> {
     Preflight(String),
     /// The commit step said no. Nothing was sent.
     Refused(R),
+    /// Committed, then the node refused the transaction outright. Nothing went
+    /// out and the nonce is free, so the commit can be undone.
+    NotSent(String),
     /// Committed, then a broadcast failed or its outcome is unknown. `sent` holds
     /// what did go out, and nothing here may be sent again.
     Send { sent: Vec<Sent>, error: String },
@@ -1033,6 +1036,9 @@ impl Treasury {
         for (nonce, (raw, amount)) in (first_nonce..).zip(&signed) {
             let (hash, failure) = match self.rpc.broadcast(raw).await {
                 Broadcast::Accepted(hash) => (hash, None),
+                Broadcast::Refused(message) if sent.is_empty() => {
+                    return Err(PayError::NotSent(message))
+                }
                 Broadcast::Refused(message) => {
                     return Err(PayError::Send {
                         sent,

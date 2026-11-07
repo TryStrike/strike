@@ -1,8 +1,8 @@
 //! Blitz and the market state the chart reads: `/api/market/state`,
 //! `/api/blitz/enter` and `/api/blitz/pass`. The rules live in `strike_core::blitz`.
 
+use crate::http::Query;
 use axum::body::Bytes;
-use axum::extract::Query;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};

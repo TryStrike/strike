@@ -149,6 +149,34 @@ async fn every_accepted_ping_carries_the_timing_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_garbled_ping_and_a_bad_query_are_json_400s() {
+    let s = start().await;
+    for body in ["not json", "null"] {
+        let res = s
+            .http
+            .post(format!("{}/api/session/ping", s.url))
+            .bearer_auth(SECRET)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+        let reply: Value = res.json().await.unwrap();
+        assert!(reply["error"].is_string(), "{reply}");
+    }
+
+    let res = s
+        .http
+        .get(format!("{}/api/markets/quote", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let reply: Value = res.json().await.unwrap();
+    assert_eq!(reply["code"], "invalid_query", "{reply}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_response_carries_the_security_headers() {
     let s = start().await;
     for path in ["/api/health", "/api/no-such-route"] {

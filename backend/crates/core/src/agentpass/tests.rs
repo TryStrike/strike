@@ -183,8 +183,6 @@ async fn every_world_error_ends_the_stepup_unapproved() {
         (400, json!({ "error": "access_denied" }), "denied"),
         (400, json!({ "error": "expired_token" }), "expired"),
         (400, json!({ "error": "invalid_grant" }), "failed"),
-        (503, json!({}), "failed"),
-        (429, json!({}), "failed"),
     ] {
         let key = format!("k:{expect}:{status}:{body}");
         let stepup = w.start("h1", &key).await;
@@ -202,6 +200,28 @@ async fn every_world_error_ends_the_stepup_unapproved() {
     );
     let done = w.outcome(&forged.id).await;
     assert_eq!(done.status, "failed");
+}
+
+#[tokio::test]
+async fn a_server_hiccup_is_still_pending_not_a_failure() {
+    let w = world().await;
+    let stepup = w.start("h1", "k:hiccup").await;
+    w.answer(503, json!({}));
+    w.answer(200, id_token(&w, "sub-5"));
+    let done = w.outcome(&stepup.id).await;
+    assert_eq!(done.status, "approved", "{:?}", done.reason);
+    assert!(w.fake.polls.lock().unwrap().len() >= 2);
+
+    w.answer(429, json!({}));
+    assert!(matches!(
+        client::poll(w.cfg, "secret-device-code").await,
+        client::Poll::SlowDown
+    ));
+    w.answer(502, json!({}));
+    assert!(matches!(
+        client::poll(w.cfg, "secret-device-code").await,
+        client::Poll::Pending
+    ));
 }
 
 #[tokio::test]

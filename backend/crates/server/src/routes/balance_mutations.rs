@@ -205,6 +205,18 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
     }
     let plan = ledger::bet_tail(head, body)?;
 
+    let client_request_id = ledger::sanitize_bet_request_id(body.get("betRequestId"));
+    if bets::is_truthy(body.get("betRequestId")) && client_request_id.is_none() {
+        tracing::warn!("[bet] rejected malformed betRequestId, deriving a server key");
+    }
+    // A retry of a bet that already landed gets its original answer, before the
+    // time cutoff, ceiling and balance checks that only apply to new bets.
+    if let Some(key) = &client_request_id {
+        if let Some(replay) = landed_bet(key, &plan.user_key, &plan.currency).await {
+            return replay;
+        }
+    }
+
     let stake = ledger::exact_amount(plan.amount)
         .ok_or_else(|| (400, ledger::error_body("Invalid bet amount")))?;
     let now = now_ms();
@@ -234,10 +246,6 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
         ledger::BetRows::Reject(rejection) => return Err(rejection),
     };
 
-    let client_request_id = ledger::sanitize_bet_request_id(body.get("betRequestId"));
-    if bets::is_truthy(body.get("betRequestId")) && client_request_id.is_none() {
-        tracing::warn!("[bet] rejected malformed betRequestId, deriving a server key");
-    }
     let bet_request_id = client_request_id.unwrap_or_else(|| {
         ledger::derived_bet_request_id(body.get("roundId"), &plan.user_key, now_ms())
     });
@@ -274,8 +282,33 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
         (503, ledger::error_body("Service unavailable"))
     })?;
 
+    bet_reply(&result, &ledger_user_key, &plan.currency, &bet_request_id)
+}
+
+/// The reply for `key` when that bet already went through for this wallet.
+async fn landed_bet(
+    key: &str,
+    user_key: &str,
+    currency: &str,
+) -> Option<Result<Value, ledger::Rejection>> {
+    let result = db::call_rpc("bet_replay", &[("p_idempotency_key", &Value::from(key))])
+        .await
+        .ok()?;
+    let owner = result.get("user_address").and_then(Value::as_str)?;
+    let landed = result.get("settlement_token").is_some_and(Value::is_string)
+        && address::canonical(owner) == address::canonical(user_key);
+    landed.then(|| bet_reply(&result, owner, currency, key))
+}
+
+/// Turns the ledger's answer for a bet into the reply, replays included.
+fn bet_reply(
+    result: &Value,
+    ledger_user_key: &str,
+    currency: &str,
+    bet_request_id: &str,
+) -> Result<Value, ledger::Rejection> {
     let round = result.get("round");
-    match ledger::bet_rpc_decision(&result, &ledger_user_key, &plan.currency) {
+    match ledger::bet_rpc_decision(result, ledger_user_key, currency) {
         ledger::BetRpcDecision::ReplayMint(mint) => {
             tracing::warn!("[bet] duplicate request replayed: {bet_request_id}");
             let token = mint_settlement(
@@ -285,7 +318,7 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
                 mint.max_payout,
             )?;
             Ok(ledger::bet_success_body(
-                new_balance_value(&result),
+                new_balance_value(result),
                 &mint.bet_id,
                 &token,
                 true,
@@ -297,7 +330,7 @@ async fn bet_run(body: &Value) -> Result<Value, ledger::Rejection> {
                 "[bet] duplicate request replayed with the stored token: {bet_request_id}"
             );
             Ok(ledger::bet_success_body(
-                new_balance_value(&result),
+                new_balance_value(result),
                 &bet_id,
                 &token,
                 true,
@@ -622,9 +655,21 @@ async fn withdraw(headers: HeaderMap, raw: Bytes) -> Response {
         Ok(Withdrawal::Queued { id, body }) => (id, body),
         Err(rejection) => return reply(rejection),
     };
-    let paid = super::payout::pay(id).await;
+    // Detached: a client hanging up must not drop the future between the queue
+    // and the payout or the cancel, which would leave the row `pending` for good.
+    let paid = tokio::spawn(async move {
+        let paid = super::payout::pay(id).await;
+        if !paid.status().is_success() {
+            super::payout::cancel_if_pending(id).await;
+        }
+        paid
+    })
+    .await
+    .unwrap_or_else(|panic| {
+        tracing::error!("[withdraw] id={id} payout task failed: {panic}");
+        reply(ledger::withdraw_insert_failed())
+    });
     if !paid.status().is_success() {
-        super::payout::cancel_if_pending(id).await;
         return paid;
     }
     let receipt: Value = match axum::body::to_bytes(paid.into_body(), 64 * 1024).await {

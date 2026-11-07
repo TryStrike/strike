@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
+use crate::http::Query;
 use axum::body::Bytes;
-use axum::extract::{Path, Query};
+use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};

@@ -11,7 +11,7 @@
 //! It is advisory only. The on-chain verifier behind the deposit route remains
 //! the authority, so an unreachable precheck must never block a deposit.
 
-use axum::extract::Query;
+use crate::http::Query;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

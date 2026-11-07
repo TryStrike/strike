@@ -343,10 +343,9 @@ async fn a_refused_send_leaves_its_nonce_free_and_is_not_retried() {
     let (chain, treasury) = start(1_000).await;
     chain.lock().unwrap().send_mode = SendMode::Refuse;
     let commits = Arc::default();
-    let Err(PayError::Send { sent, .. }) = pay(&treasury, pay_to(10), &commits).await else {
-        panic!("a refused send is a send failure");
+    let Err(PayError::NotSent(_)) = pay(&treasury, pay_to(10), &commits).await else {
+        panic!("a refused send is reported as not sent");
     };
-    assert!(sent.is_empty());
     assert_eq!(chain.lock().unwrap().broadcasts, 1);
 
     pay(&treasury, pay_to(10), &commits).await.unwrap();

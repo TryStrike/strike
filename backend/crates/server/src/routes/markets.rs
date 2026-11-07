@@ -1,6 +1,6 @@
 //! `/api/markets`: stock prices next to each wrapper token's buy quote.
 
-use axum::extract::Query;
+use crate::http::Query;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

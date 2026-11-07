@@ -13,7 +13,7 @@
 
 use std::convert::Infallible;
 
-use axum::extract::Query;
+use crate::http::Query;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

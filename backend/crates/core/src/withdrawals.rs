@@ -394,16 +394,73 @@ pub async fn finalize(
     .await
 }
 
-pub async fn park(db: &Db, id: i64, note: String) -> ApiResult<bool> {
+/// Parks an accepted row for an operator. `tx_hash` is the broadcast hash when
+/// there is one, so the transfer can be found on chain.
+pub async fn park(db: &Db, id: i64, note: String, tx_hash: Option<String>) -> ApiResult<bool> {
     db.write(move |conn| {
         let parked = conn
             .prepare_cached(
                 "UPDATE withdrawal_requests \
-                 SET status = 'paid_needs_reconciliation', notes = ?1, decided_at = ?2 \
-                 WHERE id = ?3 AND status = 'accepted'",
+                 SET status = 'paid_needs_reconciliation', notes = ?1, decided_at = ?2, \
+                     tx_hash = coalesce(?3, tx_hash) \
+                 WHERE id = ?4 AND status = 'accepted'",
             )?
-            .execute(params![note, now_us(), id])?;
+            .execute(params![note, now_us(), tx_hash, id])?;
         Ok(parked == 1)
+    })
+    .await
+}
+
+/// Undoes a claim whose transfer the node refused outright, so nothing went out:
+/// the row is rejected and the debit credited back in one commit. `false` when
+/// the row was not an unpaid accepted one or the credit was refused (a ban), and
+/// then nothing changed.
+pub async fn refund(
+    db: &Db,
+    id: i64,
+    ledger_address: Value,
+    amount: String,
+    currency: String,
+) -> ApiResult<bool> {
+    let amount = parse_decimal(&amount)?;
+    db.write(move |conn| {
+        let tx = conn.savepoint()?;
+        let rejected = tx
+            .prepare_cached(
+                "UPDATE withdrawal_requests \
+                 SET status = 'rejected', decided_at = ?1, decided_by = 'auto', \
+                     notes = 'refunded: transfer refused by the node' \
+                 WHERE id = ?2 AND status = 'accepted' AND tx_hash IS NULL",
+            )?
+            .execute(params![now_us(), id])?;
+        if rejected != 1 {
+            return Ok(false);
+        }
+        let credit =
+            rpc::credit_for_withdrawal_refund(&tx, ledger_address.as_str(), amount, &currency)?;
+        if credit["success"] != json!(true) {
+            return Ok(false);
+        }
+        tx.commit()?;
+        Ok(true)
+    })
+    .await
+}
+
+/// Rejects requests still `pending` past the cutoff with nothing paid, so one
+/// left behind by a crash stops counting against the caps. Returns their ids.
+pub async fn expire_pending(db: &Db, requested_before_us: i64) -> ApiResult<Vec<i64>> {
+    db.write(move |conn| {
+        let mut statement = conn.prepare_cached(
+            "UPDATE withdrawal_requests \
+             SET status = 'rejected', decided_at = ?1, decided_by = 'auto', \
+                 notes = 'expired while pending' \
+             WHERE status = 'pending' AND tx_hash IS NULL AND requested_at < ?2 RETURNING id",
+        )?;
+        let ids = statement
+            .query_map(params![now_us(), requested_before_us], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
     })
     .await
 }
@@ -431,7 +488,17 @@ pub async fn watch_stuck() {
     loop {
         every.tick().await;
         let found = match db().await {
-            Ok(database) => stuck(database, stuck_cutoff_us()).await,
+            Ok(database) => {
+                match expire_pending(database, stuck_cutoff_us()).await {
+                    Ok(ids) if ids.is_empty() => {}
+                    Ok(ids) => tracing::warn!(
+                        "[withdrawal] rejected {} requests left pending past the timeout: ids {ids:?}",
+                        ids.len()
+                    ),
+                    Err(err) => tracing::error!("[withdrawal] pending sweep failed: {err}"),
+                }
+                stuck(database, stuck_cutoff_us()).await
+            }
             Err(err) => Err(err),
         };
         match found {
