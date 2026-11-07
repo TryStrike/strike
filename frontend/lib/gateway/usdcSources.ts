@@ -29,6 +29,8 @@ export interface UsdcSources {
   wallet: Record<string, bigint | null>;
   gateway: Record<string, bigint>;
   fees: Record<string, bigint>;
+  /** True when any read failed, so an empty answer may just be a failed read. */
+  failed: boolean;
 }
 
 export type Funding =
@@ -70,6 +72,16 @@ export function planFunding(
     : null;
 }
 
+/** Why `planFunding` found nothing, in words a player can act on. */
+export function noFundingReason({ wallet, gateway, failed }: UsdcSources) {
+  const arc = wallet.arc ?? BigInt(0);
+  const inGateway = Object.values(gateway).some((n) => n > BigInt(0));
+  if (inGateway && arc < MINT_GAS)
+    return "Your USDC is in Gateway, but minting it needs a little USDC on Arc for gas (about 0.02)";
+  if (failed) return "Some balances could not be read, so this may be wrong";
+  return "Not enough USDC on any chain";
+}
+
 /** Everywhere this wallet holds USDC. Reads only while `active`, so a closed form costs nothing. */
 export function useUsdcSources(address: Address | undefined, active: boolean) {
   const config = useConfig();
@@ -101,6 +113,8 @@ export function useUsdcSources(address: Address | undefined, active: boolean) {
     ]).then(([wallet, gateway, fees]) => {
       if (cancelled) return;
       setSources({
+        failed:
+          wallet.some((w) => w == null) || gateway == null || fees == null,
         wallet: Object.fromEntries(
           GATEWAY_CHAINS.map((c, i) => [c.key, wallet[i]]),
         ),

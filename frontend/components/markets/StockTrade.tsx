@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   erc20Abi,
   formatUnits,
@@ -14,8 +14,17 @@ import {
 import { useAccount, useSwitchChain } from "wagmi";
 import { bridging } from "@/lib/bridge/bridging";
 import { recordTrade, tradeLock } from "@/lib/markets/marketData";
-import { spendToArc } from "@/lib/gateway/gateway";
-import { planFunding, useUsdcSources } from "@/lib/gateway/usdcSources";
+import {
+  GatewayMintError,
+  mintPending,
+  pendingMint,
+  spendToArc,
+} from "@/lib/gateway/gateway";
+import {
+  noFundingReason,
+  planFunding,
+  useUsdcSources,
+} from "@/lib/gateway/usdcSources";
 import { CircleNotch } from "@phosphor-icons/react";
 import { Modal } from "@/components/ui/Modal";
 import { Button, Segmented } from "@/components/ui/kit";
@@ -167,6 +176,36 @@ export function StockTrade({
     };
   }, [address, ticker, reads]);
 
+  // The market pays sells out of its own token balance, which can be empty (EURC is).
+  const [pool, setPool] = useState<{ key: string; bal: bigint } | null>(null);
+  const token = currency === "EURC" ? getArcConfig().eurc : getArcConfig().usdc;
+  useEffect(() => {
+    if (side !== "sell" || !MARKET) return;
+    let cancelled = false;
+    arcPublicClient()
+      .readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [MARKET],
+      })
+      .then((bal) => !cancelled && setPool({ key: `${currency}${reads}`, bal }))
+      .catch((err) => console.warn("[stock] pool read failed", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [side, token, currency, reads]);
+  const poolBal =
+    side === "sell" && pool?.key === `${currency}${reads}` ? pool.bal : null;
+
+  // A cancelled or unconfirmed Gateway mint leaves a signed attestation to finish.
+  const [mintKey, setMintKey] = useState(0);
+  const stuck = useMemo(
+    () => (address ? pendingMint(address as Address) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [address, mintKey],
+  );
+
   const usd = Number(amount);
   const valid = Number.isFinite(usd) && usd > 0;
   const buyingUsdc = side === "buy" && currency === "USDC";
@@ -179,6 +218,49 @@ export function StockTrade({
     buyingUsdc && sources && valid ? planFunding(need, sources) : undefined;
   const heldValue = held != null && price ? (Number(held) / 1e6) * price : null;
   const estShares = valid && price ? usd / price : 0;
+  const estPayout =
+    side === "sell" && valid ? Math.min(usd, heldValue ?? usd) : 0;
+  const poolShort =
+    poolBal != null && estPayout > 0 && estPayout > Number(poolBal) / 1e6;
+
+  const failText = (err: unknown) => {
+    const e = err as { shortMessage?: string; message?: string };
+    if (err instanceof GatewayMintError) return err.message;
+    return /rejected|denied/i.test(e.message ?? "")
+      ? "You cancelled in your wallet."
+      : (e.shortMessage ?? e.message ?? "Trade failed").split("\n")[0];
+  };
+
+  const finishMint = async () => {
+    if (!address || !connector || !stuck || tradeLock.get()) return;
+    tradeLock.set(true);
+    setError(null);
+    setDone(null);
+    setBusy("Finishing your Gateway transfer…");
+    try {
+      const arcId = getArcConfig().chainId;
+      if (chainId !== arcId) await switchChainAsync({ chainId: arcId });
+      const tx = await mintPending({
+        arcWallet: arcWalletClient(
+          (await connector.getProvider()) as EIP1193Provider,
+          address as Address,
+        ),
+        arcClient: arcPublicClient(),
+        pending: stuck,
+      });
+      setDone({
+        text: `Minted ${formatUnits(BigInt(stuck.amount), 6)} USDC to your wallet`,
+        tx,
+      });
+    } catch (err) {
+      setError(failText(err));
+    } finally {
+      tradeLock.set(false);
+      setBusy(null);
+      setMintKey((n) => n + 1);
+      refreshSources();
+    }
+  };
 
   const trade = async () => {
     if (!address || !connector || !valid) return;
@@ -249,8 +331,6 @@ export function StockTrade({
             `Only ${formatUnits(arrived, 6)} USDC reached Arc. It is safe in your wallet. Lower the amount and try again.`,
           );
       }
-      const token =
-        currency === "EURC" ? getArcConfig().eurc : getArcConfig().usdc;
       const units = parseUnits(amount, 6);
       if (side === "buy") {
         const allowance = await persist(() =>
@@ -304,6 +384,21 @@ export function StockTrade({
           : BigInt(0);
       if (side === "sell" && sharesIn <= BigInt(0))
         throw new Error(`You hold no ${ticker} to sell`);
+      if (side === "sell") {
+        const payout = (sharesIn * qPrice) / BigInt(1_000_000);
+        const poolNow = await persist(() =>
+          client.readContract({
+            address: token,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [MARKET],
+          }),
+        );
+        if (payout > poolNow)
+          throw new Error(
+            `The market only holds ${formatUnits(poolNow, 6)} ${currency}, less than the ${formatUnits(payout, 6)} this sale pays. Sell a smaller amount${currency === "EURC" ? " or in USDC" : ""}.`,
+          );
+      }
       setBusy("Confirm in your wallet…");
       const tx = await wallet.writeContract({
         address: MARKET,
@@ -361,15 +456,11 @@ export function StockTrade({
         price: Number(qPrice),
       });
     } catch (err) {
-      const e = err as { shortMessage?: string; message?: string };
-      setError(
-        /rejected|denied/i.test(e.message ?? "")
-          ? "You cancelled in your wallet."
-          : (e.shortMessage ?? e.message ?? "Trade failed").split("\n")[0],
-      );
+      setError(failText(err));
     } finally {
       tradeLock.set(false);
       setBusy(null);
+      setMintKey((n) => n + 1);
       refreshSources();
     }
   };
@@ -466,6 +557,47 @@ export function StockTrade({
         </p>
       )}
 
+      {poolShort && poolBal != null && (
+        <p role="alert" className="mt-2 font-jet text-[12px] text-down">
+          The market only holds {formatUnits(poolBal, 6)} {currency}, so a sale
+          this size cannot pay out.
+          {currency === "EURC"
+            ? " Sell in USDC instead."
+            : " Lower the amount."}
+        </p>
+      )}
+      {stuck && (
+        <div className="mt-3 rounded-2xl bg-surface px-3.5 py-2.5 text-[13px]">
+          <p className="text-muted">
+            An earlier Gateway transfer of{" "}
+            {formatUnits(BigInt(stuck.amount), 6)} USDC was signed but not
+            minted. Your funds are safe and can be minted now.
+          </p>
+          <Button
+            size="sm"
+            className="mt-2"
+            variant="secondary"
+            onClick={finishMint}
+            disabled={!!busy}
+          >
+            Finish transfer
+          </Button>
+        </div>
+      )}
+      {funding === null && sources && (
+        <p role="alert" className="mt-2 font-jet text-[12px] text-down">
+          {noFundingReason(sources)}.
+        </p>
+      )}
+      {sources?.failed && buyingUsdc && (
+        <p className="mt-2 font-jet text-[12px] text-subtle">
+          Some balances could not be read.{" "}
+          <button className="underline" onClick={refreshSources}>
+            Retry
+          </button>
+        </p>
+      )}
+
       {connector?.id === "coinbaseWalletSDK" && (
         <p role="alert" className="mt-4 text-[13px] text-down">
           Coinbase Wallet cannot load transaction signing on Arc testnet.
@@ -515,13 +647,14 @@ export function StockTrade({
           !!busy ||
           !price ||
           funding === null ||
+          poolShort ||
           (buyingUsdc && !sources)
         }
       >
         {!address
           ? "Connect a wallet to trade"
           : funding === null
-            ? "Not enough USDC on any chain"
+            ? "Not enough USDC on Arc"
             : side === "buy"
               ? `Buy ${SIGN[currency]}${amount || 0} of ${ticker}`
               : `Sell ${SIGN[currency]}${amount || 0} of ${ticker}`}

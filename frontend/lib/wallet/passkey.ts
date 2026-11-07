@@ -66,7 +66,13 @@ async function build(owner: StoredCredential, id: ChainId): Promise<Provider> {
 function current(): Promise<Provider> {
   credential ??= stored();
   if (!credential) throw new Error('No passkey on this device yet');
-  if (!providers.has(chainId)) providers.set(chainId, build(credential, chainId));
+  if (!providers.has(chainId)) {
+    const id = chainId;
+    const made = build(credential, id);
+    providers.set(id, made);
+    // A rejected build must not stay cached until reload.
+    made.catch(() => providers.get(id) === made && providers.delete(id));
+  }
   return providers.get(chainId)!;
 }
 

@@ -80,7 +80,34 @@ function YoloSwitch({
 export function AgentPanel() {
   const asset = useStore((s) => s.selectedAsset);
   const { address } = useAccount();
-  const houseBalance = useHouseBalance();
+  const selectedHouse = useHouseBalance();
+  const selectedCurrency = useStore((s) => s.selectedCurrency);
+  // The agent always trades USDC, so show the USDC balance even when EURC is selected.
+  const [usdcHouse, setUsdcHouse] = useState<{ addr: string; bal: number } | null>(
+    null,
+  );
+  const eurcSelected = (selectedCurrency || "").toUpperCase() === "EURC";
+  useEffect(() => {
+    if (!eurcSelected || !address) return;
+    let cancelled = false;
+    fetch(`/api/balance/${address}?currency=USDC`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then(
+        (d) =>
+          !cancelled &&
+          typeof d?.balance === "number" &&
+          setUsdcHouse({ addr: address, bal: d.balance }),
+      )
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [eurcSelected, address]);
+  const houseBalance = !eurcSelected
+    ? selectedHouse
+    : usdcHouse && usdcHouse.addr === address
+      ? usdcHouse.bal
+      : 0;
   const {
     session,
     checking,

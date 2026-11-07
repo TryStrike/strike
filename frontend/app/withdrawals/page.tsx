@@ -362,7 +362,8 @@ export default function WithdrawalsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, isConnected]);
 
-  const pollingActive = hasOpenWithdrawals(rows);
+  // A declined signature must not be re-prompted every few seconds; Authorize restarts it.
+  const pollingActive = hasOpenWithdrawals(rows) && !authIssue;
   useEffect(() => {
     if (!address || !pollingActive) return;
     const int = setInterval(() => void load('refresh'), POLL_INTERVAL_MS);
@@ -483,7 +484,7 @@ export default function WithdrawalsPage() {
             {loadError}
           </p>
         )}
-        {pollingActive && !authIssue && (
+        {pollingActive && (
           <p className="text-xs text-subtle flex items-center gap-2">
             <Clock3 className="w-3.5 h-3.5 text-down" />
             Live — you have requests still in progress. This list refreshes while they can change.

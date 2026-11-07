@@ -52,6 +52,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
   const address = useStore(state => state.address);
   const withdrawFunds = useStore(state => state.withdrawFunds);
   const houseBalance = useStore(state => state.houseBalance);
+  const houseBalanceKnown = useStore(state => state.houseBalanceKnown);
   const refreshWalletBalance = useStore(state => state.refreshWalletBalance);
   const isConnected = useStore(state => state.isConnected);
   const setSelectedCurrency = useStore(state => state.setSelectedCurrency);
@@ -182,7 +183,13 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       onClose();
     } catch (err: unknown) {
       if (err instanceof ApiFailure) setRetryAt(err.api.retryAfter ?? null);
-      const errorMessage = (err instanceof Error && err.message) || 'Failed to withdraw funds';
+      const raw = (err instanceof Error && err.message) || 'Failed to withdraw funds';
+      // The server caps lifetime withdrawals at 108% of lifetime deposits and does not expose the
+      // total, so Max cannot know it; explain the rule when it trips.
+      const left = raw.match(/You have (.+?)\. Please/i)?.[1];
+      const errorMessage = /exceeds your available limit/i.test(raw)
+        ? `Over your withdrawal limit. You can withdraw up to 108% of everything you have deposited, minus what you already took out.${left ? ` Left for you: ${left}.` : ''}`
+        : raw;
       console.error('Withdrawal error:', err);
       setError(errorMessage);
       toast.error(errorMessage);
@@ -206,6 +213,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
     >
       <p className="-mt-4 mb-6 text-[15px] text-muted">
         Paid automatically to your wallet on Arc. Up to 50 {asset} per request and 200 per day.
+        {' '}Lifetime withdrawals are capped at 108% of what you have deposited, so Max may be more than you can take out.
         {stepupOver != null && ` Over ${stepupOver} ${asset} needs a quick approval in World App.`}
       </p>
 
@@ -250,7 +258,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({ isOpen, onClose, o
       <dl className="mt-6 space-y-2 font-jet text-[13px]">
         <div className="flex justify-between">
           <dt className="text-subtle">Available</dt>
-          <dd>{houseBalance.toFixed(4)} {asset}</dd>
+          <dd>{houseBalanceKnown ? houseBalance.toFixed(4) : "--"} {asset}</dd>
         </div>
         <div className="flex justify-between">
           <dt className="text-subtle">Fee</dt>

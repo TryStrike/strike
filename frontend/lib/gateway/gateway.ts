@@ -4,11 +4,14 @@
  * names the player as the source depositor.
  */
 import {
+  erc20Abi,
+  formatUnits,
   pad,
   parseAbi,
   toHex,
   type Address,
   type Hex,
+  type PublicClient,
   type WalletClient,
 } from "viem";
 import { arbitrumSepolia, baseSepolia, sepolia } from "viem/chains";
@@ -56,13 +59,6 @@ export const GATEWAY_CHAINS: GatewayChain[] = [
   },
 ];
 const ARC = GATEWAY_CHAINS[0];
-
-/** Only what the flows need, so a client for any testnet chain fits. */
-type ReceiptClient = {
-  waitForTransactionReceipt: (args: {
-    hash: Hex;
-  }) => Promise<{ status: "success" | "reverted" }>;
-};
 
 const minterAbi = parseAbi([
   "function gatewayMint(bytes attestationPayload, bytes signature)",
@@ -204,14 +200,130 @@ export async function gatewayFees(
   return fees;
 }
 
+/** Thrown with a message that is safe to show as is: it says where the money is. */
+export class GatewayMintError extends Error {}
+
+/**
+ * Circle's signed attestation, kept until the mint lands. Once /transfer answers, the Gateway
+ * balance is spent, so losing this would strand the funds until Circle returns them.
+ */
+const PENDING_KEY = "strike.gateway.pendingMint";
+export interface PendingMint {
+  attestation: Hex;
+  signature: Hex;
+  recipient: Address;
+  /** USDC units (6 decimals) the mint pays out. */
+  amount: string;
+  createdAt: number;
+}
+export function pendingMint(recipient: Address): PendingMint | null {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    const p = raw ? (JSON.parse(raw) as PendingMint) : null;
+    return p?.attestation &&
+      p.signature &&
+      p.recipient?.toLowerCase() === recipient.toLowerCase()
+      ? p
+      : null;
+  } catch {
+    return null;
+  }
+}
+const savePending = (p: PendingMint) => {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {}
+};
+const clearPending = () => {
+  try {
+    localStorage.removeItem(PENDING_KEY);
+  } catch {}
+};
+
+const MINT_TIMEOUT_MS = 120_000;
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+/**
+ * Mints on Arc and waits. Arc's public RPC often refuses receipt reads (rate limit), so the mint
+ * counts as landed when the recipient's USDC rises by the amount (less the gas the mint costs),
+ * or the receipt shows up. Only a reverted receipt or a real timeout is reported as a failure.
+ */
+export async function mintPending(params: {
+  arcWallet: WalletClient;
+  arcClient: PublicClient;
+  pending: PendingMint;
+}): Promise<Hex> {
+  const { arcWallet, arcClient, pending } = params;
+  const amount = BigInt(pending.amount);
+  const readBalance = () =>
+    arcClient.readContract({
+      address: ARC.usdc,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [pending.recipient],
+    });
+  const before = await readBalance().catch(() => null);
+  const worth = `${formatUnits(amount, 6)} USDC`;
+
+  let hash: Hex;
+  try {
+    hash = await arcWallet.writeContract({
+      account: arcWallet.account!,
+      chain: arcWallet.chain,
+      address: GATEWAY_MINTER,
+      abi: minterAbi,
+      functionName: "gatewayMint",
+      args: [pending.attestation, pending.signature],
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message.split("\n")[0] : "";
+    throw new GatewayMintError(
+      `The mint was not sent (${reason}). Your funds are safe: the Gateway transfer already went through, and ${worth} is waiting to be minted on Arc. Press Finish transfer to try again.`,
+    );
+  }
+
+  // The mint also pays its own gas in USDC, so allow for that when watching the balance.
+  const gasSlack =
+    amount / BigInt(2) < BigInt(50_000) ? amount / BigInt(2) : BigInt(50_000);
+  const target = before == null ? null : before + amount - gasSlack;
+  const deadline = Date.now() + MINT_TIMEOUT_MS;
+  for (
+    let wait = 1_500;
+    Date.now() < deadline;
+    wait = Math.min(wait * 1.5, 6_000)
+  ) {
+    const receipt = await arcClient
+      .getTransactionReceipt({ hash })
+      .catch(() => null);
+    if (receipt?.status === "reverted") {
+      clearPending();
+      throw new GatewayMintError(
+        "The mint reverted onchain, so it did not pay out. If the Gateway transfer was not minted another way, the balance returns in about 10 minutes.",
+      );
+    }
+    if (receipt?.status === "success") break;
+    const now = target == null ? null : await readBalance().catch(() => null);
+    if (now != null && target != null && now >= target) break;
+    await sleep(wait);
+  }
+  if (Date.now() >= deadline) {
+    throw new GatewayMintError(
+      `The mint was sent but Arc has not confirmed it after 2 minutes. It may still land, so check your balance before trying again. Finish transfer reuses the same signed transfer and cannot spend it twice.`,
+    );
+  }
+  clearPending();
+  return hash;
+}
+
 /**
  * Signs a burn intent on `source`, gets Circle's attestation and mints on Arc into `recipient`.
  * `arcWallet` must be on Arc; it pays the mint's gas in USDC. Returns the mint tx hash.
+ * If the mint is cancelled or unconfirmed, the attestation stays saved (see `pendingMint`).
  */
 export async function spendToArc(params: {
   signer: WalletClient;
   arcWallet: WalletClient;
-  arcClient: ReceiptClient;
+  arcClient: PublicClient;
   source: GatewayChain;
   recipient: Address;
   amount: bigint;
@@ -252,22 +364,13 @@ export async function spendToArc(params: {
     );
   }
   onStep?.("mint");
-  try {
-    const hash = await arcWallet.writeContract({
-      account: arcWallet.account!,
-      chain: arcWallet.chain,
-      address: GATEWAY_MINTER,
-      abi: minterAbi,
-      functionName: "gatewayMint",
-      args: [body.attestation, body.signature],
-    });
-    const receipt = await arcClient.waitForTransactionReceipt({ hash });
-    if (receipt.status !== "success") throw new Error("the mint reverted");
-    return hash;
-  } catch (err) {
-    const reason = err instanceof Error ? err.message.split("\n")[0] : "";
-    throw new Error(
-      `The mint did not finish (${reason}). Your Gateway balance returns in about 10 minutes.`,
-    );
-  }
+  const pending: PendingMint = {
+    attestation: body.attestation,
+    signature: body.signature,
+    recipient,
+    amount: amount.toString(),
+    createdAt: Date.now(),
+  };
+  savePending(pending);
+  return mintPending({ arcWallet, arcClient, pending });
 }

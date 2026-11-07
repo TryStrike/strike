@@ -144,6 +144,42 @@ interface PreFlight {
 
 const verifications = new Map<string, VerificationRecord>();
 
+/** A signed transfer survives a reload here, so it can still be credited. */
+const PENDING_KEY = "strike.deposit.pending";
+interface PendingDeposit {
+  txHash: string;
+  amount: number;
+  address: string;
+  currency: ArcAsset;
+  createdAt: number;
+}
+const savePending = (p: PendingDeposit) => {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {}
+};
+const clearPending = (txHash?: string) => {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    if (!txHash || (raw && JSON.parse(raw).txHash === txHash))
+      localStorage.removeItem(PENDING_KEY);
+  } catch {}
+};
+const loadPending = (address: string): PendingDeposit | null => {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    const p = raw ? (JSON.parse(raw) as PendingDeposit) : null;
+    return p?.txHash &&
+      p.amount > 0 &&
+      (p.currency === "USDC" || p.currency === "EURC") &&
+      p.address?.toLowerCase() === address.toLowerCase()
+      ? p
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -244,6 +280,7 @@ async function runVerification(
           typeof body?.creditedAt === "string" ? body.creditedAt : undefined,
       };
       record.credit = credit;
+      clearPending(record.txHash);
       publish({
         kind: "credited",
         txHash: record.txHash,
@@ -289,6 +326,7 @@ async function runVerification(
       continue;
     }
 
+    clearPending(record.txHash);
     publish({
       kind: "failed",
       txHash: record.txHash,
@@ -350,7 +388,9 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   const asset: ArcAsset = resolveHouseLedgerCurrency({ selectedCurrency });
   const assetConfig = config.assets[asset];
   const quickAmounts = [1, 5, 10, 25];
-  const gasReserve = gasFee == null ? null : gasFee + GAS_BUFFER;
+  // Gas is paid in USDC, so it only comes out of a USDC amount.
+  const gasReserve =
+    asset !== "USDC" ? 0 : gasFee == null ? null : gasFee + GAS_BUFFER;
 
   const treasuryConfigured = isAddress(config.treasuryAddress || "");
 
@@ -596,10 +636,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({
 
   const handleMaxClick = async () => {
     if (walletBalance <= 0) return;
-    const reserve = (await estimateGasFee(walletBalance)) + GAS_BUFFER;
+    const reserve =
+      asset === "USDC" ? (await estimateGasFee(walletBalance)) + GAS_BUFFER : 0;
     const max = Math.max(0, walletBalance - reserve);
     if (max <= 0) {
-      setError(`Balance is too small to cover the ${asset} gas fee`);
+      setError(`Balance is too small to cover the gas fee`);
       return;
     }
     setAmount(Number(max.toFixed(assetConfig.decimals)).toString());
@@ -644,17 +685,18 @@ export const DepositModal: React.FC<DepositModalProps> = ({
       creditedAmount: number,
       walletAddress: string,
       credit?: ServerCredit,
+      currency: ArcAsset = asset,
     ) => {
       await Promise.all([
         fetchBalance(walletAddress),
         useStore.getState().refreshWalletBalance(),
       ]);
       toast.success(
-        `Successfully deposited ${creditedAmount.toFixed(4)} ${asset}! Balance updated.`,
+        `Successfully deposited ${creditedAmount.toFixed(4)} ${currency}! Balance updated.`,
       );
       onSuccess?.(creditedAmount, txHash, {
         txHash,
-        currency: asset,
+        currency,
         chain: config.name,
         explorerUrl: explorerTxUrl(txHash),
         ...(credit ?? {}),
@@ -666,6 +708,29 @@ export const DepositModal: React.FC<DepositModalProps> = ({
   );
 
   const isBusy = phase.kind === "signing" || phase.kind === "pending";
+
+  // After a reload, pick up a transfer that was signed but not yet credited.
+  const resumed = useRef<string | null>(null);
+  useEffect(() => {
+    if (!address || resumed.current === address) return;
+    const p = loadPending(address);
+    if (!p) return;
+    resumed.current = address;
+    submitted.current = {
+      txHash: p.txHash,
+      amount: p.amount,
+      userAddress: address,
+    };
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resumes a saved transfer once per wallet
+    startVerification(p.txHash, {
+      userAddress: address,
+      amount: p.amount,
+      currency: p.currency,
+      onCredited: (hash, credit) => {
+        void markCredited(hash, p.amount, address, credit, p.currency);
+      },
+    });
+  }, [address, startVerification, markCredited]);
 
   const handleDeposit = async () => {
     if (isBusy) return;
@@ -719,6 +784,13 @@ export const DepositModal: React.FC<DepositModalProps> = ({
         amount: depositAmount,
         userAddress: walletAddress,
       };
+      savePending({
+        txHash,
+        amount: depositAmount,
+        address: walletAddress,
+        currency: asset,
+        createdAt: Date.now(),
+      });
       startVerification(txHash, {
         userAddress: walletAddress,
         amount: depositAmount,
@@ -899,7 +971,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
             ? "unavailable"
             : feeState === "loading" || gasFee == null
               ? "checking…"
-              : `~${gasFee.toFixed(4)} ${asset}`,
+              : `~${gasFee.toFixed(4)} USDC`,
         )}
         {summaryRow(
           `Credited after ${getFeePercentLabel(userTier)} fee`,
