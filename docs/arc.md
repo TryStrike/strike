@@ -98,7 +98,14 @@ we pulled the vault out into its own template so other builders can drop it in: 
 
 ## built in Arc Studio
 
-Arc Studio was the starting point: [our Studio project](https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd) holds the contracts, their tests and the app, and the vault was deployed from Studio to Arc testnet (deploy tx above). from there we grew the app around those contracts: the Rust settlement server, the Arkiv and Swarm proof trail, and World ID
+the contracts went through [our Studio project](https://studio.arc.io/app/3466b6f3-8cdb-436f-a47b-2eb0d379c4dd). in Studio we:
+
+- wired the treasury into Studio's Contracts panel and set up Foundry for it
+- had Studio write the treasury's Foundry tests (caps, batch payouts, CCTP payouts, Merkle commits and proofs, pause, access control), 52 passing at the time, and they grew into [`contracts/test`](../contracts/test)
+- deployed the first version of the vault to Arc testnet from Studio: [`0xea76bc5a…9871`](https://explorer.testnet.arc.io/address/0xea76bc5a87114d8a6a85f4dfd6c48c5e688a9871), tx [`0x4175fd88…b4e2`](https://explorer.testnet.arc.io/tx/0x4175fd886d39000d8d2e1bf25cfcc4e092d2cae2c204717a1f6744d6c4b1b4e2)
+- ran the app in Studio's preview
+
+the live `StrikeTreasury` is the next version of that contract, deployed from the operator wallet. the first vault was swept and paused when we moved over ([`contracts/deployments/`](../contracts/deployments)). the Rust settlement server, the Arkiv and Swarm proof trail and World ID were built outside Studio
 
 ## run it
 
